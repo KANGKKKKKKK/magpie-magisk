@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2f3f5">
+<title>Magpie</title>
+<style>
+  :root {
+    --bg: #f2f3f5;
+    --card: #ffffff;
+    --text: #18191b;
+    --muted: #8b8f96;
+    --line: #e5e7ea;
+    --accent: #2f6fed;
+    --ok: #12b76a;
+    --err: #f04438;
+    --nav-h: 56px;
+    --mono: ui-monospace, "Roboto Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1012;
+      --card: #1a1c1f;
+      --text: #eceef1;
+      --muted: #8b9098;
+      --line: #2a2d32;
+      --accent: #5b91ff;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 600px;
+    margin-inline: auto;
+    overflow-x: hidden;
+  }
+
+  /* ---------- 页面容器 ---------- */
+  .page {
+    display: none;
+    padding: 10px 10px 10px;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  .page.active { display: block; }
+
+  /* ---------- 顶部状态条 ---------- */
+  .bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 13px; margin-bottom: 9px;
+    background: var(--card); border-radius: 12px;
+    border: 1px solid var(--line);
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); flex: 0 0 auto;
+  }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
+  .dot.off { background: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 14%, transparent); }
+  .bar-t { font-weight: 600; font-size: 14px; }
+  .bar-s { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* ---------- 卡片 ---------- */
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; margin-bottom: 9px; overflow: hidden;
+  }
+  .card-h {
+    display: flex; align-items: center; gap: 7px;
+    padding: 11px 13px 9px; font-size: 12px; font-weight: 700;
+    color: var(--muted); letter-spacing: .02em;
+  }
+  .dotmark {
+    width: 6px; height: 6px; border-radius: 2px; flex: 0 0 auto;
+    background: var(--accent);
+  }
+  .dotmark.b { background: #8b5cf6; }
+
+  /* ---------- 字段 ---------- */
+  .f {
+    padding: 9px 13px; border-top: 1px solid var(--line);
+    min-width: 0;
+  }
+  .f-k {
+    font-size: 11px; color: var(--muted);
+    margin-bottom: 4px;
+  }
+  /* 地址独占一行, 按钮在下一行靠右 —— 永远不会互相挤压 */
+  .f-v {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+    font: 12px/1.45 var(--mono);
+    color: var(--text);
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    -webkit-user-select: text; user-select: text;
+  }
+  .f-act {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    width: 100%;
+  }
+  .f-v.masked { color: var(--muted); font-family: inherit; letter-spacing: .05em; }
+
+  /* ---------- 图标按钮 ---------- */
+  .ic {
+    flex: 0 0 auto;
+    width: 34px; height: 34px;
+    min-width: 34px; min-height: 34px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 0; background: transparent; border-radius: 8px;
+    color: var(--accent);
+    font-size: 0; line-height: 0;
+    cursor: pointer; padding: 0;
+    transition: background .15s, color .15s, transform .08s;
+  }
+  /* 用 flex 居中, 不依赖 svg */
+  .ic > span { display: block; }
+  .ic:active { transform: scale(.9); }
+  .ic.ok { color: var(--ok); }
+
+  /* 文字按钮 (最可靠) */
+  .ic.txt {
+    width: auto !important;
+    min-width: 56px !important;
+    height: 32px; min-height: 32px;
+    padding: 0 12px;
+    font-size: 12px !important;
+    line-height: 30px;
+    font-weight: 600; font-family: inherit;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--accent) !important;
+    border-radius: 8px;
+    display: inline-block !important;
+  }
+  .ic.txt:active { transform: scale(.96); opacity: .75; }
+  .ic.txt.ok { color: var(--ok) !important; border-color: var(--ok); }
+
+  /* 底部导航图标 */
+  .ni {
+    display: block; position: relative;
+    width: 20px; height: 20px;
+  }
+  .ni-home::before {
+    content: ""; position: absolute;
+    left: 1px; top: 9px; width: 18px; height: 10px;
+    border: 2px solid currentColor; border-top: 0;
+    border-radius: 0 0 2px 2px;
+  }
+  .ni-home::after {
+    content: ""; position: absolute;
+    left: 4px; top: 3px; width: 12px; height: 12px;
+    border-left: 2px solid currentColor;
+    border-top: 2px solid currentColor;
+    transform: rotate(45deg);
+    background: transparent;
+  }
+  .ni-log::before {
+    content: ""; position: absolute;
+    left: 3px; top: 2px; width: 12px; height: 16px;
+    border: 2px solid currentColor; border-radius: 2px;
+  }
+  .ni-log::after {
+    content: ""; position: absolute;
+    left: 6px; top: 7px; width: 8px; height: 1.8px;
+    background: currentColor;
+    box-shadow: 0 4px 0 currentColor;
+  }
+
+  /* ---------- 主按钮 ---------- */
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    margin: 10px 13px 12px;
+    padding: 12px;
+    background: var(--accent); color: #fff;
+    border-radius: 10px;
+    font-size: 14px; font-weight: 600; text-decoration: none;
+    transition: opacity .15s, transform .08s;
+  }
+  .btn:active { transform: scale(.98); opacity: .82; }
+  .btn.disabled { background: var(--muted); pointer-events: none; opacity: .45; }
+
+  .tip { padding: 0 13px 12px; font-size: 11px; line-height: 1.55; color: var(--muted); }
+
+  /* ---------- 日志 ---------- */
+  pre#log {
+    margin: 0; padding: 11px 13px 13px;
+    font: 11px/1.5 var(--mono);
+    color: var(--muted);
+    max-height: 60vh; overflow: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+
+  /* ---------- 底部导航 ---------- */
+  .nav {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; height: var(--nav-h);
+    background: var(--card);
+    border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+    max-width: 600px; margin-inline: auto;
+    z-index: 50;
+  }
+  .nav-i {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+    border: 0; background: transparent; cursor: pointer;
+    color: var(--muted); font: inherit; font-size: 11px;
+    padding: 0; transition: color .15s;
+  }
+  .nav-i svg { display: block; }
+  .nav-i.on { color: var(--accent); font-weight: 600; }
+
+  /* 给底部导航留空间 */
+  .pages { padding-bottom: calc(var(--nav-h) + 8px + env(safe-area-inset-bottom)); }
+
+  /* ---------- toast ---------- */
+  #toast {
+    position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px);
+    transform: translateX(-50%) translateY(10px);
+    background: #24262b; color: #fff;
+    padding: 9px 15px; border-radius: 9px;
+    font-size: 13px; max-width: 86vw; text-align: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s;
+    z-index: 99;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div class="pages">
+
+  <!-- ========== 页面 1: 首页 ========== -->
+  <div class="page active" id="page-home">
+    <div class="bar">
+      <span class="dot" id="statusDot"></span>
+      <span class="bar-t" id="statusText">检测中</span>
+      <span class="bar-s" id="barSub"></span>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="dotmark a"></span>API 接入</div>
+
+      <div class="f">
+        <div class="f-k">接口地址（OpenAI 兼容）</div>
+        <div class="f-v" id="vApiUrl">—</div>
+        <div class="f-act"><button class="ic txt" data-copy="vApiUrl" title="复制">复制</button>
+        </div>
+      </div>
+
+      <div class="f">
+        <div class="f-k">API Key</div>
+        <div class="f-v masked" id="vApiKey">点击「显示」查看</div>
+        <div class="f-act" id="actApiKey">
+          <button class="ic txt" id="btnEyeApi" title="显示/隐藏">显示</button>
+          <button class="ic txt" data-copy="vApiKeyReal" title="复制">复制</button>
+        </div>
+      </div>
+
+      <div class="f" id="fLanApi" style="display:none">
+        <div class="f-k">局域网地址（其它设备用）</div>
+        <div class="f-v" id="vLanApi">—</div>
+        <div class="f-act"><button class="ic txt" data-copy="vLanApi" title="复制">复制</button>
+        </div>
+      </div>
+
+      <div class="tip" id="tipApi"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="dotmark b"></span>控制台</div>
+
+      <div class="f">
+        <div class="f-k">访问地址</div>
+        <div class="f-v" id="vWebUrl">—</div>
+        <div class="f-act"><button class="ic txt" data-copy="vWebUrl" title="复制">复制</button>
+        </div>
+      </div>
+
+      <div class="f">
+        <div class="f-k">访问密码</div>
+        <div class="f-v masked" id="vWebKey">点击「显示」查看</div>
+        <div class="f-act">
+          <button class="ic txt" id="btnEye" title="显示/隐藏">显示</button>
+          <button class="ic txt" data-copy="vWebKeyReal" title="复制">复制</button>
+        </div>
+      </div>
+
+      <a class="btn" id="btnOpen" href="#">一键打开（免输密码）</a>
+      <div class="tip">直接访问地址需输入密码，用按钮可免输入。</div>
+    </div>
+  </div>
+
+  <!-- ========== 页面 2: 日志 ========== -->
+  <div class="page" id="page-log">
+    <div class="card" style="margin-bottom:0">
+      <div class="card-h"><span class="dotmark c"></span>运行日志（最近 30 行）</div>
+      <pre id="log">加载中…</pre>
+    </div>
+  </div>
+
+</div>
+
+<!-- 底部导航 -->
+<div class="nav">
+  <button class="nav-i on" data-page="page-home">
+    <span class="ni ni-home"></span>首页
+  </button>
+  <button class="nav-i" data-page="page-log">
+    <span class="ni ni-log"></span>日志
+  </button>
+</div>
+
+<div id="toast"></div>
+<span id="vWebKeyReal" style="display:none"></span>
+<span id="vApiKeyReal" style="display:none"></span>
+
+<script>
+// 纯静态: 数据来自同目录 status.json (由 scripts/status.sh 生成)
+
+var webKey = '';
+var keyVisible = false;
+var apiKey = '';
+var apiKeyVisible = false;
+
+function $(id) { return document.getElementById(id); }
+
+function setText(id, val) {
+  var el = $(id);
+  if (el) el.textContent = (val === undefined || val === null || val === '') ? '—' : val;
+}
+
+function toast(msg) {
+  var el = $('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(function () { el.classList.remove('show'); }, 1600);
+}
+
+/* ---------- 页面切换 ---------- */
+var navBtns = document.querySelectorAll('.nav-i');
+for (var i = 0; i < navBtns.length; i++) {
+  navBtns[i].addEventListener('click', function () {
+    var target = this.getAttribute('data-page');
+    var pages = document.querySelectorAll('.page');
+    for (var j = 0; j < pages.length; j++) pages[j].classList.remove('active');
+    for (var k = 0; k < navBtns.length; k++) navBtns[k].classList.remove('on');
+    $(target).classList.add('active');
+    this.classList.add('on');
+    window.scrollTo(0, 0);
+  });
+}
+
+/* ---------- 复制 ---------- */
+function copyText(text) {
+  if (!text || text === '—') { toast('没有可复制内容'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(function () { toast('已复制'); })
+      .catch(function () { fallbackCopy(text); });
+  } else {
+    fallbackCopy(text);
+  }
+}
+
+function fallbackCopy(text) {
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); toast('已复制'); }
+  catch (e) { toast('复制失败，请长按选择'); }
+  document.body.removeChild(ta);
+}
+
+document.addEventListener('click', function (e) {
+  var t = e.target;
+  while (t && t !== document.body) {
+    if (t.classList && t.classList.contains('ic') && t.hasAttribute('data-copy')) break;
+    t = t.parentNode;
+  }
+  if (!t || t === document.body) return;
+
+  var el = $(t.getAttribute('data-copy'));
+  copyText(el ? (el.textContent || '') : '');
+  t.classList.add('ok');
+  setTimeout(function () { t.classList.remove('ok'); }, 1200);
+});
+
+/* ---------- 密码显隐 ---------- */
+var SVG_EYE_OPEN = '显示';
+var SVG_EYE_SHUT = '隐藏';
+
+$('btnEye').addEventListener('click', function () {
+  keyVisible = !keyVisible;
+  this.innerHTML = keyVisible ? SVG_EYE_SHUT : SVG_EYE_OPEN;
+  paintKey();
+});
+
+$('btnEyeApi').addEventListener('click', function () {
+  apiKeyVisible = !apiKeyVisible;
+  this.innerHTML = apiKeyVisible ? SVG_EYE_SHUT : SVG_EYE_OPEN;
+  paintApiKey();
+});
+
+function paintKey() {
+  var el = $('vWebKey');
+  if (keyVisible && webKey) {
+    el.textContent = webKey;
+    el.className = 'f-v';
+  } else {
+    el.textContent = webKey ? '点击「显示」查看' : '未获取到';
+    el.className = 'f-v masked';
+  }
+}
+
+function paintApiKey() {
+  var el = $('vApiKey');
+  if (apiKeyVisible && apiKey) {
+    el.textContent = apiKey;
+    el.className = 'f-v';
+  } else {
+    el.textContent = apiKey ? '点击「显示」查看' : '未创建';
+    el.className = 'f-v masked';
+  }
+}
+
+/* ---------- 数据加载 ---------- */
+function loadStatus() {
+  fetch('status.json?t=' + Date.now())
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(render)
+    .catch(function (e) {
+      $('statusText').textContent = '读取失败';
+      $('statusDot').className = 'dot';
+      $('log').textContent = '无法读取 status.json：' + e.message;
+    });
+}
+
+function render(d) {
+  var running = !!d.running;
+
+  $('statusDot').className = 'dot ' + (running ? 'on' : 'off');
+  $('statusText').textContent = running ? '运行中' : '已停止';
+  $('barSub').textContent = running ? ('PID ' + d.pid) : '';
+
+  // 首页
+  setText('vApiUrl', d.apiUrl);
+  setText('vLanApi', d.lanApiUrl);
+
+  // API Key: 没创建时不给假值, 直接说明怎么建
+  apiKey = d.apiKey || '';
+  $('vApiKeyReal').textContent = apiKey;
+  if (apiKey) {
+    $('actApiKey').style.display = '';
+  } else {
+    $('actApiKey').style.display = 'none';
+  }
+  paintApiKey();
+
+  $('fLanApi').style.display = (d.lanOpen && d.lanApiUrl) ? '' : 'none';
+  $('tipApi').textContent = !d.apiKey
+    ? '还没有 API Key。在终端执行 magpie gateway-key add 名字 创建。'
+    : (d.lanOpen
+      ? '局域网已开放：其它设备用「局域网地址」+ 同一个 Key。'
+      : '仅本机可用。需其它设备访问时把监听地址改成 0.0.0.0。');
+
+  setText('vWebUrl', d.webUrl);
+  webKey = d.webKey || '';
+  $('vWebKeyReal').textContent = webKey;
+  paintKey();
+
+  var b1 = $('btnOpen');
+  if (running && d.webUrlKey) {
+    b1.href = d.webUrlKey; b1.className = 'btn';
+  } else {
+    b1.href = '#'; b1.className = 'btn disabled';
+  }
+
+  loadLog();
+}
+
+function loadLog() {
+  fetch('lastlog.txt?t=' + Date.now())
+    .then(function (r) { return r.ok ? r.text() : Promise.reject('HTTP ' + r.status); })
+    .then(function (t) { $('log').textContent = t.trim() || '（暂无日志）'; })
+    .catch(function () { $('log').textContent = '（无法读取日志）'; });
+}
+
+loadStatus();
+setInterval(loadStatus, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# 运行时产物，不进仓库
+webroot/status.json
+webroot/lastlog.txt
+
+# 打包与临时文件
+*.zip
+*.tmp
+*.log
+data/
+run/
