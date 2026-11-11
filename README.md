@@ -1,12 +1,12 @@
 # Magpie AI 网关 · Android 模块
 
-把 magpie 变成 Android 上的常驻服务：开机自己起来，被杀自己回来，一个按钮启停。
+把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自己起来，被杀自己回来，一个按钮启停。
 
 > 本仓库只含模块脚本，**不含 magpie 本体**（arm64 二进制约 74 MB）。模块假定 magpie 已装在 `/data/adb/magpie`。
 
 ## 为什么需要它
 
-magpie 是为桌面写的 Go 程序。搬到手机上能跑，但会连续撞上四件事：
+[magpie](https://github.com/yetone/magpie) 是为桌面写的 Go 程序。搬到手机上能跑，但会连续撞上四件事：
 
 - **DNS 查不到**。Go 找不到 `/etc/resolv.conf`，退回查 `::1:53`，日志里刷 `connection refused`。
 - **HTTPS 全挂**。Go 只认 `/etc/ssl/certs/ca-certificates.crt` 这类固定路径，Android 上一个都没有——它的证书是 `/system/etc/security/cacerts/<hash>.0`，一证书一文件。
@@ -187,8 +187,13 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 
 更多细节见 [CHANGELOG.md](CHANGELOG.md)。
 
+## 贡献者与致谢
+
+- [DeepSeek](https://github.com/deepseek-ai) —— 本项目的脚本整理与文档撰写在 DeepSeek 模型辅助下完成。
+- [magpie](https://github.com/yetone/magpie) —— 本模块服务的对象，MIT 许可，官网 [usemagpie.ai](https://usemagpie.ai)。
+
 ## 许可证
 
-模块脚本以 [MIT](LICENSE) 发布。magpie 本体不在本仓库内，为第三方软件，版权归其作者所有。
+模块脚本以 [MIT](LICENSE) 发布。magpie 本体不在本仓库内，为[第三方软件](https://github.com/yetone/magpie)，版权归其作者所有。
 
 刷模块前请确认设备有可用的救砖手段。
