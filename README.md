@@ -4,14 +4,16 @@
 
 > 本仓库只含模块脚本，**不含 magpie 本体**（arm64 二进制约 74 MB）。模块假定 magpie 已装在 `/data/adb/magpie`。
 
+模块只负责「让 magpie 在手机上稳定运行」，magpie 自身怎么配 provider、怎么选模型，以 [magpie 的文档](https://github.com/yetone/magpie/tree/main/docs)为准，这里不重复。
+
 ## 目录
 
 - [为什么需要它](#为什么需要它)
 - [能做什么](#能做什么)
 - [快速开始](#快速开始)
 - [日常使用](#日常使用)
-- [客户端怎么接入](#客户端怎么接入)
-- [两个密钥，别搞混](#两个密钥别搞混)
+- [客户端要填什么](#客户端要填什么)
+- [两把密钥的区别](#两把密钥的区别)
 - [配置](#配置)
 - [工作原理](#工作原理)（折叠）
 - [文件结构](#文件结构)
@@ -81,14 +83,23 @@ su -c chmod 755 /data/adb/magpie/bin/magpie
 
 ```sh
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
-# running (PID 5523)
+# running (PID <pid>)
 ```
 
-管理器模块页里那行描述也应从「点 [执行] 启动或停止」变成「magpie 运行中 (v…)| 点 [执行] 停止」。
+管理器模块页里那行描述也应从「点 [执行] 启动或停止」变成「magpie 运行中 (v…) | 点 [执行] 停止」。
 
 **5. 打开面板**
 
-在管理器模块页点 **[执行]**，浏览器会自动打开带密钥的面板。之后也可以随时点该按钮打开（注意：服务在运行时点它等于停止）。
+服务已经在跑，**这时不要点 `[执行]`**——它此刻是停止按钮，点了会把服务关掉。直接取带密码的地址：
+
+```sh
+su -c cat /data/adb/magpie/run/web.url
+# http://127.0.0.1:3430/?k=<32 位十六进制访问密码>
+```
+
+把输出的地址粘进浏览器。访问密码固定在 `/data/adb/magpie/data/web.key`，重启不变。
+
+只有服务**已停止**时，点 `[执行]` 才会「启动并打开面板」。
 
 不想刷 zip 的手动放置方式：
 
@@ -102,16 +113,16 @@ chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 
 ### 执行按钮
 
-管理器模块页的 `[执行]` 是开关：
+管理器模块页的 `[执行]` 是开关，行为取决于当前状态：
 
-- 服务没跑 → 启动，然后直接打开带密钥的面板
-- 服务在跑 → 停止（写 `.user_stopped` 标记，看门狗不会马上又拉起来）
+- 服务没跑 → 启动，然后打开带密钥的面板
+- 服务在跑 → **停止**（写 `.user_stopped` 标记，看门狗不会马上又拉起来）
 
-所以「点一下打开面板」和「点一下停服务」是同一个按钮的两种结果，用之前先看描述那行。
+同一颗按钮，两种结果。用之前先看模块描述那行写的是「运行中」还是「已停止」。
 
 ### 网页面板
 
-默认 `http://127.0.0.1:3430/?k=<访问密码>`。密码固定在 `/data/adb/magpie/data/web.key`，重启不变；不带 `?k=` 返回 401。
+地址是 `http://127.0.0.1:3430/?k=<访问密码>`，密码见 `/data/adb/magpie/data/web.key`；不带 `?k=` 会返回 401。
 
 面板显示：运行状态与 PID、OpenAI 兼容接口地址、API Key、WebUI 访问地址与访问密码、日志尾。「局域网地址」只在开放局域网后才出现。
 
@@ -122,8 +133,8 @@ chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ### 命令行
 
 ```sh
-su -c magpie --version            # magpie 0.1.3620
-su -c magpie gateway-key list     # 列网关 key
+su -c magpie --version
+# 示例输出：magpie 0.1.3620   ← 版本随本体更新而变，别把这里当固定值
 ```
 
 `magpie` 由 `scripts/magpie-cli.sh` 包装，自动处理 Android 上缺的环境变量，用法与官方 CLI 一致。
@@ -139,70 +150,58 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 
 `start` 失败返回非 0，日志在 `/data/adb/magpie/run/magpie.log`。
 
-## 客户端怎么接入
+## 客户端要填什么
 
-magpie 对外是一个 **OpenAI 兼容** 的网关，客户端只需要两样东西，面板首页都给了：
+magpie 对外是个 OpenAI 兼容网关，客户端只需要两项，面板首页都摆着：
 
-| 要填的 | 面板上的名字 | 默认值 |
-| --- | --- | --- |
-| 接口地址（Base URL） | 接口地址（OpenAI 兼容） | `http://127.0.0.1:3425/v1` |
-| API Key | API Key | 用 `magpie gateway-key add` 建，形如 `sk-...` |
-
-网关 key 先建一个（名字随便取，只是给自己认）：
+| 要填的 | 值 |
+| --- | --- |
+| 接口地址（Base URL） | `http://127.0.0.1:3425/v1` |
+| API Key | 下面命令打印出来的密钥 |
 
 ```sh
 su -c magpie gateway-key add phone
-su -c magpie gateway-key list     # 看 id 和 key
+# sk-magpie-key-…      ← 只打印这一次，当场存好
 ```
-
-之后在任意支持「自定义 OpenAI 接口」的客户端里填这两项即可，例如：
 
 ```sh
-# curl
 curl http://127.0.0.1:3425/v1/chat/completions \
-  -H "Authorization: Bearer sk-xxxx" \
+  -H "Authorization: Bearer sk-magpie-key-…" \
   -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-chat","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"<provider>/<model>","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-```python
-# Python（openai 官方 SDK）
-from openai import OpenAI
+- 模型名写 `<provider>/<model>`，可用哪些看 `magpie providers` 或 `GET /v1/models`。
+- **前提是 magpie 里已经配好并启用了上游 provider**。只建网关 key 不会凭空变出模型；provider 怎么配以 [magpie 文档](https://github.com/yetone/magpie/tree/main/docs)为准。
+- 同一个手机上的客户端用 `127.0.0.1` 即可；别的设备要连，得先按 [配置](#配置) 开放局域网，再把地址换成手机的局域网 IP。
 
-client = OpenAI(base_url="http://127.0.0.1:3425/v1", api_key="sk-xxxx")
-print(client.chat.completions.create(
-    model="deepseek/deepseek-chat",
-    messages=[{"role": "user", "content": "hi"}],
-).choices[0].message.content)
-```
+Anthropic / Gemini 协议、模型分组、额度与并发限制这些都在 magpie 自己的文档里（[docs/integrating.md](https://github.com/yetone/magpie/blob/main/docs/integrating.md)），本模块不重复。
 
-要点：
+## 两把密钥的区别
 
-- **`/v1` 不能省**。填 `http://127.0.0.1:3425` 会 404。
-- **模型名要带供应商前缀**，写 `<provider>/<model>`。上面的 `deepseek/deepseek-chat` 只是格式示例，实际能用哪些用 `magpie providers` 看（会列出每个供应商的 id 与模型数）；某把 key 能否用某个模型由 `magpie gateway-key models <id>` 控制。
-- **`127.0.0.1` 只对本机有效**。同一个手机上的 App 能直接用；电脑、平板等其它设备要连，得先按 [配置](#配置) 把监听改成 `0.0.0.0`，再把地址换成手机的局域网 IP（面板里的「局域网地址」），例如 `http://192.168.1.100:3425/v1`。
-
-## 两个密钥，别搞混
-
-模块里有**两把完全不同的密钥**，用途和影响范围都不一样：
+模块里有**两把完全不同的密钥**：
 
 |  | 网关 API Key | 面板访问密码 |
 | --- | --- | --- |
-| 长什么样 | `sk-` 开头 | 32 位十六进制 |
-| 存哪 | `data/.config/magpie/caller-keys.json` | `/data/adb/magpie/data/web.key` |
-| 谁用 | 客户端调用 `/v1` 时 | 浏览器打开面板时（URL 里的 `?k=`） |
+| 长什么样 | 默认生成的形如 `sk-magpie-key-…`；用 `--key` 自填的格式随意 | 32 位十六进制 |
+| 存哪 | `data/.config/magpie/caller-keys.json`（只存掩码展示，明文仅创建时打印一次） | `/data/adb/magpie/data/web.key` |
+| 谁用 | 客户端调 `/v1` | 浏览器开面板（URL 里的 `?k=`） |
 | 面板上叫 | API Key | 访问密码 |
-| 怎么建 | `magpie gateway-key add <名>` | 首次启动自动生成，固定不变 |
-| 作用 | 决定**谁能调用模型**、能用哪些模型、多少额度 | 决定**谁能看见面板**，包括面板上显示的 API Key |
+| 怎么来 | `magpie gateway-key add <名>`，或 `add <名> --key <值>` 用自己的 | 首次启动自动生成，固定不变 |
+| 作用 | 决定**谁能调用**、能用哪些模型与账号、多少额度 | 决定**谁能看见面板** |
 
-关键一点：**面板本身会明文显示网关 API Key**。所以访问密码泄露的后果不只是「别人看到你的运行状态」，而是「别人拿到你的 API Key，然后随便调你的模型」。想把两个都当敏感信息对待，不亏。
+`magpie gateway-key list` **不显示完整密钥**，只给 ID、状态和掩码（`sk-magpie-key-…4ff242`）。密钥只在 `add` 或 `rotate` 时打印一次，丢了就用 `rotate <id>` 换一个。
 
-开放局域网后，暴露的范围是：
+**本机回环访问不校验密钥。** magpie 官方文档的原话是「On this machine the gateway takes any key」，实测不带 `Authorization` 头也能调 `/v1/models`。所以「有没有 key」不是本机的安全边界，别拿它当。
 
-- `MAGPIE_ADDR` 改成 `0.0.0.0:3425` → **任何人**只要能连上你的手机，就能用 `<任意 key>` 调 `/v1`；没有 key 会被拒，但网关本身可见可探测。
-- `MAGPIE_WEB_ADDR` 改成 `0.0.0.0:3430` → 面板暴露。不知道 `?k=` 会看到 401，但**在面板上点「显示」就能读出 API Key** 一旦密码被猜到或从别处泄露。
+面板会明文显示网关 API Key，因此访问密码泄露的后果不只是「看到运行状态」，而是「**可能拿到那把 API Key，并按它的权限调用模型**」——能调哪些模型、账号、额度仍由那把 key 的配置决定。
 
-所以顺序建议是：**先建好网关 key，再开局域网**；只在本机用就保持默认的 `127.0.0.1`。不确定的话，用 `ss -ltnp | grep -E '3425|3430'` 看实际监听地址，别只看配置。
+开放局域网后，暴露范围是：
+
+- `MAGPIE_ADDR=0.0.0.0:3425` → 网关对局域网可见。**从别的设备访问必须带一把已启用的网关 key**，随便填字符串会被拒；但网关本身可被探测。
+- `MAGPIE_WEB_ADDR=0.0.0.0:3430` → 面板暴露，不知道 `?k=` 会 401；密码一旦泄露，对方能打开面板并读到上面显示的 API Key。
+
+顺序建议：**先建好网关 key，再开局域网**；只在本机用就保持默认的 `127.0.0.1`。不确定的话用 `ss -ltnp | grep -E '3425|3430'` 看实际监听地址，别只看配置。
 
 ## 配置
 
@@ -238,7 +237,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 - **DNS 不占 53 端口**。用 Go 官方的 `DNS_LOCAL_HOSTNAMES` 直连公网 DNS，不启动本地 dnsmasq，因此不会和系统热点的 dnsmasq 抢端口——这是 v0.2 踩过的坑。
 - **CA 证书自己更新**。给系统证书目录算指纹（文件数 + 目录 mtime，`/system/etc/security/cacerts` 与 APEX 那份一起算），存在 `ca-bundle.crt.stamp`；启动服务和调用 `magpie` 命令时比对，不一致就重建。先写临时文件、校验有证书才原子替换，失败保留旧包继续用。
 
-  Go 只认 `/etc/ssl/certs/ca-certificates.crt` 这类桌面路径，Android 全都没有，所以必须显式给一个 `SSL_CERT_FILE`。信任范围就是系统本来那些根证书：没有额外安装任何证书，没有中间人，也没有关掉校验。
+  信任范围就是系统本来那些根证书：没有额外安装任何证书，没有中间人，也没有关掉校验。
 
 </details>
 
@@ -269,6 +268,7 @@ magpie-magisk/
 ```
 /data/adb/magpie/run/magpie.log        服务日志
 /data/adb/magpie/run/watchdog.log      看门狗日志
+/data/adb/magpie/run/web.url           带密码的面板地址
 /data/adb/magpie/run/.user_stopped     用户主动停止的标记
 /data/adb/magpie/run/magpie.pid        PID 文件
 /data/adb/magpie/data/certs/           CA 证书包与指纹
@@ -281,9 +281,11 @@ webroot/lastlog.txt                    面板日志尾（权限 600）
 | 现象 | 处理 |
 | --- | --- |
 | 启动失败，日志说端口占用 | 上次进程没退干净，`pidof magpie` 确认后 kill，再 `start` |
-| 打开面板是 401 | 链接少了 `?k=`，从管理器点 `[执行]` 打开，或读 `/data/adb/magpie/data/web.key` |
+| 打开面板是 401 | 链接少了 `?k=`，从 `/data/adb/magpie/run/web.url` 取完整地址 |
+| 点 `[执行]` 后面板没打开 | 服务当时在跑，按钮执行的是停止 |
 | 客户端 404 | 接口地址漏了 `/v1` |
-| 客户端 401 | 用了面板密码而不是网关 key，参见[两个密钥](#两个密钥别搞混) |
+| 客户端 401 | 从别的设备访问时，key 必须是一把已启用的网关 key |
+| 客户端报模型不存在 | 该模型没在 magpie 里启用，或那把 key 的 models 限制不含它 |
 | 面板数据一动不动 | 属预期：读的是启停那一刻的快照 |
 | 局域网连不上 | 改成 `0.0.0.0:<端口>` 后重启服务，并用 `ss -ltnp` 确认真的在监听 |
 | HTTPS 报证书错误 | 删掉 `/data/adb/magpie/data/certs/ca-bundle.crt*` 再重启，会自动重建 |
