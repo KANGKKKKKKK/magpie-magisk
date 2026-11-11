@@ -1,24 +1,32 @@
 # Magpie AI 网关 · Android 模块
 
-把 magpie 模型网关跑成 Android 上的常驻服务：开机自启、进程守护、WebUI 面板、CA 证书自动更新。
+让 magpie 在 Android 上像系统服务一样待着：开机自己起来，被杀自己回来，一个按钮启停，命令行随叫随到。
 
-> **本仓库只包含模块脚本，不含 magpie 本体**（arm64 二进制约 74 MB）。模块假定 magpie 已经装在 `/data/adb/magpie`。
+> 本仓库只含模块脚本，**不含 magpie 本体**（arm64 二进制约 74 MB）。模块假定 magpie 已装在 `/data/adb/magpie`。
 
-作者：可樂
+## 背景：magpie 在 Android 上缺什么
 
-## 功能
+magpie 是为桌面写的 Go 程序。搬到手机上它能跑起来，但会连续撞上四件事：
+
+- **DNS 查不到**。Go 找不到 `/etc/resolv.conf`，退回查 `::1:53`，日志里是 `connection refused`。
+- **HTTPS 全挂**。Go 只认 `/etc/ssl/certs/ca-certificates.crt` 这类固定路径，Android 上一个都没有——它的证书是 `/system/etc/security/cacerts/<hash>.0`，一证书一文件。
+- **开机不自启**。Android 没有 systemd，重启之后得手动起一次。
+- **被杀就没了**。清理类 App、系统内存回收、用户「一键清理」，都能直接把它 kill 掉，而它自己不会回来。对下游客户端来说，这等于出口断了。
+
+这个模块就是补上这四件事，外加一套能看得见状态、能一键收拾干净的周边。
+
+## 能力一览
 
 | 能力 | 说明 |
 | --- | --- |
-| 开机自启 | `service.sh` 等 `sys.boot_completed` 后拉起，不阻塞开机流程 |
-| 进程守护 | 20 秒巡检，被杀或被系统回收后自动重新拉起；用户主动停止时不会强行恢复 |
-| 一键启停 | 管理器里点 `[执行]`：未运行则启动并打开 WebUI，已在运行则停止 |
-| 状态面板 | 生成 `webroot/status.json` 与 `lastlog.txt`，供模块 WebUI 直接读取 |
-| 状态描述 | 管理器列表里的模块描述实时显示「运行中 / 已停止」和 magpie 版本号 |
-| 命令行 | `magpie` 命令自动注入 PATH，并补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`、上游 DNS |
-| CA 证书 | 合并系统根证书供静态编译的 Go 使用，系统 CA 变化时自动重建 |
-| 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份，不会无限堆积 |
-| 彻底卸载 | 停服务、收掉守护进程、清 PATH 链接、删除整个数据目录 |
+| 开机自启 | 等 `sys.boot_completed` 后拉起，不阻塞开机流程 |
+| 进程守护 | 20 秒巡检，被杀或回收后自动拉回；用户主动停止时不强行恢复 |
+| 一键启停 | 管理器点 `[执行]`：没跑就启动并打开 WebUI，在跑就停止 |
+| 状态可见 | 管理器描述实时显示「运行中 / 已停止」+ magpie 版本号；面板读取 `status.json` 与日志尾 |
+| 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`、上游 DNS |
+| CA 证书 | 合并系统根证书供静态 Go 使用，系统 CA 变化时自动重建 |
+| 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份，不会撑爆存储 |
+| 彻底卸载 | 停服务、收掉守护进程、清 PATH 链接、删整个数据目录，并复查残留 |
 
 ## 环境要求
 
@@ -36,7 +44,7 @@
 2. 从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载 `magpie-v0.5.zip`。
 3. 管理器 → 模块 → 从本地安装 → 选 zip → 重启。
 
-刷入时 `customize.sh` 会设置好权限，并检查 magpie 本体是否存在；缺失只会提示，不会中断安装。
+刷入时 `customize.sh` 会设置好权限，并检查 magpie 本体是否存在；缺失只提示，不中断安装。
 
 ### 方式二：手动放置
 
@@ -107,7 +115,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ```
 magpie-magisk/
-├── module.prop                       模块信息（名字、版本、作者、描述）
+├── module.prop                       模块信息（名字、版本、描述）
 ├── customize.sh                      刷入时执行：设权限、查本体
 ├── service.sh                        开机自启 + 看门狗
 ├── action.sh                         管理器 [执行] 按钮
@@ -142,10 +150,10 @@ webroot/lastlog.txt                    面板日志尾（权限 600）
 - **`action.sh`**：读 PID 判断当前状态，停止后等进程真的退出再报结果，启动后等端口就绪再开网页；两条路径都刷新模块描述。
 - **`scripts/magpie.service`**：真正的服务控制。启动前清理 v0.2 遗留的 dnsmasq、注入环境变量、拉起 `magpie serve --web=<addr>`、写入 PID 与 WebUI 链接。
 
-两个细节：
+两个值得说的细节：
 
 - **DNS 不占 53 端口**。静态 Go 在 Android 上没有 `/etc/resolv.conf`，会退回查 `::1:53`。本模块用 Go 官方的 `DNS_LOCAL_HOSTNAMES` 直连公网 DNS，不启动本地 dnsmasq，因此不会和系统热点的 dnsmasq 抢端口。
-- **CA 证书会自己更新**。给系统证书目录算指纹（文件数 + 目录 mtime，`/system/etc/security/cacerts` 与 APEX 那份一起算），存在 `ca-bundle.crt.stamp`；启动服务和调用 `magpie` 命令时比对，不一致就重建。重建先写临时文件、校验有证书才原子替换，失败则保留旧包。
+- **CA 证书会自己更新**。给系统证书目录算指纹（文件数 + 目录 mtime，`/system/etc/security/cacerts` 与 APEX 那份一起算），存在 `ca-bundle.crt.stamp`；启动服务和调用 `magpie` 命令时比对，不一致就重建。重建先写临时文件、校验有证书才原子替换，失败则保留旧包继续用。信任范围就是系统本来那些根证书，没有额外安装任何证书，也没关校验。
 
 ## 排障
 
@@ -169,7 +177,8 @@ webroot/lastlog.txt                    面板日志尾（权限 600）
 
 见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 说明
+## 许可证
 
-- 本仓库的脚本按现状提供，不附带任何担保；刷模块前请自行确认设备有可用的救砖手段。
-- magpie 本体是第三方软件，版权归其作者所有，本仓库不再分发。
+本仓库的模块脚本以 [MIT](LICENSE) 发布。
+
+magpie 本体不在本仓库内，为第三方软件，版权归其作者所有。刷模块前请自行确认设备有可用的救砖手段。
