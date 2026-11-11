@@ -33,7 +33,7 @@
 ### 方式一：刷入 zip
 
 1. 准备 magpie 本体，放到 `/data/adb/magpie/bin/magpie` 并 `chmod 755`。
-2. 从 [Releases](../../releases) 下载 `magpie-v0.5.zip`。
+2. 从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载 `magpie-v0.5.zip`。
 3. 管理器 → 模块 → 从本地安装 → 选 zip → 重启。
 
 刷入时 `customize.sh` 会设置好权限，并检查 magpie 本体是否存在；缺失只会提示，不会中断安装。
