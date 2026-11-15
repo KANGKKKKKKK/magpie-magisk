@@ -71,23 +71,31 @@ if [ "$RUNNING" = "1" ]; then
   [ -n "$RSS_KB" ] && MEM="$((RSS_KB / 1024)) MB"
 fi
 
-# 局域网 IP：排除回环、链路本地和 mihomo 的 fake-ip 段，
-# 规则与 magpie.service 的 lan_ip() 一致。
+# 局域网 IP：排除回环、链路本地、mihomo 的 fake-ip 段（198.18.0.0/15）
+# 和运营商级 NAT（100.64.0.0/10），规则与 magpie.service 的 lan_ip() 一致。
 is_usable_lan_ip() {
   case "$1" in
     ''|0.0.0.0|127.*|169.254.*|198.18.*|198.19.*) return 1 ;;
+    100.*)
+      _o2=${1#100.}; _o2=${_o2%%.*}
+      [ "$_o2" -ge 64 ] 2>/dev/null && [ "$_o2" -le 127 ] 2>/dev/null && return 1
+      ;;
   esac
   return 0
 }
 
 lan_ip() {
-  for _if in wlan0 wlan1 ccmni0 ccmni1; do
+  # 优先 WiFi / 热点 / USB，再退回其它网卡；与 magpie.service 一致
+  for _if in wlan0 wlan1 ap0 usb0 rndis0 eth0; do
     for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
       is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
     done
   done
-  for _a in $(ip -4 -o addr show 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
-    is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
+  for _if in $(ip -4 -o addr show 2>/dev/null | sed -n 's/^[0-9]*: \([^ ]*\) .*/\1/p'); do
+    case "$_if" in lo|ccmni*|rmnet*|clat*) continue ;; esac
+    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
+      is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
+    done
   done
   return 1
 }
