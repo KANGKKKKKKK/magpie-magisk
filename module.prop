@@ -1,7 +1,7 @@
 id=magpie
 name=Magpie AI 网关
-version=v0.7
-versionCode=1007
+version=v0.7.1
+versionCode=1008
 author=KANGKKKKKKK
 description=Magpie AI 网关常驻服务 | 点 [执行] 启动或停止
 updateJson=https://raw.githubusercontent.com/KANGKKKKKKK/magpie-magisk/main/update.json

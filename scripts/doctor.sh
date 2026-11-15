@@ -22,6 +22,16 @@ ok()   { OK=$((OK + 1));    echo "  ✓ $1"; }
 bad()  { BAD=$((BAD + 1));  echo "  ✗ $1"; [ -n "$2" ] && echo "      → $2"; }
 warn() { WARN=$((WARN + 1)); echo "  ! $1"; [ -n "$2" ] && echo "      → $2"; }
 
+# 进程识别与局域网地址，和运行期脚本共用同一份实现
+_NETLIB="$MODDIR/scripts/lib.sh"
+if [ -f "$_NETLIB" ]; then
+  . "$_NETLIB"
+else
+  magpie_main_pid() { pidof magpie 2>/dev/null | tr ' ' '\n' | head -1; }
+  magpie_all_pids() { pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'; }
+  lan_ip() { return 1; }
+fi
+
 # 取 HTTP 状态码；连不上则输出空
 http_code() {
   wget -S -O /dev/null -T "${2:-5}" "$1" 2>&1 \
@@ -41,7 +51,7 @@ if [ -x "$magpie_path/bin/magpie" ]; then
 else
   bad "找不到可执行的 $magpie_path/bin/magpie" "先装好 magpie 本体，本模块不含本体"
 fi
-PID=$(pidof magpie 2>/dev/null | tr ' ' '\n' | head -1)
+PID=$(magpie_main_pid 2>/dev/null)
 if [ -n "$PID" ]; then
   ok "服务在运行（PID $PID）"
   _oom=$(cat "/proc/$PID/oom_score_adj" 2>/dev/null)
@@ -116,12 +126,13 @@ case "$MAGPIE_ADDR" in
     ok "网关只监听本机，局域网不可达" ;;
   *)
     warn "网关已对局域网开放"
-    _lan=$(cat "$magpie_path/run/lan.url" 2>/dev/null)
+    # 实时算，不读 run/lan.url —— 那是启动时的快照，WiFi 换过就过期了
+    _lan=$(lan_ip)
     if [ -n "$_lan" ]; then
-      echo "      → 广播地址 $_lan"
+      echo "      → 现在可用的地址 http://$_lan:$API_PORT/v1"
       echo "      → 别的设备要带一把已启用的网关密钥"
     else
-      echo "      → 没找到可用局域网地址（可能只有移动数据 / 未连 WiFi）"
+      echo "      → 当前没有可用局域网地址（未连 WiFi / 热点未开，或只有移动数据）"
     fi
     ;;
 esac

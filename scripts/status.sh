@@ -23,19 +23,23 @@ PORT=${MAGPIE_ADDR##*:}
 WEB_PORT=${MAGPIE_WEB_ADDR##*:}
 [ -n "$WEB_PORT" ] || WEB_PORT=3430
 
-PID=$(pidof magpie 2>/dev/null)
-if [ -n "$PID" ]; then
-  RUNNING=1
-else
-  RUNNING=0
-fi
-
-# 局域网地址规则与 magpie.service / action.sh / doctor.sh 共用
-_NETLIB="$(dirname "$0")/net.sh"
+# 局域网地址与进程识别，和 magpie.service / action.sh / doctor.sh 共用
+_NETLIB="$(dirname "$0")/lib.sh"
 if [ -f "$_NETLIB" ]; then
   . "$_NETLIB"
 else
   lan_ip() { return 1; }
+  magpie_main_pid() { pidof magpie 2>/dev/null | tr ' ' '\n' | head -1; }
+  magpie_all_pids() { pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'; }
+  magpie_rss_mb() { return 1; }
+fi
+
+# 只认 serve 主进程：MCP 子进程也叫 magpie，不能拿它们的 PID 当服务状态
+PID=$(magpie_main_pid 2>/dev/null)
+if [ -n "$PID" ]; then
+  RUNNING=1
+else
+  RUNNING=0
 fi
 
 # 地址要实时算：开机时没连 WiFi、之后又连上，或者热点开关切换过，
@@ -106,8 +110,13 @@ if [ "$RUNNING" = "1" ]; then
     elif [ "$M" -gt 0 ]; then UPTIME="$M 分"
     else UPTIME="$SECS 秒"; fi
   fi
-  RSS_KB=$(awk '/VmRSS/{print $2}' "/proc/$PID/status" 2>/dev/null)
-  [ -n "$RSS_KB" ] && MEM="$((RSS_KB / 1024)) MB"
+  # 内存算主进程 + MCP 子进程的合计，只报主进程会少一半以上
+  _mb=$(magpie_rss_mb 2>/dev/null)
+  if [ -z "$_mb" ]; then
+    RSS_KB=$(awk '/VmRSS/{print $2}' "/proc/$PID/status" 2>/dev/null)
+    [ -n "$RSS_KB" ] && _mb=$((RSS_KB / 1024))
+  fi
+  [ -n "$_mb" ] && MEM="${_mb} MB"
 fi
 
 WEB_URL=$(cat "$magpie_path/run/web.url" 2>/dev/null)
