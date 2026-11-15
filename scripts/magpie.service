@@ -60,53 +60,53 @@ CA_DIRS="/system/etc/security/cacerts /apex/com.android.conscrypt/cacerts"
 
 mkdir -p "$RUN" "$magpie_path/data"
 
-# 排除回环、链路本地以及 mihomo 的 fake-ip 段（198.18.0.0/15）
-is_usable_lan_ip() {
-  case "$1" in
-    ''|0.0.0.0|127.*|169.254.*|198.18.*|198.19.*) return 1 ;;
-    100.*)
-      # 100.64.0.0/10 是运营商级 NAT，只有运营商内网可达，广播出去没人连得上
-      _o2=${1#100.}; _o2=${_o2%%.*}
-      [ "$_o2" -ge 64 ] 2>/dev/null && [ "$_o2" -le 127 ] 2>/dev/null && return 1
-      ;;
-  esac
+# 局域网地址规则与 status.sh / action.sh / doctor.sh 共用同一份实现
+_NETLIB="$(dirname "$0")/lib.sh"
+if [ -f "$_NETLIB" ]; then
+  . "$_NETLIB"
+else
+  lan_ip() { return 1; }
+fi
+
+# 把 run/lan.url 刷成当前地址；没有可用地址就删掉它。
+# 返回 0 表示内容有变化（调用方据此决定要不要刷新状态）。
+refresh_lan_url() {
+  _new=$(lan_ip)
+  _old=$(cat "$RUN/lan.url" 2>/dev/null)
+  _old=$(echo "$_old" | sed -n 's#^http://\([^:]*\):.*#\1#p')
+  if [ "$_new" = "$_old" ]; then
+    return 1
+  fi
+  if [ -n "$_new" ]; then
+    echo "http://$_new:$WEB_PORT" > "$RUN/lan.url" 2>/dev/null
+    log Info "局域网地址更新为 http://$_new:$WEB_PORT"
+  else
+    rm -f "$RUN/lan.url" 2>/dev/null
+    log Info "当前没有可用的局域网地址, 已清除对外地址"
+  fi
   return 0
 }
 
-# 局域网地址：优先 WiFi / 热点 / USB 网络接口，跳过移动数据（ccmni/rmnet）
-lan_ip() {
-  for _if in wlan0 wlan1 ap0 usb0 rndis0 eth0; do
-    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
-      is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
-    done
-  done
-  for _if in $(ip -4 -o addr show 2>/dev/null | sed -n 's/^[0-9]*: \([^ ]*\) .*/\1/p'); do
-    case "$_if" in lo|ccmni*|rmnet*|clat*) continue ;; esac
-    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
-      is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
-    done
-  done
-  return 1
+# 进程防杀：root 起的进程默认已是 -1000，这里只做校验，
+# 若被外部改过（某些省电模块会重设）就改回来。
+pin_oom() {
+  _p="$1"
+  [ -n "$_p" ] && [ -d "/proc/$_p" ] || return 1
+  _cur=$(cat "/proc/$_p/oom_score_adj" 2>/dev/null)
+  [ "$_cur" = "-1000" ] && return 0
+  echo -1000 > "/proc/$_p/oom_score_adj" 2>/dev/null \
+    && log Info "oom_score_adj $_cur -> -1000" \
+    || log Warn "无法设置 oom_score_adj (当前 $_cur)"
 }
 
-running() {
-  # pid 文件可能过期，但进程真在就必须认，否则看门狗会重复拉起
-  if [ -f "$PIDFILE" ]; then
-    pid=$(cat "$PIDFILE" 2>/dev/null)
-    case "$pid" in
-      ''|*[!0-9]*) : ;;
-      *) kill -0 "$pid" 2>/dev/null && { echo "$pid"; return 0; } ;;
-    esac
-    rm -f "$PIDFILE" 2>/dev/null
-  fi
 
-  pid=$(pidof magpie 2>/dev/null | tr ' ' '\n' | head -1)
-  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
-    echo "$pid" > "$PIDFILE" 2>/dev/null
-    echo "$pid"
-    return 0
-  fi
-  return 1
+running() {
+  # 只认 serve 主进程。MCP 子进程（magpie mcp vision/search/image）也叫 magpie，
+  # 用 pidof | head -1 会取到它们，导致判断错误、stop 杀错进程。
+  pid=$(magpie_main_pid) || { rm -f "$PIDFILE" 2>/dev/null; return 1; }
+  echo "$pid" > "$PIDFILE" 2>/dev/null
+  echo "$pid"
+  return 0
 }
 
 # 清理 v0.2 遗留的 dnsmasq（监听 ::1:53）。
@@ -265,13 +265,11 @@ start() {
   if pid=$(running); then
     log Info "已启动 网关 http://$MAGPIE_ADDR"
     log Info "      WebUI $WEB_URL (PID $pid)"
+    pin_oom "$pid"
     # 二进制自己报的地址会被 fake-ip 骗，这里自己算
-    _lan=$(lan_ip)
-    if [ -n "$_lan" ]; then
-      echo "http://$_lan:$WEB_PORT" > "$RUN/lan.url" 2>/dev/null
-      log Info "      局域网 http://$_lan:$WEB_PORT"
-    else
-      rm -f "$RUN/lan.url" 2>/dev/null
+    refresh_lan_url || true
+    if [ -f "$RUN/lan.url" ]; then
+      log Info "      局域网 $(cat "$RUN/lan.url" 2>/dev/null)"
     fi
   else
     rm -f "$PIDFILE" 2>/dev/null
@@ -296,6 +294,18 @@ stop() {
     sleep 0.1; i=$((i + 1))
   done
   kill -9 "$pid" 2>/dev/null
+
+  # 兜底：主进程被强杀时，MCP 子进程可能变成孤儿留在后台
+  for _p in $(magpie_all_pids); do
+    kill -15 "$_p" 2>/dev/null
+    _j=0
+    while kill -0 "$_p" 2>/dev/null && [ "$_j" -lt 10 ]; do
+      sleep 0.1; _j=$((_j + 1))
+    done
+    kill -9 "$_p" 2>/dev/null
+    log Info "已收掉残留进程 $_p"
+  done
+
   rm -f "$PIDFILE"
 }
 

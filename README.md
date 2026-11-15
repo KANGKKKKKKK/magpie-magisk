@@ -84,7 +84,7 @@ su -c chmod 755 /data/adb/magpie/bin/magpie
 
 **2. 安装模块**
 
-从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载 `magpie-v0.7.zip`，管理器 → 模块 → 从本地安装 → 选 zip。
+从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载最新的 `magpie-v*.zip`（文件名带版本号），管理器 → 模块 → 从本地安装 → 选 zip。
 
 **3. 重启**
 
@@ -118,7 +118,7 @@ su -c cat /data/adb/magpie/run/web.url
 不想刷 zip 的，手动放置：
 
 ```sh
-unzip magpie-v0.7.zip -d /data/adb/modules/magpie
+unzip magpie-v*.zip -d /data/adb/modules/magpie   # 换成实际下载到的文件名
 chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
@@ -416,12 +416,14 @@ magpie-magisk/
 │   ├── magpie.service                start / stop / restart / status
 │   ├── status.sh                     生成状态描述、status.json、日志尾
 │   ├── doctor.sh                     八项自检
+│   ├── lib.sh                        局域网地址 + 进程识别，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
 │   └── magpie.config                 配置（默认值）
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
 ├── docs/
 │   └── panel.png                     README 里的面板截图
+├── .github/workflows/release.yml     tag → 打包 → 发版 → 回写 update.json
 └── META-INF/com/google/android/      Magisk 刷机脚本
 ```
 

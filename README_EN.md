@@ -92,7 +92,7 @@ su -c chmod 755 /data/adb/magpie/bin/magpie
 
 **2. Install the module**
 
-Download `magpie-v0.7.zip` from [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases),
+Download the latest `magpie-v*.zip` from [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases),
 then Manager → Modules → Install from storage.
 
 **3. Reboot**
@@ -131,7 +131,7 @@ Paste that into the phone's browser.
 Manual install (without the zip):
 
 ```sh
-unzip magpie-v0.7.zip -d /data/adb/modules/magpie
+unzip magpie-v*.zip -d /data/adb/modules/magpie   # use the file you actually downloaded
 chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
@@ -462,7 +462,7 @@ magpie-magisk/
 ├── scripts/
 │   ├── magpie.service                start / stop / restart / status
 │   ├── status.sh                     manager description, status.json, log tail
-│   ├── net.sh                        LAN address detection, shared by all scripts
+│   ├── lib.sh                        LAN address + process helpers, shared
 │   ├── doctor.sh                     eight self-checks
 │   ├── magpie-cli.sh                 environment wrapper around the binary
 │   └── magpie.config                 configuration defaults
