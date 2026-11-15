@@ -25,6 +25,15 @@ sync_status() {
   [ -f "$MODDIR/scripts/status.sh" ] && sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
 }
 
+# 局域网地址实时算，不读 run/lan.url —— 那是启动时的快照，
+# WiFi 换过、热点开关过之后就可能指向一个已经不存在的地址。
+_NETLIB="$MODDIR/scripts/net.sh"
+if [ -f "$_NETLIB" ]; then
+  . "$_NETLIB"
+else
+  lan_ip() { return 1; }
+fi
+
 # 面板地址（带密钥）
 panel_url() {
   _k=$(cat "$magpie_path/data/web.key" 2>/dev/null)
@@ -43,12 +52,12 @@ print_endpoints() {
   case "$MAGPIE_ADDR" in
     127.0.0.1:*|localhost:*) ;;   # 只监听本机，没有行外地址
     *)
-      _lan=$(cat "$magpie_path/run/lan.url" 2>/dev/null)
-      _lanip=""
-      [ -n "$_lan" ] && _lanip=$(echo "$_lan" | sed -n 's#http://\([^:]*\):.*#\1#p')
-      if [ -n "$_lanip" ]; then
-        echo "  局域网   网关 http://$_lanip:$API_PORT/v1"
-        echo "           面板 http://$_lanip:$WEB_PORT  （需访问密码）"
+      _lan=$(lan_ip)
+      if [ -n "$_lan" ]; then
+        echo "  局域网   网关 http://$_lan:$API_PORT/v1"
+        echo "           面板 http://$_lan:$WEB_PORT  （需访问密码）"
+      else
+        echo "  局域网   暂无可用地址（未连 WiFi / 热点未开）"
       fi
       ;;
   esac

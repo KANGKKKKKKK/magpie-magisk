@@ -44,6 +44,12 @@ fi
 PID=$(pidof magpie 2>/dev/null | tr ' ' '\n' | head -1)
 if [ -n "$PID" ]; then
   ok "服务在运行（PID $PID）"
+  _oom=$(cat "/proc/$PID/oom_score_adj" 2>/dev/null)
+  case "$_oom" in
+    -1000) ok "oom_score_adj -1000（不会被 LMKD 回收）" ;;
+    '')    warn "读不到 oom_score_adj" ;;
+    *)     warn "oom_score_adj $_oom（不是 -1000）" "restart 服务会试着改回 -1000；长期偏低可查省电类模块是否在改它" ;;
+  esac
 else
   bad "服务未运行" "sh $MODDIR/scripts/magpie.service start"
 fi

@@ -10,6 +10,8 @@
 [![Platform](https://img.shields.io/badge/platform-arm64-blue?style=flat-square)](#环境要求)
 [![Type](https://img.shields.io/badge/type-Magisk%20module-6ca0dc?style=flat-square)](#安装)
 
+**简体中文** | [English](README_EN.md)
+
 </div>
 
 > [!NOTE]
@@ -51,7 +53,7 @@
 | 开机自启 | 等 `sys.boot_completed` 后拉起，不阻塞开机 |
 | 进程守护 | 20 秒巡检，被杀或回收后自动拉回；用户主动停止时不强行恢复 |
 | 一键启停 | 点 `[执行]`：在跑就打印接入信息并停止，没跑就启动并打开面板 |
-| 状态可见 | 管理器描述实时显示「运行中 / 已停止」+ magpie 版本号 |
+| 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
 | 自检 | `scripts/doctor.sh` 八项检查，直接告诉你哪里不对、下一步做什么 |
 | 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`、上游 DNS |
 | CA 证书 | 合并系统根证书供静态 Go 使用，系统 CA 变化时自动重建 |
@@ -82,7 +84,7 @@ su -c chmod 755 /data/adb/magpie/bin/magpie
 
 **2. 安装模块**
 
-从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载 `magpie-v0.6.zip`，管理器 → 模块 → 从本地安装 → 选 zip。
+从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载 `magpie-v0.7.zip`，管理器 → 模块 → 从本地安装 → 选 zip。
 
 **3. 重启**
 
@@ -116,7 +118,7 @@ su -c cat /data/adb/magpie/run/web.url
 不想刷 zip 的，手动放置：
 
 ```sh
-unzip magpie-v0.6.zip -d /data/adb/modules/magpie
+unzip magpie-v0.7.zip -d /data/adb/modules/magpie
 chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
@@ -132,7 +134,17 @@ chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 | 服务在跑 | 先打印 PID、网关地址、面板地址，然后**停止**（写 `.user_stopped`，看门狗不会马上拉起） |
 | 服务没跑 | 启动，打印同样的信息，并打开面板 |
 
-同一颗按钮，两种结果。用之前先看模块描述那行写的是「运行中」还是「已停止」。
+同一颗按钮，两种结果。用之前先看模块描述那行写的是什么。
+
+那行文字会自动更新，不需要点任何按钮就能看到该填进客户端什么：
+
+```
+🟢 运行中 v0.1.4260 | 192.168.1.5:3425      ← 运行中，并给出可用的局域网地址
+🟢 运行中 v0.1.4260 | 仅本机                 ← 只监听 127.0.0.1，别的设备连不上
+🔴 已停止 | 点 [执行] 启动
+```
+
+地址变了（WiFi 重连、热点开关、切飞行模式）会自动刷新，不会让你照着旧地址折腾。字体不支持 emoji、显示成方框时，把配置里的 `MAGPIE_ICON` 设成 `0`，就会换成 `[运行中]` / `[已停止]` 纯文本。
 
 > [!NOTE]
 > `[执行]` 按钮由管理器提供。较老的 Magisk 版本没有这个按钮，用下面的命令行启停即可。
@@ -273,7 +285,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | 现象 | 多半是 |
 | --- | --- |
 | `Connection refused` / 连接被拒绝 | 服务没跑，或端口不对。`magpie.service status` 看一眼；自检里「端口监听」那项会直接告诉你 |
-| 电脑上连不上，手机上正常 | 还在只监听 `127.0.0.1`。把 `MAGPIE_ADDR` 改成 `0.0.0.0:3425` 重启服务，再用 `ss -ltnp \| grep 3425` 确认 |
+| 电脑上连不上，手机上正常 | 还在只监听 `127.0.0.1`。把 `MAGPIE_ADDR` 改成 `0.0.0.0:3425` 重启服务，再用 `ss -ltnp` 确认 3425 真的在监听 |
 | 超时，不报拒绝 | 两边不在同一网段，或路由器开了 AP 隔离；也可能是自检里那个「局域网地址」其实是运营商级 NAT（100.64–100.127.x），那种地址外部设备根本到不了 |
 | 404 | Base URL 少了 `/v1` |
 | 401 | 从别的设备访问时，key 必须是一把**已启用**的网关 key；本机回环访问不校验，所以「本机能用、电脑 401」是正常的 |
@@ -317,6 +329,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | `MAGPIE_ADDR` | `127.0.0.1:3425` | API 网关监听地址 |
 | `MAGPIE_WEB_ADDR` | `127.0.0.1:3430` | WebUI 监听地址；留空则用 `MAGPIE_ADDR` 的 host + 3430 |
 | `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | 上游 DNS，空格分隔 |
+| `MAGPIE_ICON` | `1` | 管理器状态图标：`1` 用 🟢/🔴，`0` 用 `[运行中]`/`[已停止]` |
 
 脚本按顺序找配置文件：先 `/data/adb/magpie/scripts/magpie.config`，不存在才用模块里的 `scripts/magpie.config`。所以**改配置请改数据目录那份**，它不会被模块更新覆盖；两者都不在时使用内置默认值，且默认全部监听 `127.0.0.1`。
 

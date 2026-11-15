@@ -1,0 +1,136 @@
+name: release
+
+# 推送 v* tag 时自动打包发版；也可以在 Actions 页面手动指定 tag 触发。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（必须已存在，例如 v0.7）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取版本并校验一致性
+        id: meta
+        run: |
+          set -eu
+          VER=$(sed -n 's/^version=//p' module.prop | tr -d '\r')
+          CODE=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r')
+
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          echo "module.prop: version=$VER versionCode=$CODE"
+          echo "触发用的 tag: $TAG"
+
+          # tag 和 module.prop 必须对上，否则发出去的包会被管理器判定为旧版本
+          if [ "$VER" != "$TAG" ]; then
+            echo "::error::tag $TAG 与 module.prop 的 version $VER 不一致，先把 module.prop 改好再打 tag"
+            exit 1
+          fi
+
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 打包
+        run: |
+          set -eu
+          mkdir -p dist
+          sh build.sh dist
+          ls -l dist/
+
+      - name: 校验 zip 结构
+        run: |
+          set -eu
+          ZIP="dist/magpie-${{ steps.meta.outputs.ver }}.zip"
+          echo "包内文件："
+          unzip -l "$ZIP"
+
+          # module.prop 必须在包根目录，否则 Magisk 装不上
+          if ! unzip -l "$ZIP" | grep -qE '^ *[0-9]+ .* module\.prop$'; then
+            echo "::error::module.prop 不在 zip 根目录"
+            exit 1
+          fi
+          if unzip -l "$ZIP" | grep -qE ' (README\.md|LICENSE|CHANGELOG\.md|update\.json|build\.sh)$'; then
+            echo "::error::zip 里混进了仓库文件"
+            exit 1
+          fi
+          for f in service.sh action.sh uninstall.sh scripts/magpie.service; do
+            if ! unzip -l "$ZIP" | grep -qE " $f$"; then
+              echo "::error::zip 缺少 $f"
+              exit 1
+            fi
+          done
+          echo "结构检查通过"
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${{ steps.meta.outputs.tag }}"
+          ZIP="dist/magpie-${{ steps.meta.outputs.ver }}.zip"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖上传资源"
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$ZIP" \
+              --title "$TAG" \
+              --notes "自动构建自 ${{ github.sha }}
+
+          模块 $TAG，magpie 本体需自行安装到 \`/data/adb/magpie\`。
+          安装/升级说明见 [README](https://github.com/${{ github.repository }}#快速开始)。"
+          fi
+
+      - name: 同步 update.json
+        run: |
+          set -eu
+          VER="${{ steps.meta.outputs.ver }}"
+          CODE="${{ steps.meta.outputs.code }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          cat > update.json <<EOF
+          {
+            "version": "$VER",
+            "versionCode": $CODE,
+            "zipUrl": "https://github.com/$REPO/releases/download/$TAG/magpie-$VER.zip",
+            "changelog": "https://raw.githubusercontent.com/$REPO/main/CHANGELOG.md"
+          }
+          EOF
+
+          cat update.json
+
+          if git diff --quiet -- update.json; then
+            echo "update.json 无变化，跳过提交"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git commit -m "chore: update.json -> $TAG"
+          git push origin HEAD:main

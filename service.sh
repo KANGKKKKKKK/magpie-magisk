@@ -34,6 +34,13 @@ rotate_log() {
 (
   wlog() { echo "$(date +'%Y-%m-%d %H:%M:%S') $1" >> "$WATCH_LOG" 2>/dev/null; }
 
+  # 局域网地址探测（与 magpie.service 共用实现）
+  _NETLIB="$MODDIR/scripts/net.sh"
+  if [ -f "$_NETLIB" ]; then . "$_NETLIB"; else lan_ip() { return 1; }; fi
+
+  # 上次刷新时的地址，用来判断有没有变
+  _last_lan=""
+
   while :; do
     sleep 20
 
@@ -47,6 +54,22 @@ rotate_log() {
       wlog "magpie 未运行, 重新拉起"
       sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1
       sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+    fi
+
+    # 服务在跑时盯住局域网地址：WiFi 重连、热点开关、切飞行模式
+    # 都会让地址变化，而 run/lan.url 和 module.prop 的描述都是那一刻写死的。
+    # 变了就刷新，免得用户照着旧地址连不上。
+    if pidof magpie >/dev/null 2>&1; then
+      _cur_lan=$(lan_ip)
+      if [ "$_cur_lan" != "$_last_lan" ]; then
+        _last_lan="$_cur_lan"
+        _old=$(cat "$MP/run/lan.url" 2>/dev/null)
+        _old=$(echo "$_old" | sed -n 's#^http://\([^:]*\):.*#\1#p')
+        if [ "$_cur_lan" != "$_old" ]; then
+          echo "$(date +'%Y-%m-%d %H:%M:%S') 局域网地址 ${_old:-无} -> ${_cur_lan:-无}" >>"$WATCH_LOG" 2>/dev/null
+          sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+        fi
+      fi
     fi
 
     rotate_log "$WATCH_LOG"

@@ -13,7 +13,10 @@ MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 # 默认值与 magpie.service 保持一致
 magpie_path=/data/adb/magpie
 MAGPIE_ADDR="127.0.0.1:3425"
+# 环境变量优先于配置文件，方便临时试：MAGPIE_ICON=0 sh status.sh -q
+_ENV_ICON="${MAGPIE_ICON-}"
 [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+[ -n "$_ENV_ICON" ] && MAGPIE_ICON="$_ENV_ICON"
 
 PORT=${MAGPIE_ADDR##*:}
 [ -n "$PORT" ] || PORT=3425
@@ -27,11 +30,47 @@ else
   RUNNING=0
 fi
 
-if [ "$RUNNING" = "1" ]; then
-  DESC="magpie 运行中 | WebUI: http://127.0.0.1:$WEB_PORT"
+# 局域网地址规则与 magpie.service / action.sh / doctor.sh 共用
+_NETLIB="$(dirname "$0")/net.sh"
+if [ -f "$_NETLIB" ]; then
+  . "$_NETLIB"
 else
-  DESC="magpie 已停止 | 点 [执行] 启动服务"
+  lan_ip() { return 1; }
 fi
+
+# 地址要实时算：开机时没连 WiFi、之后又连上，或者热点开关切换过，
+# 都可能与启动那一刻不同。写死快照会让用户照着旧地址去连。
+LAN_IP=$(lan_ip)
+
+# 状态图标：默认用彩色圆点，字体不支持 emoji 时设 MAGPIE_ICON=0 退回纯文本
+ICON_ON="${MAGPIE_ICON:-1}"
+
+# 模块列表里那一行的文字。
+# 开放局域网且拿得到地址时把地址带上——那才是用户要填进客户端的东西。
+desc_line() {
+  _v="$1"
+  if [ "$RUNNING" = "1" ]; then
+    case "$MAGPIE_ADDR" in
+      127.0.0.1:*|localhost:*)
+        _where="仅本机" ;;
+      *)
+        if [ -n "$LAN_IP" ]; then _where="$LAN_IP:$PORT"; else _where="无局域网地址"; fi ;;
+    esac
+    if [ "$ICON_ON" = "0" ]; then
+      echo "[运行中] ${_v:+$_v }| $_where"
+    else
+      echo "🟢 运行中${_v:+ $_v} | $_where"
+    fi
+  else
+    if [ "$ICON_ON" = "0" ]; then
+      echo "[已停止] 点 [执行] 启动"
+    else
+      echo "🔴 已停止 | 点 [执行] 启动"
+    fi
+  fi
+}
+
+DESC=$(desc_line "")
 
 if [ "$1" = "-q" ]; then
   echo "$DESC"
@@ -70,37 +109,6 @@ if [ "$RUNNING" = "1" ]; then
   RSS_KB=$(awk '/VmRSS/{print $2}' "/proc/$PID/status" 2>/dev/null)
   [ -n "$RSS_KB" ] && MEM="$((RSS_KB / 1024)) MB"
 fi
-
-# 局域网 IP：排除回环、链路本地、mihomo 的 fake-ip 段（198.18.0.0/15）
-# 和运营商级 NAT（100.64.0.0/10），规则与 magpie.service 的 lan_ip() 一致。
-is_usable_lan_ip() {
-  case "$1" in
-    ''|0.0.0.0|127.*|169.254.*|198.18.*|198.19.*) return 1 ;;
-    100.*)
-      _o2=${1#100.}; _o2=${_o2%%.*}
-      [ "$_o2" -ge 64 ] 2>/dev/null && [ "$_o2" -le 127 ] 2>/dev/null && return 1
-      ;;
-  esac
-  return 0
-}
-
-lan_ip() {
-  # 优先 WiFi / 热点 / USB，再退回其它网卡；与 magpie.service 一致
-  for _if in wlan0 wlan1 ap0 usb0 rndis0 eth0; do
-    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
-      is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
-    done
-  done
-  for _if in $(ip -4 -o addr show 2>/dev/null | sed -n 's/^[0-9]*: \([^ ]*\) .*/\1/p'); do
-    case "$_if" in lo|ccmni*|rmnet*|clat*) continue ;; esac
-    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
-      is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
-    done
-  done
-  return 1
-}
-
-LAN_IP=$(lan_ip)
 
 WEB_URL=$(cat "$magpie_path/run/web.url" 2>/dev/null)
 [ -n "$WEB_URL" ] || WEB_URL=""
@@ -172,11 +180,7 @@ done
 # Magisk 没有改描述的 CLI，直接改 module.prop 的 description 行。
 # 描述里带内核版本：version 是外壳版本，不随 magpie 自身更新变化。
 if [ -f "$MODDIR/module.prop" ]; then
-  if [ "$RUNNING" = "1" ]; then
-    MG_DESC="magpie 运行中 (v$VERSION) | 点 [执行] 停止"
-  else
-    MG_DESC="magpie 已停止 | 点 [执行] 启动"
-  fi
+  MG_DESC=$(desc_line "v$VERSION")
   _cur=$(sed -n 's/^description=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)
   if [ "$_cur" != "$MG_DESC" ]; then
     if sed "s#^description=.*#description=$MG_DESC#" "$MODDIR/module.prop" \
