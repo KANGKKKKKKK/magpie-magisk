@@ -2,7 +2,7 @@
 
 # Magpie AI 网关 · Android 模块
 
-把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自己起来，被杀自己回来，一个按钮启停。
+把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自启，防kill，一键启停。
 
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
