@@ -175,6 +175,11 @@ su -c magpie update         # 下载、校验、重启进新版本
 > 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，87 MB 的下载也太大，
 > 所以 `customize.sh` 只做检测并告诉你怎么装，真正下载由你确认后触发。
 
+> [!NOTE]
+> 安装器不依赖 `wget` 在 `PATH` 上。模块脚本被管理器拉起时，`PATH` 往往只有系统目录，
+> 那里没有 `wget`；安装器会把各 Root 方案的 bin 目录加进去，并在必要时回退到
+> busybox 自带的 `wget`。可用 `MAGPIE_DL=/path/to/curl` 指定别的下载器。
+
 > [!TIP]
 > 想换源（自建镜像、内网缓存）：
 > `MAGPIE_MANIFEST_URL=https://内网/… sh install.sh install --yes`。
