@@ -151,12 +151,20 @@ pick_downloader() {
 dl_fetch() {
   _url="$1"; _out="$2"
   pick_downloader || return 127
+  # 放到后台再 wait：shell 要等前台命令结束才会执行 trap，
+  # 87 MB 下到一半按 Ctrl-C / 管理器被杀时就会干等好几分钟。
+  # wait 是可中断的，信号一到马上就能跑 on_signal。
   case "$DL_KIND" in
-    wget)    wget -q -O "$_out" -T 60 "$_url" 2>/dev/null ;;
-    busybox) "$DL_CMD" wget -q -O "$_out" -T 60 "$_url" 2>/dev/null ;;
-    curl)    "$DL_CMD" -fsSL --max-time 600 -o "$_out" "$_url" 2>/dev/null ;;
+    wget)    wget -q -O "$_out" -T 60 "$_url" 2>/dev/null & ;;
+    busybox) "$DL_CMD" wget -q -O "$_out" -T 60 "$_url" 2>/dev/null & ;;
+    curl)    "$DL_CMD" -fsSL --max-time 600 -o "$_out" "$_url" 2>/dev/null & ;;
     *)       return 127 ;;
   esac
+  DL_PID=$!
+  wait "$DL_PID"
+  _rc=$?
+  DL_PID=""
+  return $_rc
 }
 
 # 下载器的人话名字，用于报错
@@ -284,10 +292,14 @@ check_space() {
 
 # ---------- 锁定 ----------
 
+# 当前进程是否持有安装锁。release_lock 只释放自己那把，避免误删别人的锁。
+LOCK_HELD=""
+
 acquire_lock() {
   mkdir -p "$magpie_path" 2>/dev/null
   if mkdir "$LOCK" 2>/dev/null; then
     echo $$ > "$LOCK/pid" 2>/dev/null
+    LOCK_HELD=1
     return 0
   fi
   _p=$(cat "$LOCK/pid" 2>/dev/null)
@@ -295,13 +307,38 @@ acquire_lock() {
     die "另一个安装正在进行（PID $_p）。等它结束，或删除 $LOCK"
   fi
   warn "发现过期锁，已清理"
-  rm -rf "$LOCK" 2>/dev/null
+  # mv 是原子的：只有一个进程能把旧锁挪走，另一个会失败。
+  # 直接 rm -rf 会让两个进程都以为清掉了旧锁，然后各自 mkdir 成功、同时部署。
+  _stale="$LOCK.stale.$$"
+  if mv "$LOCK" "$_stale" 2>/dev/null; then
+    rm -rf "$_stale" 2>/dev/null
+  else
+    rm -rf "$LOCK" 2>/dev/null
+  fi
   mkdir "$LOCK" 2>/dev/null || die "无法获取安装锁 $LOCK"
   echo $$ > "$LOCK/pid" 2>/dev/null
+  LOCK_HELD=1
   return 0
 }
 
-release_lock() { rm -rf "$LOCK" 2>/dev/null; }
+# 幂等：trap 和显式释放都会调它
+release_lock() {
+  [ -n "$LOCK_HELD" ] || return 0
+  LOCK_HELD=""
+  rm -rf "$LOCK" 2>/dev/null
+}
+
+# 正在下载的子进程；收到信号时要一并收掉，免得留下没人管的 wget
+DL_PID=""
+
+# 收到 INT/TERM/HUP：收掉下载、放锁、退出。
+# 原先是 trap 'release_lock' INT TERM —— 只放锁不退出，脚本会继续下载、
+# 继续替换二进制，而锁已经没了，另一个安装可以同时进来。
+on_signal() {
+  [ -n "$DL_PID" ] && kill -9 "$DL_PID" 2>/dev/null
+  release_lock
+  exit 130
+}
 
 # ---------- 下载 ----------
 
@@ -544,7 +581,8 @@ cmd_install() {
 
   mkdir -p "$magpie_path" 2>/dev/null
   acquire_lock
-  trap 'release_lock' EXIT INT TERM
+  trap 'release_lock' EXIT
+  trap 'on_signal' INT TERM HUP
 
   say "取更新清单 ..."
   if ! load_manifest; then
@@ -606,7 +644,8 @@ cmd_install() {
 
 cmd_rollback() {
   acquire_lock
-  trap 'release_lock' EXIT INT TERM
+  trap 'release_lock' EXIT
+  trap 'on_signal' INT TERM HUP
   rollback
   release_lock
   return 0

@@ -2,6 +2,10 @@
 # Magpie for Android - 自检脚本（只读检查，不改任何配置）
 # 用法: su -c sh /data/adb/modules/magpie/scripts/doctor.sh
 
+# 模块脚本被管理器或 /system/bin/sh 拉起时，PATH 里往往只有系统目录，
+# 那里没有 wget / busybox。把各 Root 方案的 bin 目录补进来。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
+
 MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
 
@@ -32,10 +36,26 @@ else
   lan_ip() { return 1; }
 fi
 
-# 取 HTTP 状态码；连不上则输出空
+# 取 HTTP 状态码；连不上则输出空。
+# 注意不能直接调 `wget`：这条路在很多机型上根本不存在（系统没有 wget，
+# 而 Root 方案的 busybox 也不一定带 applet 软链），以前会导致
+# 「进程在跑、端口在听、但自检说网关无响应」的假报警。用 curl > busybox > wget 兜住。
+DL_BB=""
+for _b in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
+  [ -x "$_b" ] && { DL_BB="$_b"; break; }
+done
+
 http_code() {
-  wget -S -O /dev/null -T "${2:-5}" "$1" 2>&1 \
-    | sed -n 's/.*HTTP\/1\.[01] \([0-9]\{3\}\).*/\1/p' | tail -1
+  _u="$1"; _t="${2:-5}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -s -o /dev/null -m "$_t" -w '%{http_code}' "$_u" 2>/dev/null
+    return 0
+  fi
+  if [ -n "$DL_BB" ]; then
+    "$DL_BB" wget -S -O /dev/null -T "$_t" "$_u" 2>&1
+  else
+    wget -S -O /dev/null -T "$_t" "$_u" 2>&1
+  fi | sed -n 's/.*HTTP\/1\.[01] \([0-9]\{3\}\).*/\1/p' | tail -1
 }
 
 echo "Magpie AI 网关 · 自检"

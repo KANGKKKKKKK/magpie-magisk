@@ -1,0 +1,45 @@
+name: ci
+
+# 每次推到 main 或提 PR 都跑：语法检查 + 全部测试套件。
+# 发布工作流也跑同一套，这里提前拦住问题。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 语法检查
+        run: |
+          set -eu
+          for f in service.sh action.sh uninstall.sh customize.sh scripts/*.sh tests/*.sh; do
+            sh -n "$f"
+          done
+          echo "语法检查通过"
+
+      - name: 测试
+        run: |
+          set -eu
+          python3 tests/make-fixtures.py /tmp/fx
+          ( cd /tmp/fx && exec python3 -m http.server 8899 --bind 127.0.0.1 ) &
+          SRV_PID=$!
+          trap 'kill "$SRV_PID" 2>/dev/null || true' EXIT
+          sleep 1
+
+          TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
+          sh tests/test-watchdog.sh
+          TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
+          sh tests/test-service.sh

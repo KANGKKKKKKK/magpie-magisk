@@ -15,9 +15,14 @@ set_perm_recursive "$MODPATH/scripts" 0 0 0755 0755
 set_perm "$MODPATH/scripts/magpie.config" 0 0 0600
 
 # 本模块只负责调度，不含 magpie 本体
-MAGPIE_BIN=/data/adb/magpie/bin/magpie
+# 路径按配置读，自定义过 magpie_path 的用户也能看到正确的结果
+_CONF=/data/adb/magpie/scripts/magpie.config
+[ -f "$_CONF" ] || _CONF="$MODPATH/scripts/magpie.config"
+[ -f "$_CONF" ] && . "$_CONF" 2>/dev/null
+magpie_path=${magpie_path:-/data/adb/magpie}
+MAGPIE_BIN="$magpie_path/bin/magpie"
 if [ -x "$MAGPIE_BIN" ]; then
-  _ver=$(HOME=/data/adb/magpie/data "$MAGPIE_BIN" --version 2>/dev/null | head -1)
+  _ver=$(HOME="$magpie_path/data" "$MAGPIE_BIN" --version 2>/dev/null | head -1)
   if [ -n "$_ver" ]; then
     ui_print "- 已检测到本体：$_ver"
     ui_print "- 不会覆盖它；升级请用 su -c magpie update"

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要发布的 tag（必须已存在，例如 v0.7）'
+        description: '要发布的 tag（必须已存在，例如 v0.8）'
         required: true
         type: string
 
@@ -16,29 +16,45 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # workflow_dispatch 的输入是任意文本，必须经环境变量传给脚本。
+      # 直接写成 ${{ github.event.inputs.tag }} 塞进 run: 等于把用户输入
+      # 当 shell 代码执行（命令注入）。
+      INPUT_TAG: ${{ github.event.inputs.tag }}
+      REPO: ${{ github.repository }}
     steps:
       - name: 检出
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # 手动指定 tag 时必须检出那个 tag；否则打出来的包是触发时分支的代码
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: 读取版本并校验一致性
         id: meta
         run: |
           set -eu
-          VER=$(sed -n 's/^version=//p' module.prop | tr -d '\r')
-          CODE=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r')
+          VER=$(sed -n 's/^version=//p' module.prop | tr -d '\r' | head -1)
+          CODE=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r' | head -1)
 
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+            # 只接受 v1.2 这种形状的 tag
+            case "$TAG" in
+              v[0-9]*.[0-9]*) ;;
+              *) echo "::error::tag 形状不对：$TAG（应形如 v0.8）"; exit 1 ;;
+            esac
+            case "$TAG" in
+              *[!0-9A-Za-z._-]*) echo "::error::tag 含非法字符：$TAG"; exit 1 ;;
+            esac
           else
-            TAG="${{ github.ref_name }}"
+            TAG="$GITHUB_REF_NAME"
           fi
 
           echo "module.prop: version=$VER versionCode=$CODE"
@@ -53,6 +69,25 @@ jobs:
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 语法检查与测试
+        run: |
+          set -eu
+          for f in service.sh action.sh uninstall.sh customize.sh scripts/*.sh tests/*.sh; do
+            sh -n "$f"
+          done
+          echo "语法检查通过"
+
+          python3 tests/make-fixtures.py /tmp/fx
+          ( cd /tmp/fx && exec python3 -m http.server 8899 --bind 127.0.0.1 ) &
+          SRV_PID=$!
+          trap 'kill "$SRV_PID" 2>/dev/null || true' EXIT
+          sleep 1
+
+          TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
+          sh tests/test-watchdog.sh
+          TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
+          TEST_SRV=http://127.0.0.1:8899 sh tests/test-service.sh
 
       - name: 打包
         run: |
@@ -88,39 +123,56 @@ jobs:
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.ver }}
         run: |
           set -eu
-          TAG="${{ steps.meta.outputs.tag }}"
-          ZIP="dist/magpie-${{ steps.meta.outputs.ver }}.zip"
+          ZIP="dist/magpie-$VER.zip"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，覆盖上传资源"
             gh release upload "$TAG" "$ZIP" --clobber
           else
-            # 说明写到文件里再交给 gh，免得长文本被 YAML 缩进或引号弄乱
-            cat > NOTES.md <<EOF
-          模块 $TAG，由 ${{ github.sha }} 自动构建。
+            # 说明先写到文件里（占位符后面替换），免得长文本被引号或反引号弄乱
+            cat > NOTES.md <<'EOF'
+          模块 __TAG__，由 __SHA__ 自动构建。
 
-          本体没装也没关系：装上模块后点 \`[执行]\`，或跑
-          \`scripts/install.sh install --yes\`，模块会下载并安装 magpie 本体
+          本体没装也没关系：装上模块后点 `[执行]`，或跑
+          `scripts/install.sh install --yes`，模块会下载并安装 magpie 本体
           （sha256 校验、原子替换、失败不留残骸）。已装好的本体不会被覆盖；
-          升级用本体自己的 \`magpie update\`。
+          升级用本体自己的 `magpie update`。
 
-          - 安装与排障：[README](https://github.com/${{ github.repository }}#快速开始)
-          - 变更记录：[CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+          - 安装与排障：[README](https://github.com/__REPO__#快速开始)
+          - 变更记录：[CHANGELOG.md](https://github.com/__REPO__/blob/main/CHANGELOG.md)
           EOF
+            sed -i "s|__TAG__|$TAG|g; s|__SHA__|$GITHUB_SHA|g; s|__REPO__|$REPO|g" NOTES.md
             gh release create "$TAG" "$ZIP" \
               --title "$TAG" \
               --notes-file NOTES.md
           fi
 
       - name: 同步 update.json
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.ver }}
+          CODE: ${{ steps.meta.outputs.code }}
         run: |
           set -eu
-          VER="${{ steps.meta.outputs.ver }}"
-          CODE="${{ steps.meta.outputs.code }}"
-          TAG="${{ steps.meta.outputs.tag }}"
-          REPO="${{ github.repository }}"
+          # 在 main 的最新提交上改这个文件，原因有两个：
+          #   1. 从旧 tag 触发时，checkout 出来的不是 main，直接在它上面
+          #      提交再推 main 会因为非快进被拒；
+          #   2. 发旧版本不该把更新通道倒退，所以先比 versionCode。
+          WT="$RUNNER_TEMP/main-wt"
+          rm -rf "$WT"
+          git fetch --quiet origin main
+          git worktree add --quiet --detach "$WT" origin/main
+          cd "$WT"
+
+          CUR=$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' update.json 2>/dev/null | head -1)
+          if [ -n "$CUR" ] && [ "$CUR" -gt "$CODE" ]; then
+            echo "main 上的 update.json 是更高版本（versionCode $CUR > $CODE），不回退更新通道，跳过"
+            exit 0
+          fi
 
           cat > update.json <<EOF
           {
@@ -142,4 +194,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add update.json
           git commit -m "chore: update.json -> $TAG"
-          git push origin HEAD:main
+
+          # 另一个发版任务可能刚好也推了 main，重试一次
+          if git push --quiet origin HEAD:main; then
+            echo "update.json 已同步"
+          else
+            echo "推送被拒，跟 main 对齐后重试"
+            git fetch --quiet origin main
+            git rebase --quiet origin/main
+            git push --quiet origin HEAD:main
+            echo "update.json 已同步（重试成功）"
+          fi

@@ -1,15 +1,16 @@
 # 测试
 
-三个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程被桩替代。
-合计 57 条断言（36 + 8 + 13），在桌面 Linux 与 Android 上各跑一遍都是全通过。
+四个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程被桩替代。
+合计 71 条断言（39 + 8 + 13 + 11），在桌面 Linux 与 Android 上各跑一遍都是全通过。
 
 | 套件 | 断言数 | 测什么 |
 | --- | --- | --- |
-| `test-install.sh` | 36 | 安装器的 16 个用例 |
+| `test-install.sh` | 39 | 安装器的 17 个用例 |
 | `test-watchdog.sh` | 8 | 看门狗的决定逻辑 |
 | `test-action.sh` | 13 | `[执行]` 按钮的分支选择 |
+| `test-service.sh` | 11 | 进程清理、开机目录、配置路径 |
 
-需要夹具的套件（install、action）要先起一个静态文件服务；watchdog 不需要。
+需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service 不需要。
 
 ## 看门狗决定逻辑
 
@@ -73,6 +74,27 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 | 14 | 并发安装被锁拦住 |
 | 15 | 过期锁能清理，清理后安装成功 |
 | 16 | `PATH` 里没有 `wget` 时靠 busybox 兜底（Android）/ 给出可读失败（桌面） |
+| 17 | 收到 `TERM` 时立刻退出：锁已释放、没有落盘（用一个只连不应答的服务器把下载卡住） |
+
+## 进程清理、开机目录与配置路径
+
+```sh
+sh tests/test-service.sh
+```
+
+11 条断言，覆盖几个曾经出问题、但纯逻辑测试看不出来的地方：
+
+1. **首次开机 `run` 目录还不存在**：`service.sh` 的所有日志重定向都指向
+   `run/watchdog.log`，目录不在时重定向会失败、命令根本不会执行 —— 结果就是永远起不来。
+   用例把 `run` 删掉后跑一次，检查目录被建出来、服务确实被调用。
+2. **`stop` 在主进程已消失时**：仍要清掉 MCP 孤儿进程（原来会在「未在运行」处提前
+   return，孤儿子进程留在后台越积越多）。
+3. **`stop` 在主进程存在时**：主进程和孤儿都要收掉。
+4. **`start` 前只清 MCP 孤儿**：按命令行里的 ` mcp ` 判断，用户手上正在跑的
+   `magpie update`、`gateway-key` 不会被误杀。
+5. **自定义 `magpie_path`**：`magpie` 命令读的是配置里的目录，不是写死的默认路径。
+
+进程判定全部换成桩，占位进程用 `sleep` 顶替，跑完即收，不接触真实 magpie。
 
 ## 在 Android 上跑
 
@@ -99,6 +121,10 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 env PATH=/product/bin:/system/bin:/system/xbin \
   TEST_SRV=http://127.0.0.1:8899 TEST_BASE=/data/local/tmp/mg-act \
   /system/bin/sh $R/tests/test-action.sh
+
+env PATH=/product/bin:/system/bin:/system/xbin \
+  TEST_BASE=/data/local/tmp/mg-svc \
+  /system/bin/sh $R/tests/test-service.sh
 ```
 
 ## 真机上的额外验证（不在 CI 里）
@@ -112,4 +138,6 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 - 没有覆盖「下载中途断网」：夹具是本地文件，断网场景需要额外的代理或断点工具才能模拟。
 - 没有覆盖「下载中途断网」之外的网络异常（DNS 失败、TLS 被拦）在桌面侧的复现。
 - 没有覆盖 arm32 / x86_64 设备：`check_arch` 会直接拒绝，但没有在真机上跑过非 arm64。
-- 没有覆盖自定义 `magpie_path` 的完整安装（只覆盖了拒绝非法路径的分支）。
+- 没有覆盖自定义 `magpie_path` 的**完整安装**（只覆盖了拒绝非法路径的分支，以及
+  `magpie` 命令是否读对目录）。
+- 信号用例依赖 `python3` 起一个只连不应答的服务器；没有 `python3` 的环境会跳过这一条。

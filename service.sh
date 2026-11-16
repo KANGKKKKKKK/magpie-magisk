@@ -5,10 +5,21 @@ MODDIR=${0%/*}
 [ -f "$MODDIR/disable" ] && exit 0
 
 LOG_MAX_BYTES=5242880
-CONF=/data/adb/magpie/scripts/magpie.config
+# 配置查找顺序与 magpie.service / status.sh / action.sh / doctor.sh 保持一致
+CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
+[ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
 [ -f "$CONF" ] && . "$CONF" 2>/dev/null
 MP=${magpie_path:-/data/adb/magpie}
-WATCH_LOG="$MP/run/watchdog.log"
+
+# run 目录必须先建出来：下面所有 `>>"$WATCH_LOG"` 都指向它。
+# 目录不存在时重定向直接失败、命令根本不会被执行 —— 首次开机（本体刚装好、
+# 还没手动启动过）就会永远起不来。建不出来时把日志丢弃，但服务照常尝试启动。
+mkdir -p "$MP/run" 2>/dev/null
+if [ -d "$MP/run" ]; then
+  WATCH_LOG="$MP/run/watchdog.log"
+else
+  WATCH_LOG=/dev/null
+fi
 
 # 超过 5MB 归档为 .1，必须在进程打开日志 fd 之前调用
 rotate_log() {
@@ -49,9 +60,15 @@ rotate_log() {
   _miss_logged=0    # 本体缺失只记一次，不刷日志
   _fail=0           # 连续拉起失败次数
 
+  # 万一 run 目录被清理工具删掉，先补回来，免得下面重定向失败
+  mkdir -p "$MP/run" 2>/dev/null
+
   while :; do
     sleep "$_wait"
     _wait=20
+
+    # run 目录不在时重定向会失败、命令不会执行，每轮顺手补一次
+    [ -d "$MP/run" ] || mkdir -p "$MP/run" 2>/dev/null
 
     # 模块被禁用、正在卸载或已被删除，守护都该退出
     [ -f "$MODDIR/disable" ] && { wlog "模块已禁用, 守护退出"; exit 0; }

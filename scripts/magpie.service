@@ -20,6 +20,10 @@ LOG="$RUN/magpie.log"
 WEB_HOST=${MAGPIE_WEB_ADDR:-"${MAGPIE_ADDR%:*}:3430"}
 WEB_PORT=${WEB_HOST##*:}
 
+# run / data 目录必须在写任何文件之前建好：
+# 否则下面写 web.key 会失败（data 还不存在），面板密钥每次启动都换一个。
+mkdir -p "$RUN" "$magpie_path/data"
+
 # 密钥固定，否则每次重启 WebUI 链接都会变
 WEB_KEY_FILE="$magpie_path/data/web.key"
 if [ -s "$WEB_KEY_FILE" ]; then
@@ -57,8 +61,6 @@ CA_STAMP="$CA_BUNDLE.stamp"
 
 # 系统根证书的两个来源（此处内容相同，按文件名去重）
 CA_DIRS="/system/etc/security/cacerts /apex/com.android.conscrypt/cacerts"
-
-mkdir -p "$RUN" "$magpie_path/data"
 
 # 局域网地址规则与 status.sh / action.sh / doctor.sh 共用同一份实现
 _NETLIB="$(dirname "$0")/lib.sh"
@@ -234,6 +236,14 @@ start() {
     return 0
   fi
 
+  # 主进程不在却有 mcp 子进程在跑：上次多半是崩溃或被强杀，子进程成了孤儿。
+  # 不先收掉就启动，每次重启都会多留一批。只认 ` mcp ` 的命令行，
+  # 用户手上正在跑的 magpie update / gateway-key 之类不会被误杀。
+  for _p in $(magpie_mcp_pids 2>/dev/null); do
+    log Warn "启动前清理孤儿进程 $_p"
+    stop_pid "$_p"
+  done
+
   [ -x "$BIN" ] || { log Error "找不到 $BIN"; return 1; }
 
   clean_logs
@@ -286,14 +296,19 @@ stop() {
   # 打标记，免得看门狗又拉起来
   : > "$USER_STOPPED" 2>/dev/null
   cleanup_legacy_dnsmasq
-  pid=$(running) || { log Info "未在运行"; return 0; }
-  log Warn "正在停止 (PID $pid)"
-  kill -15 "$pid" 2>/dev/null
-  i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
-    sleep 0.1; i=$((i + 1))
-  done
-  kill -9 "$pid" 2>/dev/null
+  pid=$(running)
+  if [ -n "$pid" ]; then
+    log Warn "正在停止 (PID $pid)"
+    kill -15 "$pid" 2>/dev/null
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+      sleep 0.1; i=$((i + 1))
+    done
+    kill -9 "$pid" 2>/dev/null
+  else
+    # 主进程已经不在了，但下面那段孤儿清理仍必须跑
+    log Info "主进程未在运行"
+  fi
 
   # 兜底：主进程被强杀时，MCP 子进程可能变成孤儿留在后台
   for _p in $(magpie_all_pids); do

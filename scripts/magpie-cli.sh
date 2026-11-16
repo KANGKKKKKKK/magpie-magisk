@@ -5,8 +5,29 @@
 #   MAGPIE_BUN    Android 版 Bun（自带的 glibc 版跑不起来）
 # 用法: magpie [参数...]
 
-MAGPIE_DATA=/data/adb/magpie/data
-REAL_BIN=/data/adb/magpie/bin/magpie
+# 数据目录跟着配置走：自定义 magpie_path 时，命令不能还指着默认目录。
+# 查找顺序与 magpie.service / status.sh 一致（MAGPIE_CONF > 数据目录那份 > 模块自带默认）。
+_self="$0"
+while [ -L "$_self" ]; do
+  _l=$(readlink "$_self" 2>/dev/null)
+  case "$_l" in
+    '') break ;;
+    /*) _self="$_l" ;;
+    *)  _self="$(dirname "$_self")/$_l" ;;
+  esac
+done
+_SD=$(cd "$(dirname "$_self")" 2>/dev/null && pwd)
+[ -n "$_SD" ] || _SD=/data/adb/magpie/scripts
+[ -f "$_SD/lib.sh" ] && . "$_SD/lib.sh" 2>/dev/null
+command -v magpie_resolve_conf >/dev/null 2>&1 || magpie_resolve_conf() { return 1; }
+
+magpie_path=/data/adb/magpie
+_CONF=$(magpie_resolve_conf "$_SD/.." 2>/dev/null)
+[ -n "$_CONF" ] && . "$_CONF" 2>/dev/null
+[ -n "${magpie_path:-}" ] || magpie_path=/data/adb/magpie
+
+MAGPIE_DATA="$magpie_path/data"
+REAL_BIN="$magpie_path/bin/magpie"
 
 CA_BUNDLE="$MAGPIE_DATA/certs/ca-bundle.crt"
 CA_STAMP="$CA_BUNDLE.stamp"
@@ -70,5 +91,12 @@ _mp_conf="/data/adb/magpie/scripts/magpie.config"
 [ -f "$_mp_conf" ] && . "$_mp_conf" 2>/dev/null
 export DNS_LOCAL_HOSTNAMES="${DNS_LOCAL_HOSTNAMES:-${MAGPIE_DNS:-223.5.5.5 119.29.29.29 8.8.8.8}}"
 export RES_OPTIONS="${RES_OPTIONS:-timeout:2 attempts:2}"
+
+# 本体不在时给一句能照着做的提示，而不是 shell 的 "not found"
+if [ ! -x "$REAL_BIN" ]; then
+  echo "找不到 magpie 本体：$REAL_BIN" >&2
+  echo "装本体：管理器点 [执行]，或 sh /data/adb/modules/magpie/scripts/install.sh install --yes" >&2
+  exit 127
+fi
 
 exec "$REAL_BIN" "$@"

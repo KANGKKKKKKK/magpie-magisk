@@ -161,6 +161,38 @@ else
   esac
 fi
 
+step "17 收到 TERM：先释放锁再退出，不继续安装"
+if command -v python3 >/dev/null 2>&1; then
+  fresh
+  # 一个只接受连接、从不应答的服务器：把清单下载卡住
+  python3 -c 'import socket,time
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 8898))
+s.listen(1)
+c, _ = s.accept()
+time.sleep(120)' >/dev/null 2>&1 &
+  HANG=$!
+  sleep 0.5
+  MAGPIE_MANIFEST_URL="http://127.0.0.1:8898/manifest.json" \
+    sh "$BASE/install.sh" install --yes >/dev/null 2>&1 &
+  INS=$!
+  sleep 1.5
+  kill -TERM "$INS" 2>/dev/null
+  sleep 1.5
+  if kill -0 "$INS" 2>/dev/null; then
+    bad "收到 TERM 后仍在继续跑"
+    kill -9 "$INS" 2>/dev/null
+  else
+    ok "收到 TERM 后立即退出"
+  fi
+  [ -d "$BASE/.install.lock" ] && bad "锁没释放，别的安装会同时进来" || ok "锁已释放"
+  [ -f "$BASE/bin/magpie" ] && bad "终止后仍落了文件" || ok "没有落盘"
+  kill -9 "$HANG" 2>/dev/null
+else
+  echo "  SKIP 没有 python3，跳过挂起服务器用例"
+fi
+
 rm -rf "$BASE"
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

@@ -397,7 +397,9 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | 上游 DNS，空格分隔 |
 | `MAGPIE_ICON` | `1` | 管理器状态图标：`1` 用 🟢/🔴，`0` 用 `[运行中]`/`[已停止]` |
 
-脚本按顺序找配置文件：先 `/data/adb/magpie/scripts/magpie.config`，不存在才用模块里的 `scripts/magpie.config`。所以**改配置请改数据目录那份**，它不会被模块更新覆盖；两者都不在时使用内置默认值，且默认全部监听 `127.0.0.1`。
+脚本按顺序找配置文件：`MAGPIE_CONF`（显式指定，排障与测试用）→ `/data/adb/magpie/scripts/magpie.config`（用户改的那份）→ 模块里的 `scripts/magpie.config`。所以**改配置请改数据目录那份**，它不会被模块更新覆盖；都不在时使用内置默认值，且默认全部监听 `127.0.0.1`。
+
+改了 `magpie_path` 也无需额外搬文件：服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本都会按配置里的路径工作（配置本身始终从上面几个位置读，不依赖新目录）。
 
 改完重启服务生效：
 
@@ -555,12 +557,14 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 36 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 39 条
 sh tests/test-watchdog.sh                                 # 看门狗 8 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 分支 13 条
+sh tests/test-service.sh                                  # 进程与目录 11 条
 ```
 
-三个套件共 57 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+四个套件共 71 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+`.github/workflows/ci.yml` 在每次推 main 和 PR 时跑同一套；发版工作流打包前也会先跑。
 细节与已知缺口见 [tests/README.md](tests/README.md)。
 
 发版流程：

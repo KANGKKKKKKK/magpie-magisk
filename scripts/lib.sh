@@ -64,6 +64,19 @@ magpie_all_pids() {
   pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'
 }
 
+# 只挑 MCP 子进程（命令行里带 ` mcp `）。
+# 自动清理只能用它：用户手上可能正在跑 `magpie update` 之类的命令，
+# 那不是孤儿，不能被顺手杀掉。
+magpie_mcp_pids() {
+  for _p in $(magpie_all_pids 2>/dev/null); do
+    [ -r "/proc/$_p/cmdline" ] || continue
+    _cl=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
+    case "$_cl" in
+      *" mcp "*) echo "$_p" ;;
+    esac
+  done
+}
+
 # 服务是否在跑：只看主进程。
 # 主进程死了、MCP 子进程残留时，返回真（不在跑），看门狗才会重新拉起。
 magpie_running() {
@@ -86,6 +99,25 @@ magpie_rss_mb() {
 is_elf_file() {
   [ -n "$1" ] && [ -f "$1" ] || return 1
   [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]
+}
+
+# ---------- 配置 ----------
+# 数据目录默认值。注意：解析配置时 magpie_path 必须还是这个默认值，
+# 否则用户改过一次路径后，下一次调用会去新目录找配置、找不到又退回默认值。
+MAGPIE_DEFAULT_PATH=/data/adb/magpie
+
+# 打出一份应使用的配置文件路径；都不存在时返回 1。$1 = 模块目录（可选）
+# 顺序：MAGPIE_CONF > 数据目录那份（用户改的，模块更新不覆盖）> 模块自带默认
+magpie_resolve_conf() {
+  _c="${MAGPIE_CONF:-}"
+  if [ -n "$_c" ] && [ -f "$_c" ]; then echo "$_c"; return 0; fi
+  if [ -f "$MAGPIE_DEFAULT_PATH/scripts/magpie.config" ]; then
+    echo "$MAGPIE_DEFAULT_PATH/scripts/magpie.config"; return 0
+  fi
+  if [ -n "${1:-}" ] && [ -f "$1/scripts/magpie.config" ]; then
+    echo "$1/scripts/magpie.config"; return 0
+  fi
+  return 1
 }
 
 # 本体是否「看起来可用」：存在、可执行、是 ELF。

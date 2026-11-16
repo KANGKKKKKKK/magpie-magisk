@@ -2,7 +2,25 @@
 # Magpie for Android - 卸载：彻底停服务并清掉所有产物
 
 MODDIR=${0%/*}
-DATA=/data/adb/magpie
+
+# 数据目录跟着配置走，否则自定义 magpie_path 的用户卸载后会留下一整套
+# 二进制、配置、密钥和用量记录。查找顺序与其它脚本一致。
+[ -f "$MODDIR/scripts/lib.sh" ] && . "$MODDIR/scripts/lib.sh" 2>/dev/null
+command -v magpie_resolve_conf >/dev/null 2>&1 || magpie_resolve_conf() { return 1; }
+magpie_path=/data/adb/magpie
+_CONF=$(magpie_resolve_conf "$MODDIR" 2>/dev/null)
+[ -n "$_CONF" ] && . "$_CONF" 2>/dev/null
+DATA=${magpie_path:-/data/adb/magpie}
+
+# rm -rf 之前先确认路径像话：配置写错一个字都不能变成删系统目录
+cleanable() {
+  case "$1" in
+    ''|/|/data|/data/adb|/data/adb/modules|/sdcard|/sdcard/*|/storage|/storage/*|/mnt|/mnt/*|/system|/system/*)
+      return 1 ;;
+    /*) return 0 ;;
+  esac
+  return 1
+}
 
 # 先立标记，service.sh 的看门狗看到就不再把服务拉回来
 : > "$MODDIR/.uninstalling" 2>/dev/null
@@ -54,15 +72,24 @@ for _p in /data/adb/ksu/bin /data/adb/magisk /data/adb/ap/bin; do
 done
 
 # 6) 数据目录：设置、供应商、网关 key、用量记录、证书、日志、Bun 缓存全在里面
-if [ -d "$DATA" ]; then
-  _sz=$(du -sh "$DATA" 2>/dev/null | awk '{print $1}')
-  rm -rf "$DATA"
-  if [ -d "$DATA" ]; then
-    echo "- 清理 $DATA 失败, 请手动删除"
-  else
-    echo "- 已清理 $DATA${_sz:+ ($_sz)}"
+#    自定义过 magpie_path 的话，默认目录里可能还有更早的残留，两个都清。
+_seen=""
+for _dir in "$DATA" /data/adb/magpie; do
+  case " $_seen " in *" $_dir "*) continue ;; esac
+  _seen="$_seen $_dir"
+  [ -d "$_dir" ] || continue
+  if ! cleanable "$_dir"; then
+    echo "- 跳过可疑路径 $_dir, 请手动确认"
+    continue
   fi
-fi
+  _sz=$(du -sh "$_dir" 2>/dev/null | awk '{print $1}')
+  rm -rf "$_dir"
+  if [ -d "$_dir" ]; then
+    echo "- 清理 $_dir 失败, 请手动删除"
+  else
+    echo "- 已清理 $_dir${_sz:+ ($_sz)}"
+  fi
+done
 
 # 7) 面板文件里有网关 key，模块目录若残留也一并清掉
 rm -f "$MODDIR/webroot/status.json" "$MODDIR/webroot/lastlog.txt" 2>/dev/null
