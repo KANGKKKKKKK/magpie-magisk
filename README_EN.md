@@ -65,6 +65,7 @@ to see the state and clean up after itself.
 | CA bundle | Merges system roots for the static Go binary, rebuilds when system CAs change |
 | Log rotation | Rotates to `.1` past 5 MB, keeps one generation |
 | Online update | The manager can pull new versions directly |
+| Installs the body | No body yet? Tapping `[Action]` downloads and installs it: sha256 checked, atomic replace, no debris left on failure |
 | Clean uninstall | Stops the service, kills the watchdog, removes `PATH` links, deletes the data dir, then verifies |
 
 ## Quick start
@@ -73,22 +74,32 @@ to see the state and clean up after itself.
 
 - [ ] Rooted device with Magisk / KernelSU / APatch
 - [ ] **arm64** (magpie's binary is an arm64 ELF; arm32 and x86_64 will not run)
-- [ ] magpie already in place: `/data/adb/magpie/bin/magpie` executable and `/data/adb/magpie/data` exists
 - [ ] Familiar with "install from storage" in the manager
+- [ ] magpie's binary: **use it if you have it — let the module install it if you don't** (next step)
 
 > [!IMPORTANT]
-> The module does **not** bundle magpie. Flashing this zip alone leaves the service failing to
-> start because `/data/adb/magpie/bin/magpie` is missing — the installer warns about it but does
-> not abort.
+> The module does **not** bundle magpie (the arm64 binary is ~87 MB). Without it the service will
+> not start; flashing only warns and does not abort, and the watchdog will not spin retrying.
 
 ### Steps
 
-**1. Verify the binary**
+**1. Get the binary there (either way)**
+
+Already have it — just check:
 
 ```sh
-su -c ls -l /data/adb/magpie/bin/magpie   # should be an executable file
-su -c chmod 755 /data/adb/magpie/bin/magpie
+su -c sh /data/adb/modules/magpie/scripts/install.sh status
+# state=ready version=0.1.4302 path=/data/adb/magpie/bin/magpie
 ```
+
+Don't have it — let the module fetch and install it:
+
+```sh
+su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
+```
+
+Or do nothing and tap `[Action]` after flashing; it runs the same flow.
+Details and the security notes are in [Installing the body](#installing-the-body).
 
 **2. Install the module**
 
@@ -136,6 +147,56 @@ chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
 
+## Installing the body
+
+When no body is present, `[Action]` stops being a toggle and becomes the install entry point.
+The same thing from a shell:
+
+```sh
+su -c sh /data/adb/modules/magpie/scripts/install.sh status    # detect only
+su -c sh /data/adb/modules/magpie/scripts/install.sh check     # ask if a newer one exists, no download
+su -c sh /data/adb/modules/magpie/scripts/install.sh plan      # say what would be installed, no download
+su -c sh /data/adb/modules/magpie/scripts/install.sh install   # plan first, download on a second tap
+su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes   # just install
+su -c sh /data/adb/modules/magpie/scripts/install.sh rollback  # go back to the backup
+```
+
+**Where it comes from.** The manifest is `https://usemagpie.ai/api/latest` — magpie's own update
+endpoint, the same one `magpie update` uses. The asset is `magpie-cli-android-arm64`, the only
+Android build on the release page (there is no arm32 one). Downloads prefer the vendor CDN and fall
+back to GitHub.
+
+**How it is verified.** The manifest gives `size` and `sha256`; both are checked after download and
+a mismatch means discard and try the next source. `SHA256SUMS` and GitHub's API `digest` field agree
+with that value. **Caveat:** that sha256 comes from the same manifest, so the trust anchor is
+"usemagpie.ai over TLS" — the same assumption magpie's own updater makes. The release also ships
+`SHA256SUMS.sig`, but this module has no pinned key, so it does **not** claim GPG verification.
+
+**How it is deployed.** Download to a temp file on the same filesystem → verify → atomic `mv`
+(never a half-written binary); the previous body is backed up to `bin/magpie.bak` first. A
+`--version` self-check runs right after install: if it fails, roll back; on a first install with no
+backup the sample is moved to `bin/magpie.rejected` with its sha256 printed, and nothing that "looks
+installed" is left at the real path.
+
+**What it does not do.** No automatic download, no checking on every boot, no automatic upgrades, no
+overwriting a working body (unless you pass `install --yes`), and no touching `data/`, config,
+accounts, providers, keys or listen addresses. Upgrades are the binary's own job:
+
+```sh
+su -c magpie update check   # just tell me if one is out
+su -c magpie update         # download, verify, restart into it
+```
+
+> [!NOTE]
+> Flashing the module does **not** download anything. The flash flow has no dependable interactive
+> terminal and 87 MB is a lot, so `customize.sh` only detects and tells you how; the download
+> happens when you confirm it.
+
+> [!TIP]
+> To use another source (an internal mirror, a cache):
+> `MAGPIE_MANIFEST_URL=https://internal/… sh install.sh install --yes`.
+> Same manifest format required. The asset name can be overridden with `MAGPIE_ASSET_KEY`.
+
 ## Daily use
 
 ### The action button
@@ -144,8 +205,9 @@ The `[Action]` button in the manager is a **toggle**:
 
 | Current state | What tapping does |
 | --- | --- |
+| No body / won't run | Enters the install flow: prints version, size and source; a second tap downloads |
 | Running | Prints PID, gateway URL and panel URL, then **stops** (writes `.user_stopped`; the watchdog will not fight you) |
-| Stopped | Starts, prints the same info, opens the panel |
+| Stopped (body ready) | Starts, prints the same info, opens the panel |
 
 One button, two outcomes. Check the module row first to see which one you will get.
 
@@ -379,7 +441,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 `scripts/doctor.sh` runs eight read-only checks:
 
 ```
-[1/8] binary and process    executable? version? PID? oom_score_adj?
+[1/8] binary and process    installed? runs? version? PID? oom_score_adj?
 [2/8] listeners             is anything on the gateway / panel ports
 [3/8] local reachability    does the gateway answer 200
 [4/8] panel and password    is data/web.key there, does it work
@@ -391,6 +453,11 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 | Symptom | Fix |
 | --- | --- |
+| Says the body is not installed | Expected state, not a fault. See [Installing the body](#installing-the-body) |
+| Install: cannot fetch the manifest | No network, or the endpoint is blocked. Try `install.sh check`; use `MAGPIE_MANIFEST_URL` for another source |
+| Install: sha256 mismatch | Something rewrote or truncated the download. Retry on another network; if it persists, do not install — check the release page |
+| Install: runs, then fails the self-check | First install leaves the sample at `bin/magpie.rejected` with its digest; an existing body is rolled back from `bin/magpie.bak` |
+| Want the previous body back | `install.sh rollback` |
 | Start fails, log says port in use | Previous process still alive: `pidof magpie`, kill it, `start` again |
 | Panel data never changes | Expected: the webroot panel reads `status.json`, a snapshot from the last toggle |
 | HTTPS fails with certificate errors | Delete `/data/adb/magpie/data/certs/ca-bundle.crt*` and restart; it rebuilds |
@@ -462,7 +529,8 @@ magpie-magisk/
 ├── scripts/
 │   ├── magpie.service                start / stop / restart / status
 │   ├── status.sh                     manager description, status.json, log tail
-│   ├── lib.sh                        LAN address + process helpers, shared
+│   ├── install.sh                    detect / download / verify / deploy the body
+│   ├── lib.sh                        LAN address, process and body helpers, shared
 │   ├── doctor.sh                     eight self-checks
 │   ├── magpie-cli.sh                 environment wrapper around the binary
 │   └── magpie.config                 configuration defaults
@@ -483,6 +551,10 @@ Generated at runtime, never committed:
 /data/adb/magpie/run/lan.url           LAN address (when exposed)
 /data/adb/magpie/run/.user_stopped     marker for a manual stop
 /data/adb/magpie/run/magpie.pid        PID file
+/data/adb/magpie/install-info.txt      install record (version, source, digest; mode 600)
+/data/adb/magpie/bin/magpie.bak        previous body, for rollback
+/data/adb/magpie/.install.lock         install mutex
+/data/adb/magpie/.install.pending      second-tap confirmation marker
 /data/adb/magpie/data/certs/           CA bundle and its fingerprint
 webroot/status.json                    panel data (contains keys, mode 600)
 webroot/lastlog.txt                    panel log tail (mode 600)
@@ -515,6 +587,12 @@ cache) and finally verifies nothing is left.
 
 ## Known limitations
 
+- The installer supports **arm64 only**: the release page has no arm32 / x86_64 Android build, so
+  other architectures are refused outright instead of getting a wrong binary.
+- The installer handles **first install only**. It will not upgrade a body that is already there —
+  use `magpie update` for that (it ships with the binary and follows the vendor).
+- Digests come from usemagpie.ai's manifest; no GPG verification is done. See
+  [Installing the body](#installing-the-body).
 - The webroot panel's uptime, memory and log tail are a **snapshot from the last toggle**; they do
   not tick.
 - magpie itself is not bundled; its own updates are its business.

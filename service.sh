@@ -34,26 +34,65 @@ rotate_log() {
 (
   wlog() { echo "$(date +'%Y-%m-%d %H:%M:%S') $1" >> "$WATCH_LOG" 2>/dev/null; }
 
-  # 局域网地址探测（与 magpie.service 共用实现）
+  # 局域网地址与进程识别（与 magpie.service 共用实现）
   _NETLIB="$MODDIR/scripts/lib.sh"
-  if [ -f "$_NETLIB" ]; then . "$_NETLIB"; else lan_ip() { return 1; }; fi
+  if [ -f "$_NETLIB" ]; then
+    . "$_NETLIB"
+  else
+    lan_ip() { return 1; }
+    magpie_running() { pidof magpie >/dev/null 2>&1; }
+    magpie_bin_usable() { [ -x "$1" ]; }
+  fi
 
-  # 上次刷新时的地址，用来判断有没有变
   _last_lan=""
+  _wait=20          # 下一轮睡多久；失败时退避，成功即复位
+  _miss_logged=0    # 本体缺失只记一次，不刷日志
+  _fail=0           # 连续拉起失败次数
 
   while :; do
-    sleep 20
+    sleep "$_wait"
+    _wait=20
 
     # 模块被禁用、正在卸载或已被删除，守护都该退出
     [ -f "$MODDIR/disable" ] && { wlog "模块已禁用, 守护退出"; exit 0; }
     [ -f "$MODDIR/.uninstalling" ] && { wlog "模块卸载中, 守护退出"; exit 0; }
     [ -d "$MODDIR" ] || exit 0
 
+    # 本体不在或不可执行：跳过这一轮，别每 20 秒撞一次墙刷日志
+    if ! magpie_bin_usable "$MP/bin/magpie"; then
+      if [ "$_miss_logged" = "0" ]; then
+        wlog "本体未安装或不可用（$MP/bin/magpie），暂停重启尝试"
+        wlog "  装好用 sh $MODDIR/scripts/install.sh install --yes，或在管理器点 [执行]"
+        _miss_logged=1
+      fi
+      _wait=300
+      rotate_log "$WATCH_LOG"
+      continue
+    fi
+    if [ "$_miss_logged" = "1" ]; then
+      wlog "本体已就位，恢复巡检"
+      _miss_logged=0
+      _fail=0
+    fi
+
     # 存在 .user_stopped 表示用户主动停止，不要拉回
     if [ ! -f "$MP/run/.user_stopped" ] && ! magpie_running; then
       wlog "magpie 未运行, 重新拉起"
-      sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1
-      sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+      if sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1; then
+        _fail=0
+        sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+      else
+        # 拉起失败时指数退避，最长 10 分钟一次，避免一直刷日志
+        _fail=$((_fail + 1))
+        _wait=20
+        _i=1
+        while [ "$_i" -lt "$_fail" ] && [ "$_wait" -lt 600 ]; do
+          _wait=$((_wait * 2))
+          _i=$((_i + 1))
+        done
+        [ "$_wait" -gt 600 ] && _wait=600
+        wlog "拉起失败（连续 $_fail 次），$_wait 秒后再试"
+      fi
     fi
 
     # 服务在跑时盯住局域网地址：WiFi 重连、热点开关、切飞行模式
@@ -66,7 +105,7 @@ rotate_log() {
         _old=$(cat "$MP/run/lan.url" 2>/dev/null)
         _old=$(echo "$_old" | sed -n 's#^http://\([^:]*\):.*#\1#p')
         if [ "$_cur_lan" != "$_old" ]; then
-          echo "$(date +'%Y-%m-%d %H:%M:%S') 局域网地址 ${_old:-无} -> ${_cur_lan:-无}" >>"$WATCH_LOG" 2>/dev/null
+          wlog "局域网地址 ${_old:-无} -> ${_cur_lan:-无}"
           sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
         fi
       fi

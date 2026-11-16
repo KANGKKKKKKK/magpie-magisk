@@ -79,3 +79,19 @@ magpie_rss_mb() {
   done
   [ "$_sum" -gt 0 ] && echo "$((_sum / 1024))"
 }
+
+# ---------- 本体可用性 ----------
+
+# 是不是 ELF（只看头 4 字节）
+is_elf_file() {
+  [ -n "$1" ] && [ -f "$1" ] || return 1
+  [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]
+}
+
+# 本体是否「看起来可用」：存在、可执行、是 ELF。
+# 这是便宜检查，给看门狗这类高频路径用；要确认真的能跑，
+# 用 scripts/install.sh status（它会实际执行 --version）。
+magpie_bin_usable() {
+  [ -n "$1" ] || return 1
+  [ -f "$1" ] && [ -x "$1" ] && is_elf_file "$1"
+}
