@@ -138,6 +138,29 @@ out=$(run install --yes)
 case "$out" in *"过期锁"*) ok "识别并清理了过期锁" ;; *) bad "没有处理过期锁：$out" ;; esac
 case "$out" in *"已安装 magpie 9.9.9"*) ok "清理后安装成功" ;; *) bad "清理后仍失败" ;; esac
 
+step "16 找不到下载器时的行为"
+fresh
+# 造一个「有常用工具但没有 wget/curl」的 PATH，逼它走兜底
+mkdir -p "$BASE/nodl"
+for t in sh awk sed grep mkdir rm stat df cut tr head sleep date sha256sum od cmp dirname basename uname cat ls; do
+  p=$(command -v "$t" 2>/dev/null) || continue
+  ln -sf "$p" "$BASE/nodl/$t" 2>/dev/null
+done
+out=$(env PATH="$BASE/nodl" sh "$BASE/install.sh" plan 2>&1)
+if [ -x /data/adb/magisk/busybox ]; then
+  # Android：兜底应该能靠 Root 方案自带的 busybox 成功
+  case "$out" in
+    *"将安装 magpie 9.9.9"*) ok "没有 wget 时用 busybox 兜底成功" ;;
+    *) bad "busybox 兜底没生效：$out" ;;
+  esac
+else
+  # 桌面：没有 busybox 也没有 curl，应该给出可读的失败提示而不是静默
+  case "$out" in
+    *"下载器"*|*"取不到更新清单"*) ok "明确报告拿不到清单/没有下载器" ;;
+    *) bad "失败信息不可读：$out" ;;
+  esac
+fi
+
 rm -rf "$BASE"
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

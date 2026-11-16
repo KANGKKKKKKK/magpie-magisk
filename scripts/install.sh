@@ -19,6 +19,12 @@
 
 umask 022
 
+# 把各 Root 方案自带的 busybox 放进 PATH。
+# 实测：模块脚本被管理器/服务拉起时，PATH 可能只有系统目录，那里没有
+# wget、awk、sed、stat、sha256sum —— 下载和校验会全部失败。
+# magpie.service 早就这么做了，安装器同样需要。
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
+
 MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
 
@@ -106,15 +112,82 @@ extract_asset() {
     }' "$1" | head -1
 }
 
+# ---------- 下载器 ----------
+# 模块脚本不能假定 wget 在 PATH 上。实测：同样调用 `sh 脚本`，有的上下文里
+# `command -v wget` 是空的（模块被管理器/服务拉起时更明显），于是下载全失败。
+# 这里按 环境变量 → PATH 里的 wget → 三大 Root 方案自带的 busybox → curl 依次找。
+
+DL_CMD=""
+DL_KIND=""
+
+pick_downloader() {
+  [ -n "$DL_KIND" ] && return 0
+  if [ -n "${MAGPIE_DL:-}" ]; then
+    DL_CMD="$MAGPIE_DL"; DL_KIND=curl
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    DL_CMD="wget"; DL_KIND=wget
+    return 0
+  fi
+  for _bb in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
+    if [ -x "$_bb" ] && "$_bb" wget --help >/dev/null 2>&1; then
+      DL_CMD="$_bb"; DL_KIND=busybox
+      return 0
+    fi
+  done
+  if command -v busybox >/dev/null 2>&1 && busybox wget --help >/dev/null 2>&1; then
+    DL_CMD="busybox"; DL_KIND=busybox
+    return 0
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    DL_CMD="curl"; DL_KIND=curl
+    return 0
+  fi
+  return 1
+}
+
+# 下载 $1 到 $2，超时 60 秒。成功返回 0。
+dl_fetch() {
+  _url="$1"; _out="$2"
+  pick_downloader || return 127
+  case "$DL_KIND" in
+    wget)    wget -q -O "$_out" -T 60 "$_url" 2>/dev/null ;;
+    busybox) "$DL_CMD" wget -q -O "$_out" -T 60 "$_url" 2>/dev/null ;;
+    curl)    "$DL_CMD" -fsSL --max-time 600 -o "$_out" "$_url" 2>/dev/null ;;
+    *)       return 127 ;;
+  esac
+}
+
+# 下载器的人话名字，用于报错
+dl_name() {
+  pick_downloader || { echo "无"; return 0; }
+  case "$DL_KIND" in
+    busybox) echo "$DL_CMD wget" ;;
+    *)       echo "$DL_CMD" ;;
+  esac
+}
+
 fetch_manifest() {
   # $1 = 输出文件（压缩后的版本）
   _raw="$1.raw"
   rm -f "$1" "$_raw" 2>/dev/null
-  wget -q -O "$_raw" -T 45 "$MANIFEST_URL" 2>/dev/null
-  if [ ! -s "$_raw" ]; then
+
+  # 清单很小，但同样容许一次抖动
+  _ok=0
+  for _try in 1 2; do
+    [ "$_try" = "2" ] && sleep 2
+    if dl_fetch "$MANIFEST_URL" "$_raw" && [ -s "$_raw" ]; then
+      _ok=1
+      break
+    fi
+  done
+  if [ "$_ok" != "1" ]; then
     rm -f "$_raw" 2>/dev/null
+    say "  （下载器：$(dl_name)）"
     return 1
   fi
+
   minify_json "$_raw" > "$1" 2>/dev/null
   rm -f "$_raw" 2>/dev/null
   [ -s "$1" ] || return 1
@@ -246,7 +319,7 @@ download_verified() {
       say "  下载 $_u"
       say "  （约 $(human_size "$_want_size")，视网络可能要几分钟）"
       rm -f "$_tmp" 2>/dev/null
-      if ! wget -q -O "$_tmp" -T 60 "$_u" 2>/dev/null; then
+      if ! dl_fetch "$_u" "$_tmp"; then
         warn "下载失败，换下一个来源"
         continue
       fi

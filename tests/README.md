@@ -45,6 +45,29 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 | 14 | 并发安装被锁拦住 |
 | 15 | 过期锁能清理，清理后安装成功 |
 
+## 在 Android 上跑
+
+Android 上还要额外验证「模块脚本被管理器拉起」那种环境 —— `PATH` 只有系统目录、
+没有 `wget`。用一个最小的仓库镜像跑一遍：
+
+```sh
+R=/data/local/tmp/mgrepo
+mkdir -p $R/scripts $R/tests
+cp /data/adb/modules/magpie/scripts/install.sh $R/scripts/
+cp /data/adb/modules/magpie/scripts/lib.sh     $R/scripts/
+cp /data/adb/modules/magpie/service.sh         $R/
+cp tests/* $R/tests/
+
+# 把 PATH 收窄到系统目录，逼它走 busybox 兜底
+env PATH=/product/bin:/system/bin:/system/xbin \
+  TEST_SRV=http://127.0.0.1:8899 TEST_BASE=/data/local/tmp/mg-it \
+  /system/bin/sh $R/tests/test-install.sh
+
+env PATH=/product/bin:/system/bin:/system/xbin \
+  TEST_BASE=/data/local/tmp/mg-wd \
+  /system/bin/sh $R/tests/test-watchdog.sh
+```
+
 ## 真机上的额外验证（不在 CI 里）
 
 - 用真实清单跑过一次完整安装到沙箱目录：87 MB 从厂商 CDN 下载、sha256 与清单一致、
@@ -54,5 +77,6 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 ## 已知缺口
 
 - 没有覆盖「下载中途断网」：夹具是本地文件，断网场景需要额外的代理或断点工具才能模拟。
+- 没有覆盖「下载中途断网」之外的网络异常（DNS 失败、TLS 被拦）在桌面侧的复现。
 - 没有覆盖 arm32 / x86_64 设备：`check_arch` 会直接拒绝，但没有在真机上跑过非 arm64。
 - 没有覆盖自定义 `magpie_path` 的完整安装（只覆盖了拒绝非法路径的分支）。

@@ -192,6 +192,12 @@ su -c magpie update         # download, verify, restart into it
 > terminal and 87 MB is a lot, so `customize.sh` only detects and tells you how; the download
 > happens when you confirm it.
 
+> [!NOTE]
+> The installer does not assume `wget` is on `PATH`. Module scripts started by the manager often
+> get a system-only `PATH` with no `wget` in it; the installer prepends each root solution's bin
+> directory and falls back to busybox's own `wget` when needed. Set `MAGPIE_DL=/path/to/curl` to
+> force another downloader.
+
 > [!TIP]
 > To use another source (an internal mirror, a cache):
 > `MAGPIE_MANIFEST_URL=https://internal/… sh install.sh install --yes`.
