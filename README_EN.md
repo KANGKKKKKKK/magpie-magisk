@@ -14,9 +14,11 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 </div>
 
 > [!NOTE]
-> This repository contains **only the module scripts**, not magpie itself (the arm64 binary is ~74 MB).
-> The module assumes magpie is already installed at `/data/adb/magpie` and only keeps it running
-> reliably. Providers, models and quotas are magpie's own business, not this module's.
+> This repository contains **only the module scripts**, not magpie itself (the arm64 binary is ~87 MB).
+> Not having it is fine: tap `[Action]` after flashing and the module downloads and installs it.
+>
+> The module only keeps magpie running on this phone. Providers, models, quotas and accounts are
+> magpie's own business, not this module's.
 
 ## Contents
 
