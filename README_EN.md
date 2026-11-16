@@ -33,6 +33,7 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 - [Uninstall](#uninstall)
 - [Updates](#updates)
 - [Known limitations](#known-limitations)
+- [Development and tests](#development-and-tests)
 - [Credits](#credits)
 
 ## Why this exists
@@ -607,6 +608,29 @@ cache) and finally verifies nothing is left.
 - Tested on arm64 + Android 14 (HyperOS 2.0); theoretically any arm64 device on Android 10+.
 - Legacy dnsmasq cleanup targets only old processes with `listen-address=::1`; the system's
   tethering dnsmasq is never touched.
+
+## Development and tests
+
+```sh
+python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
+(cd /tmp/fx && python3 -m http.server 8899) &   # serve them
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 36 assertions
+sh tests/test-watchdog.sh                                 # watchdog, 8 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] branches, 13 assertions
+```
+
+57 assertions total, all in temp directories with stubbed process checks — a running service is
+never touched. Details and known gaps in [tests/README.md](tests/README.md).
+
+Releasing:
+
+1. bump `version` and `versionCode` in `module.prop`;
+2. tag the same name (e.g. `v0.8`) and push the tag;
+3. the workflow packs the zip, checks its structure, publishes the release and rewrites
+   `update.json`.
+
+If the tag and `module.prop`'s `version` disagree, the workflow fails on purpose rather than
+shipping a mislabelled build.
 
 ## Credits
 

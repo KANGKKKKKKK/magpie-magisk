@@ -32,6 +32,7 @@
 - [卸载](#卸载)
 - [更新](#更新)
 - [已知限制](#已知限制)
+- [开发与测试](#开发与测试)
 - [贡献者与致谢](#贡献者与致谢)
 - [许可证](#许可证)
 
@@ -545,6 +546,27 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - KernelSU / APatch 的路径都已经在脚本里覆盖（`ksud`、`/data/adb/ap/bin`、`/data/adb/ksud`），但**只在 Magisk 31.1 上实测过**，KernelSU / APatch 未实测。
 - 只在 arm64 + Android 14（HyperOS 2.0）实测；理论上 Android 10+ 的 arm64 设备都适用。
 - 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
+
+## 开发与测试
+
+```sh
+python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
+(cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 36 条
+sh tests/test-watchdog.sh                                 # 看门狗 8 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 分支 13 条
+```
+
+三个套件共 57 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+细节与已知缺口见 [tests/README.md](tests/README.md)。
+
+发版流程：
+
+1. 改 `module.prop` 的 `version` 与 `versionCode`；
+2. 打同名 tag（如 `v0.8`）并推送；
+3. 工作流自动打包、校验 zip 结构、发 Release、回写 `update.json`。
+
+tag 与 `module.prop` 的 `version` 不一致时工作流会主动失败，避免发出错版本。
 
 ## 贡献者与致谢
 
