@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: magpie 本体的问题（provider、模型、额度、账号、面板）
+    url: https://github.com/yetone/magpie/issues
+    about: 本模块只是让 magpie 在手机上跑起来；本体自身的行为请找上游。
+  - name: 先看一眼排障表
+    url: https://github.com/KANGKKKKKKK/magpie-magisk#自检与排障
+    about: 常见现象与对应处理都在 README 里；跑一次 doctor.sh 往往更快。

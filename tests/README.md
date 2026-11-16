@@ -1,6 +1,15 @@
 # 测试
 
-两个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程不被触碰。
+三个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程被桩替代。
+合计 57 条断言（36 + 8 + 13），在桌面 Linux 与 Android 上各跑一遍都是全通过。
+
+| 套件 | 断言数 | 测什么 |
+| --- | --- | --- |
+| `test-install.sh` | 36 | 安装器的 16 个用例 |
+| `test-watchdog.sh` | 8 | 看门狗的决定逻辑 |
+| `test-action.sh` | 13 | `[执行]` 按钮的分支选择 |
+
+需要夹具的套件（install、action）要先起一个静态文件服务；watchdog 不需要。
 
 ## 看门狗决定逻辑
 
@@ -15,6 +24,25 @@ sh tests/test-watchdog.sh
 3. 拉起成功时不报失败；
 4. `run/.user_stopped` 存在时不拉起。
 
+## `[执行]` 按钮的分支
+
+```sh
+python3 tests/make-fixtures.py /tmp/fx
+(cd /tmp/fx && python3 -m http.server 8899) &
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
+```
+
+4 个用例，只验分支选择，不验启停实现：
+
+1. 本体缺失 → 进安装流程，**不调用启停**，也不提前下载；
+2. 本体损坏 → 同样进安装流程；
+3. 本体就绪且服务在跑 → 进停止分支（进程判定是桩，恒为「在跑」，
+   所以停止循环必然超时，此时如实报失败才算对）；
+4. 本体就绪但服务没跑 → 进启动分支。
+
+隔离的关键是两处：`action.sh` 与 `install.sh` 的 `CONF` 都要改指沙箱配置，
+`magpie_running` 必须换成桩 —— 真实 magpie 就在跑，不可能凭空消失。
+
 ## 本体安装器
 
 需要一个静态文件服务来提供夹具。
@@ -25,7 +53,7 @@ python3 tests/make-fixtures.py /tmp/fx
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 ```
 
-覆盖 15 个用例：
+覆盖 16 个用例：
 
 | # | 用例 |
 | --- | --- |
@@ -44,6 +72,7 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 | 13 | 清单取不到时错误可读（`install` 与 `plan`） |
 | 14 | 并发安装被锁拦住 |
 | 15 | 过期锁能清理，清理后安装成功 |
+| 16 | `PATH` 里没有 `wget` 时靠 busybox 兜底（Android）/ 给出可读失败（桌面） |
 
 ## 在 Android 上跑
 
@@ -66,6 +95,10 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 env PATH=/product/bin:/system/bin:/system/xbin \
   TEST_BASE=/data/local/tmp/mg-wd \
   /system/bin/sh $R/tests/test-watchdog.sh
+
+env PATH=/product/bin:/system/bin:/system/xbin \
+  TEST_SRV=http://127.0.0.1:8899 TEST_BASE=/data/local/tmp/mg-act \
+  /system/bin/sh $R/tests/test-action.sh
 ```
 
 ## 真机上的额外验证（不在 CI 里）

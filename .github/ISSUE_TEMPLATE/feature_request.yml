@@ -1,0 +1,34 @@
+name: 功能建议
+description: 想要模块多做点什么，或现在的做法哪里别扭
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先说清范围：本模块只负责**让 magpie 在 Android 上稳定运行**。
+        provider、模型、额度、账号这些属于 magpie 本体，改它们请去
+        [magpie 仓库](https://github.com/yetone/magpie/issues)。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么
+      description: 描述场景与当前的别扭之处，比直接给方案更有用。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的做法
+      description: 有具体想法就写；没有也可以只写问题。
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 现在你怎么绕过去的
+      description: 临时办法、手动命令都算。
+    validations:
+      required: false
