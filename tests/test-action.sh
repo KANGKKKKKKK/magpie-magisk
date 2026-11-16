@@ -55,6 +55,8 @@ build() {
 
 export MAGPIE_MANIFEST_URL="$SRV/manifest.json"
 export MAGPIE_CONFIRM_WINDOW=600
+# 这条用例会调 install.sh plan；CI 在 x86_64 上会被架构闸门挡掉
+export MAGPIE_ALLOW_ANY_ARCH=1
 
 echo "== 1 本体缺失：应进安装流程，不调用启停"
 build missing stopped
