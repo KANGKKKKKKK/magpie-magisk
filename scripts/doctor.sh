@@ -45,12 +45,22 @@ echo "  监听   网关 $MAGPIE_ADDR  面板 ${MAGPIE_WEB_ADDR:-未设置}"
 echo
 
 echo "[1/8] 本体与进程"
-if [ -x "$magpie_path/bin/magpie" ]; then
-  _v=$(HOME="$magpie_path/data" "$magpie_path/bin/magpie" --version 2>/dev/null | head -1)
-  ok "本体可执行${_v:+：$_v}"
-else
-  bad "找不到可执行的 $magpie_path/bin/magpie" "先装好 magpie 本体，本模块不含本体"
-fi
+_st_raw=$(sh "$MODDIR/scripts/install.sh" status 2>/dev/null)
+_st=$(printf '%s' "$_st_raw" | sed -n 's/^state=\([a-z]*\).*/\1/p')
+_bv=$(printf '%s' "$_st_raw" | sed -n 's/.*version=\([^ ]*\).*/\1/p')
+case "$_st" in
+  ready)
+    ok "本体可用${_bv:+：magpie $_bv}" ;;
+  broken)
+    bad "本体存在但跑不起来（$magpie_path/bin/magpie）" \
+        "重装可修：sh $MODDIR/scripts/install.sh install --yes" ;;
+  missing|'')
+    bad "本体未安装" \
+        "本模块不含本体。安装：sh $MODDIR/scripts/install.sh install --yes（或在管理器点 [执行]）" ;;
+  *)
+    warn "本体状态未知：$_st" ;;
+esac
+
 PID=$(magpie_main_pid 2>/dev/null)
 if [ -n "$PID" ]; then
   ok "服务在运行（PID $PID）"
@@ -60,8 +70,11 @@ if [ -n "$PID" ]; then
     '')    warn "读不到 oom_score_adj" ;;
     *)     warn "oom_score_adj $_oom（不是 -1000）" "restart 服务会试着改回 -1000；长期偏低可查省电类模块是否在改它" ;;
   esac
-else
+elif [ "$_st" = "ready" ]; then
   bad "服务未运行" "sh $MODDIR/scripts/magpie.service start"
+else
+  # 本体都没就绪，服务没跑属于预期，不必再报一次错
+  warn "服务未运行（本体未就绪，属预期）" "装好本体后再启动：sh $MODDIR/scripts/magpie.service start"
 fi
 
 echo "[2/8] 端口监听"

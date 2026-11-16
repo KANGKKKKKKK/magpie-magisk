@@ -26,6 +26,16 @@ sync_status() {
   [ -f "$MODDIR/scripts/status.sh" ] && sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
 }
 
+# 本体是否可用（跑一次 --version 确认）。点按是低频操作，这个开销可以承担。
+install_ready() {
+  [ -f "$MODDIR/scripts/install.sh" ] || return 0   # 老版本没这个脚本，不拦
+  _s=$(sh "$MODDIR/scripts/install.sh" status 2>/dev/null)
+  case "$_s" in
+    state=ready*) return 0 ;;
+  esac
+  return 1
+}
+
 # 局域网地址实时算，不读 run/lan.url —— 那是启动时的快照，
 # WiFi 换过、热点开关过之后就可能指向一个已经不存在的地址。
 _NETLIB="$MODDIR/scripts/lib.sh"
@@ -63,6 +73,22 @@ print_endpoints() {
       ;;
   esac
 }
+
+# ---------- 本体没就绪：进入安装流程 ----------
+# 未安装或已损坏时，[执行] 不再是启停开关，而是装本体的入口。
+if ! install_ready; then
+  _st=$(sh "$MODDIR/scripts/install.sh" status 2>/dev/null | sed -n 's/^state=\([a-z]*\).*/\1/p')
+  case "$_st" in
+    broken) echo "Magpie 本体存在但跑不起来" ;;
+    *)      echo "Magpie 本体尚未安装" ;;
+  esac
+  echo
+  # 无 --yes：第一次点按只打印方案，窗口内再点一次才真正下载
+  sh "$MODDIR/scripts/install.sh" install
+  echo
+  sync_status
+  exit 0
+fi
 
 # ---------- 运行中：打印信息后停止 ----------
 if is_running; then

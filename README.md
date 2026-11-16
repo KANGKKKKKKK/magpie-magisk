@@ -7,8 +7,8 @@
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
 [![Magisk](https://img.shields.io/badge/Magisk-20.4%2B-00af9c?style=flat-square)](https://github.com/topjohnwu/Magisk)
-[![Platform](https://img.shields.io/badge/platform-arm64-blue?style=flat-square)](#环境要求)
-[![Type](https://img.shields.io/badge/type-Magisk%20module-6ca0dc?style=flat-square)](#安装)
+[![Platform](https://img.shields.io/badge/platform-arm64-blue?style=flat-square)](#前置条件)
+[![Type](https://img.shields.io/badge/type-Magisk%20module-6ca0dc?style=flat-square)](#快速开始)
 
 **简体中文** | [English](README_EN.md)
 
@@ -59,6 +59,7 @@
 | CA 证书 | 合并系统根证书供静态 Go 使用，系统 CA 变化时自动重建 |
 | 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份 |
 | 在线更新 | 管理器里可直接收到新版本 |
+| 安装本体 | 本体没装时，点 `[执行]` 就能下载并装好：sha256 校验、原子替换、失败不留残骸 |
 | 彻底卸载 | 停服务、收守护进程、清 PATH 链接、删数据目录，并复查残留 |
 
 ## 快速开始
@@ -67,20 +68,32 @@
 
 - [ ] 设备已 root，且装了 Magisk / KernelSU / APatch 之一
 - [ ] 架构是 **arm64**（magpie 本体是 arm64 ELF，arm32 / x86_64 跑不了）
-- [ ] magpie 本体已就位：`/data/adb/magpie/bin/magpie` 可执行，`/data/adb/magpie/data` 存在
 - [ ] 会用管理器的「从本地安装」刷模块
+- [ ] magpie 本体：**有就用现成的，没有可以让模块装**（见下一步）
 
 > [!IMPORTANT]
-> 模块**不带 magpie 本体**。只刷这个 zip，服务会因为找不到 `/data/adb/magpie/bin/magpie` 而启动失败——刷入时会提示，但不会中断安装。
+> 模块**不带 magpie 本体**（arm64 二进制约 87 MB）。本体没就位时服务不会启动，
+> 刷入时只提示、不中断安装，看门狗也不会反复重试刷日志。装本体见下面第 1 步。
 
 ### 步骤
 
-**1. 确认本体在位**
+**1. 准备本体（两条路，任选）**
+
+已经有本体，确认一下就行：
 
 ```sh
-su -c ls -l /data/adb/magpie/bin/magpie   # 应该是一个可执行文件
-su -c chmod 755 /data/adb/magpie/bin/magpie
+su -c sh /data/adb/modules/magpie/scripts/install.sh status
+# state=ready version=0.1.4302 path=/data/adb/magpie/bin/magpie
 ```
+
+没有本体，让模块去装（推荐，省掉自己找文件）：
+
+```sh
+su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
+```
+
+也可以什么都不做，刷完模块后在管理器里点 `[执行]`——它会走同一个安装流程。
+细节与安全说明见[安装本体](#安装本体让模块来做)。
 
 **2. 安装模块**
 
@@ -123,6 +136,50 @@ chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
 
+## 安装本体（让模块来做）
+
+本体没装时，`[执行]` 不再是启停开关，而是安装入口。命令行也一样：
+
+```sh
+su -c sh /data/adb/modules/magpie/scripts/install.sh status    # 只检测
+su -c sh /data/adb/modules/magpie/scripts/install.sh check     # 联网比版本，不下载
+su -c sh /data/adb/modules/magpie/scripts/install.sh plan      # 打印将装什么，不下载
+su -c sh /data/adb/modules/magpie/scripts/install.sh install   # 先给方案，再点一次才下载
+su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes   # 直接装
+su -c sh /data/adb/modules/magpie/scripts/install.sh rollback  # 用备份退回
+```
+
+**从哪来。** 清单是 `https://usemagpie.ai/api/latest` —— magpie 自己的更新端点，
+`magpie update` 用的也是它；资产名 `magpie-cli-android-arm64`（实测这是发布页里唯一的 Android 构建，
+没有 arm32 的）。下载优先走厂商 CDN，失败再退回 GitHub。
+
+**怎么校验。** 清单给出 `size` 和 `sha256`，下载后逐项比对，对不上就丢弃换下一个来源。
+`SHA256SUMS` 与 GitHub API 的 `digest` 字段两者与该值一致。**注意**：sha256 来自同一个清单，
+所以真实性的信任根是「usemagpie.ai 这个源 + TLS」，与 magpie 本体自己更新时的信任假设相同；
+仓库里虽然也有 `SHA256SUMS.sig`，但本模块没有内置公钥，因此**不声称做过 GPG 签名验证**。
+
+**怎么落盘。** 先下到同文件系统的临时文件 → 校验 → `mv` 原子替换（不会出现半截文件）；
+替换前把旧本体备份成 `bin/magpie.bak`。装完立刻跑一次 `--version` 自检：跑不起来就回退；
+首次安装没有备份可退时，把失败样本挪到 `bin/magpie.rejected` 并报出它的 sha256，
+正式路径上绝不留下「看起来已安装」的文件。
+
+**不做什么。** 不自动下载、不每次开机检查、不自动升级、不覆盖已有可用本体（除非显式
+`install --yes`）、不碰 `data/`、配置、账号、provider、密钥、监听地址。升级交给本体自己：
+
+```sh
+su -c magpie update check   # 只看有没有新版
+su -c magpie update         # 下载、校验、重启进新版本
+```
+
+> [!NOTE]
+> 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，87 MB 的下载也太大，
+> 所以 `customize.sh` 只做检测并告诉你怎么装，真正下载由你确认后触发。
+
+> [!TIP]
+> 想换源（自建镜像、内网缓存）：
+> `MAGPIE_MANIFEST_URL=https://内网/… sh install.sh install --yes`。
+> 清单格式不变时可用。资产名也可用 `MAGPIE_ASSET_KEY` 覆盖。
+
 ## 日常使用
 
 ### 执行按钮
@@ -131,8 +188,9 @@ chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 
 | 当前状态 | 点一下会怎样 |
 | --- | --- |
-| 服务在跑 | 先打印 PID、网关地址、面板地址，然后**停止**（写 `.user_stopped`，看门狗不会马上拉起） |
-| 服务没跑 | 启动，打印同样的信息，并打开面板 |
+| 本体没装 / 跑不起来 | 进入安装流程：先打印将装的版本、大小、来源，再点一次才开始下载 |
+| 服务在跑 | 打印 PID、网关地址、面板地址，然后**停止**（写 `.user_stopped`，看门狗不会马上拉起） |
+| 服务没跑（本体就绪） | 启动，打印同样的信息，并打开面板 |
 
 同一颗按钮，两种结果。用之前先看模块描述那行写的是什么。
 
@@ -344,7 +402,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 `scripts/doctor.sh` 一次跑八项检查（只读，不改任何配置）：
 
 ```
-[1/8] 本体与进程      本体可执行？版本？PID？
+[1/8] 本体与进程      本体装了没 / 能不能跑 / 版本 / PID / oom_score_adj
 [2/8] 端口监听        网关 / 面板端口有没有人听
 [3/8] 本机可用性      网关是否返回 200
 [4/8] 面板与访问密码  data/web.key 在不在？带密码能不能进
@@ -356,6 +414,11 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 | 现象 | 处理 |
 | --- | --- |
+| 提示「本体未安装」 | 正常状态，不是故障。按[安装本体](#安装本体让模块来做)装好即可 |
+| 本体装不上：取不到更新清单 | 网络不通或清单被拦。先 `install.sh check` 看能不能连上；必要时用 `MAGPIE_MANIFEST_URL` 换源 |
+| 本体装不上：sha256 不匹配 | 下载被中间设备改过或截断。换网络重试；持续如此别装，去发布页核对 |
+| 本体装完跑不起来 | 首次安装会把样本留在 `bin/magpie.rejected` 并报出摘要；已装过则自动回退到 `bin/magpie.bak` |
+| 想退回上一版本体 | `install.sh rollback` |
 | 启动失败，日志说端口占用 | 上次进程没退干净，`pidof magpie` 确认后 kill，再 `start` |
 | 面板数据一动不动 | 属预期：webroot 面板读的是 `status.json`，即启停那一刻的快照 |
 | HTTPS 报证书错误 | 删掉 `/data/adb/magpie/data/certs/ca-bundle.crt*` 再重启，会自动重建 |
@@ -415,8 +478,9 @@ magpie-magisk/
 ├── scripts/
 │   ├── magpie.service                start / stop / restart / status
 │   ├── status.sh                     生成状态描述、status.json、日志尾
+│   ├── install.sh                    检测 / 下载 / 校验 / 部署本体
 │   ├── doctor.sh                     八项自检
-│   ├── lib.sh                        局域网地址 + 进程识别，各脚本共用
+│   ├── lib.sh                        局域网地址 + 进程识别 + 本体可用性，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
 │   └── magpie.config                 配置（默认值）
 ├── webroot/
@@ -436,6 +500,10 @@ magpie-magisk/
 /data/adb/magpie/run/lan.url           局域网地址（开放局域网时）
 /data/adb/magpie/run/.user_stopped     用户主动停止的标记
 /data/adb/magpie/run/magpie.pid        PID 文件
+/data/adb/magpie/install-info.txt      安装记录（版本、来源、摘要，权限 600）
+/data/adb/magpie/bin/magpie.bak        旧本体备份，回退用
+/data/adb/magpie/.install.lock         安装互斥锁
+/data/adb/magpie/.install.pending      二次确认的待办标记
 /data/adb/magpie/data/certs/           CA 证书包与指纹
 webroot/status.json                    面板数据（含密钥，权限 600）
 webroot/lastlog.txt                    面板日志尾（权限 600）
@@ -464,6 +532,9 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 
 ## 已知限制
 
+- 安装器**只支持 arm64**：发布页里没有 arm32 / x86_64 的 Android 构建，非 arm64 设备会直接拒绝，而不是装错架构。
+- 安装器只负责「首次安装」。**已装好的本体不会被它升级**，升级请用 `magpie update`（本体自带、跟着厂商走）。
+- 摘要来自 usemagpie.ai 的清单，未做 GPG 签名验证；见[安装本体](#安装本体让模块来做)。
 - webroot 面板的运行时长、内存、日志尾是**启停时的快照**，不随时间刷新。
 - 不含 magpie 本体；本体更新由 magpie 自己负责，模块只管调度。
 - KernelSU / APatch 的路径都已经在脚本里覆盖（`ksud`、`/data/adb/ap/bin`、`/data/adb/ksud`），但**只在 Magisk 31.1 上实测过**，KernelSU / APatch 未实测。
