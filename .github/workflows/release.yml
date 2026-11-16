@@ -97,12 +97,21 @@ jobs:
             echo "Release $TAG 已存在，覆盖上传资源"
             gh release upload "$TAG" "$ZIP" --clobber
           else
+            # 说明写到文件里再交给 gh，免得长文本被 YAML 缩进或引号弄乱
+            cat > NOTES.md <<EOF
+          模块 $TAG，由 ${{ github.sha }} 自动构建。
+
+          本体没装也没关系：装上模块后点 \`[执行]\`，或跑
+          \`scripts/install.sh install --yes\`，模块会下载并安装 magpie 本体
+          （sha256 校验、原子替换、失败不留残骸）。已装好的本体不会被覆盖；
+          升级用本体自己的 \`magpie update\`。
+
+          - 安装与排障：[README](https://github.com/${{ github.repository }}#快速开始)
+          - 变更记录：[CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+          EOF
             gh release create "$TAG" "$ZIP" \
               --title "$TAG" \
-              --notes "自动构建自 ${{ github.sha }}
-
-          模块 $TAG，magpie 本体需自行安装到 \`/data/adb/magpie\`。
-          安装/升级说明见 [README](https://github.com/${{ github.repository }}#快速开始)。"
+              --notes-file NOTES.md
           fi
 
       - name: 同步 update.json

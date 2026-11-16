@@ -544,7 +544,8 @@ magpie-magisk/
 ├── webroot/
 │   └── index.html                    the module panel (needs KernelSU WebUI / WebUI-X)
 ├── docs/
-│   └── panel.png                     screenshot used in the README
+│   ├── panel.png                     screenshot used in the README
+│   └── social-preview.png            the repo's social preview image (1280×640)
 ├── .github/workflows/release.yml     tag → build → release → update.json
 └── META-INF/com/google/android/      Magisk flash scripts
 ```
@@ -631,6 +632,9 @@ Releasing:
 
 If the tag and `module.prop`'s `version` disagree, the workflow fails on purpose rather than
 shipping a mislabelled build.
+
+The social preview image lives at `docs/social-preview.png` (1280×640). GitHub has no API for it —
+upload it by hand under Settings → Social preview.
 
 ## Credits
 

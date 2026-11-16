@@ -492,7 +492,8 @@ magpie-magisk/
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
 ├── docs/
-│   └── panel.png                     README 里的面板截图
+│   ├── panel.png                     README 里的面板截图
+│   └── social-preview.png            仓库 Social preview 用图（1280×640）
 ├── .github/workflows/release.yml     tag → 打包 → 发版 → 回写 update.json
 └── META-INF/com/google/android/      Magisk 刷机脚本
 ```
@@ -567,6 +568,9 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 分支 13 �
 3. 工作流自动打包、校验 zip 结构、发 Release、回写 `update.json`。
 
 tag 与 `module.prop` 的 `version` 不一致时工作流会主动失败，避免发出错版本。
+
+仓库页面的社交预览图在 `docs/social-preview.png`（1280×640）：GitHub 没有对应的 API，
+要在「Settings → Social preview」里手动上传。
 
 ## 贡献者与致谢
 
