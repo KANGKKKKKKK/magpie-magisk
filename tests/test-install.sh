@@ -32,6 +32,9 @@ run() { sh "$BASE/install.sh" "$@" 2>&1; }
 
 export MAGPIE_MANIFEST_URL="$SRV/manifest.json"
 export MAGPIE_CONFIRM_WINDOW=600
+# CI 与桌面都是 x86_64，架构闸门会挡掉所有用例；这里只是放行闸门，
+# 其余逻辑（含"落盘的不是真能跑的本体就拒绝"）照常验证。
+export MAGPIE_ALLOW_ANY_ARCH=1
 
 step "1 未安装时的状态"
 fresh

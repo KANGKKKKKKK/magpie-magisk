@@ -235,6 +235,9 @@ bin_state() {
 # ---------- 环境检查 ----------
 
 check_arch() {
+  # MAGPIE_ALLOW_ANY_ARCH=1 只给测试用：CI 跑在 x86_64 上，
+  # 不放行的话整套安装器用例都会被这道闸门挡住。
+  [ "${MAGPIE_ALLOW_ANY_ARCH:-0}" = "1" ] && return 0
   _m=$(uname -m 2>/dev/null)
   case "$_m" in
     aarch64|arm64) return 0 ;;

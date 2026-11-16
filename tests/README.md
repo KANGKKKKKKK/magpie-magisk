@@ -141,3 +141,5 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 - 没有覆盖自定义 `magpie_path` 的**完整安装**（只覆盖了拒绝非法路径的分支，以及
   `magpie` 命令是否读对目录）。
 - 信号用例依赖 `python3` 起一个只连不应答的服务器；没有 `python3` 的环境会跳过这一条。
+- 安装器用例在 x86_64 的 CI 上靠 `MAGPIE_ALLOW_ANY_ARCH=1` 绕过架构闸门（闸门本身
+  只在真机上被验证过）；被绕过的只是 `uname -m` 那一句，其他逻辑照常测。
