@@ -225,7 +225,7 @@ su -c magpie update         # 下载、校验、重启进新版本
 
 | | magpie 自带的面板 | 模块自带的 webroot 面板 |
 | --- | --- | --- |
-| 地址 | `http://<host>:3430/?k=<data/web.key>` | 由宿主提供，见右栏 |
+| 地址 | `http://<host>:3430/?k=<data/web.key>` | 没有自己的地址：在 KernelSU WebUI / WebUI-X 里打开 |
 | 谁提供 | magpie 自己（`serve --web=…`） | `webroot/index.html`，需要 **KernelSU 的 WebUI** 或 Magisk 的 **WebUI-X** 模块来托管 |
 | 能看到什么 | magpie 的完整应用界面（Agents、会话、资源库、供应商、网关、插件、用量…） | 服务状态与 PID、网关地址与 API Key、面板地址与访问密码、日志尾 |
 | 纯 Magisk 下 | ✅ 可用，地址由 `run/web.url` 给出 | ❌ 没有宿主就打不开；此时 `webroot/status.json` 仍然会写，脚本可以直接读 |
