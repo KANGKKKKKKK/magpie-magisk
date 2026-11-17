@@ -226,9 +226,11 @@ su -c magpie update         # 下载、校验、重启进新版本
 | 能看到什么 | magpie 的完整应用界面（Agents / Sessions / Library / Settings） | 服务状态与 PID、网关地址与 API Key、面板地址与访问密码、日志尾 |
 | 纯 Magisk 下 | ✅ 可用，地址由 `run/web.url` 给出 | ❌ 没有宿主就打不开；此时 `webroot/status.json` 仍然会写，脚本可以直接读 |
 
-<p align="center"><img src="docs/panel.png" width="240" alt="模块自带的 webroot 面板"></p>
+| <img src="docs/panel-magpie.png" width="240" alt="magpie 自带的面板"> | <img src="docs/panel.png" width="240" alt="模块自带的 webroot 面板"> |
+| :---: | :---: |
+| magpie 本体提供的完整界面（截图是「插件」页） | 模块 webroot 提供的状态页，需要 KernelSU WebUI / WebUI-X 托管 |
 
-（截图是**模块自带的 webroot 面板**，需要在 KernelSU WebUI / WebUI-X 里打开。API Key 与访问密码默认折叠为「点击「显示」查看」，未被截入截图。）
+（左边是 `http://<host>:3430/?k=<data/web.key>` 打开的 magpie 本体界面；右边是模块自带的 webroot 面板，需要在 KernelSU WebUI / WebUI-X 里打开。webroot 面板的 API Key 与访问密码默认折叠为「点击「显示」查看」，未被截入截图。）
 
 ### 命令行
 
@@ -496,7 +498,8 @@ magpie-magisk/
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
 ├── docs/
-│   ├── panel.png                     README 里的面板截图
+│   ├── panel.png                     README 里的 webroot 面板截图
+│   ├── panel-magpie.png              README 里的 magpie 本体界面截图
 │   └── social-preview.png            仓库 Social preview 用图（1280×640）
 ├── .github/workflows/release.yml     tag → 打包 → 发版 → 回写 update.json
 └── META-INF/com/google/android/      Magisk 刷机脚本
