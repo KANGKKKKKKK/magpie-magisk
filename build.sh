@@ -4,6 +4,8 @@
 
 cd "$(dirname "$0")" || exit 1
 OUT=${1:-.}
+# 输出目录不存在就建出来：CI 里是 workflow 先 mkdir，本地给个新路径就会打不出来
+[ -d "$OUT" ] || mkdir -p "$OUT" || { echo "建不了输出目录：$OUT" >&2; exit 1; }
 VER=$(sed -n 's/^version=//p' module.prop)
 ZIP="$OUT/magpie-${VER}.zip"
 

@@ -61,7 +61,7 @@ to see the state and clean up after itself.
 | --- | --- |
 | Start on boot | Waits for `sys.boot_completed`, never blocks boot |
 | Watchdog | Checks every 20 s, restarts the process if killed; respects a manual stop |
-| One-tap toggle | Tapping `[Action]`: prints connection info and stops if running, starts and opens the panel if not |
+| Volume-key menu | Tapping `[Action]` opens a menu: switch gateway, see addresses, start/stop/restart, open the panel — pick with the volume keys, no typing |
 | Live status | The module row shows state and the address to use ([example](#the-action-button)) without tapping anything |
 | Self-check | `scripts/doctor.sh` runs eight checks and tells you what to fix |
 | CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE`, `MAGPIE_BUN` and upstream DNS filled in |
@@ -210,15 +210,46 @@ su -c magpie update         # download, verify, restart into it
 
 ### The action button
 
-The `[Action]` button in the manager is a **toggle**:
+The `[Action]` button in the manager opens a **volume-key menu** — no typing, no terminal:
 
-| Current state | What tapping does |
+```
+───────────  Magpie  ───────────
+ 状态  运行中
+ 网关  局域网 · 其他设备可连接
+ 地址  192.168.1.5
+────────────────────────────────
+   1  切到「仅本机」
+ ▸ 2  查看接入信息
+   3  重启
+   4  停止
+   5  启动
+   6  打开面板
+   7  退出
+────────────────────────────────
+ 音量下 换一项 · 音量上 执行
+ 60 秒没按键就自动退出
+```
+
+**Volume down = next item, volume up = run it.** 60 seconds without a key press exits.
+
+| Item | Does |
 | --- | --- |
-| No body / won't run | Enters the install flow: prints version, size and source; a second tap downloads |
-| Running | Prints PID, gateway URL and panel URL, then **stops** (writes `.user_stopped`; the watchdog will not fight you) |
-| Stopped (body ready) | Starts, prints the same info, opens the panel |
+| 1 Switch gateway | Toggles between `127.0.0.1` (this device only) and `0.0.0.0` (LAN); restarts the service so it takes effect |
+| 2 Connection info | Lists the local and LAN addresses, plus what to paste into another device |
+| 3 / 4 / 5 | Restart / stop / start |
+| 6 Open panel | Opens the WebUI in a browser, with your key |
+| 7 Quit | Closes the `[Action]` window and returns to the module list |
 
-One button, two outcomes. Check the module row first to see which one you will get.
+With no body installed (or one that won't run) the button is still the install entry: it prints
+version, size and source first, and only a second tap downloads.
+
+> [!TIP]
+> **Sharing with a tablet over a hotspot**: `[Action]` → 1 to switch to LAN → 2 to read the
+> address → paste it into magpie on the tablet. Switch back to "this device only" afterwards.
+
+The volume keys do change the media volume on the way; the menu restores the value it found on
+exit. Run from a terminal the menu redraws in place (only the `▸` moves); the manager's text box
+does not support cursor control, so there it draws once and appends one line per key press.
 
 That row updates itself, so you can read the address to paste into a client without touching anything:
 
@@ -498,8 +529,10 @@ flowchart TD
 - **`service.sh`** — waits for `sys.boot_completed=1`, rotates logs, starts the service, refreshes
   status. Also runs a 20 s watchdog that restarts the process if it is gone, and refreshes the LAN
   address when it changes. Exits on its own if the module is disabled, being uninstalled, or deleted.
-- **`action.sh`** — reads the PID to decide the branch. Running: print connection info, then stop.
-  Not running: start, print info, open the panel. Both paths refresh the module description.
+- **`action.sh`** — the `[Action]` menu. Pick with the volume keys (switch gateway / show
+  addresses / start / stop / restart / open panel / quit); also accepts `status`, `gateway`,
+  `lan`, `local`, `start`, `stop`, `restart`, `panel`. Falls back to the old one-tap toggle when
+  the volume keys cannot be read. Refreshes the module description after every action.
 - **`scripts/magpie.service`** — the real control script. Cleans up legacy dnsmasq from v0.2,
   injects environment variables, launches `magpie serve --web=<addr>`, writes the PID and panel URL.
 
@@ -617,12 +650,12 @@ cache) and finally verifies nothing is left.
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 36 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 39 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 8 assertions
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] branches, 13 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
 ```
 
-57 assertions total, all in temp directories with stubbed process checks — a running service is
+98 assertions total, all in temp directories with stubbed process checks — a running service is
 never touched. Details and known gaps in [tests/README.md](tests/README.md).
 
 Releasing:
