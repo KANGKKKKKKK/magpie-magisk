@@ -15,7 +15,8 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 
 > [!NOTE]
 > This repository contains **only the module scripts**, not magpie itself (the arm64 binary is ~87 MB).
-> Not having it is fine: tap `[Action]` after flashing and the module downloads and installs it.
+> Not having it is fine: tap `[Action]` after flashing and the module downloads and installs it —
+> the first tap only shows the plan, a second tap starts the download.
 >
 > The module only keeps magpie running on this phone. Providers, models, quotas and accounts are
 > magpie's own business, not this module's.
