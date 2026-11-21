@@ -2,7 +2,7 @@
 
 # Magpie AI 网关 · Android 模块
 
-把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自启，防kill，一键启停。
+把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自启，被杀自动拉回，一键启停。
 
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
@@ -24,6 +24,7 @@
 - [为什么需要它](#为什么需要它)
 - [能做什么](#能做什么)
 - [快速开始](#快速开始)
+- [安装本体](#安装本体让模块来做)
 - [日常使用](#日常使用)
 - [客户端怎么接入](#客户端怎么接入)
 - [两把密钥的区别](#两把密钥的区别)
@@ -72,15 +73,25 @@
 - [ ] 设备已 root，且装了 Magisk / KernelSU / APatch 之一
 - [ ] 架构是 **arm64**（magpie 本体是 arm64 ELF，arm32 / x86_64 跑不了）
 - [ ] 会用管理器的「从本地安装」刷模块
-- [ ] magpie 本体：**有就用现成的，没有可以让模块装**（见下一步）
+- [ ] magpie 本体：有就用现成的，没有可以让模块装（见第 2 步）
 
 > [!IMPORTANT]
-> 模块**不带 magpie 本体**（arm64 二进制约 87 MB）。本体没就位时服务不会启动，
-> 刷入时只提示、不中断安装，看门狗也不会反复重试刷日志。装本体见下面第 1 步。
+> 本体没就位时服务不会启动，但**刷入模块本身不会失败**：只提示一句，看门狗也不会反复重试刷日志。装本体见[第 2 步](#步骤)。
+
+> [!NOTE]
+> `[执行]` 按钮由管理器提供，要求它支持模块的 `action.sh`——Magisk 从 27.0 起才有。更老的 Magisk、或管理器里根本没有这个按钮时，模块照样装得上、跑得起来，只是改用[命令行](#命令行)启停，能力一样。
 
 ### 步骤
 
-**1. 准备本体（两条路，任选）**
+**1. 安装模块**
+
+从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载最新的 `magpie-v*.zip`（文件名带版本号），管理器 → 模块 → 从本地安装 → 选 zip。
+
+这一步**不需要先有 magpie 本体**：检测不到只提示一句，照样装完。
+
+**2. 准备本体（两条路，任选）**
+
+`/data/adb/modules/magpie/` 要等模块刷好才存在，所以两条路都放在这一步。
 
 已经有本体，确认一下就行：
 
@@ -95,12 +106,8 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh status
 su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 ```
 
-也可以什么都不做，刷完模块后在管理器里点 `[执行]`——它会走同一个安装流程。
+不想敲命令就在管理器里点 `[执行]`——走的是同一个安装流程。
 细节与安全说明见[安装本体](#安装本体让模块来做)。
-
-**2. 安装模块**
-
-从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载最新的 `magpie-v*.zip`（文件名带版本号），管理器 → 模块 → 从本地安装 → 选 zip。
 
 **3. 重启**
 
@@ -244,7 +251,7 @@ Magisk 的文本框不支持光标控制，所以那里只画一次菜单、每�
 地址变了（WiFi 重连、热点开关、切飞行模式）会自动刷新，不会让你照着旧地址折腾。字体不支持 emoji、显示成方框时，把配置里的 `MAGPIE_ICON` 设成 `0`，就会换成 `[运行中]` / `[已停止]` 纯文本。
 
 > [!NOTE]
-> `[执行]` 按钮由管理器提供。较老的 Magisk 版本没有这个按钮，用下面的命令行启停即可。
+> 管理器里没有 `[执行]` 按钮时（见[前置条件](#前置条件)），用下面的命令行启停，效果一样。
 
 ### 两个「面板」，别弄混
 
@@ -341,7 +348,8 @@ su -c magpie gateway-key add phone
 }
 ```
 
-- 模型名写 `<provider>/<model>`，可用哪些看 `magpie providers`，或直接问网关：`GET /v1/models`。
+- 模型名写 `<provider>/<model>`：前半是你在 magpie 里配的供应商名，后半是它的模型 ID。比如供应商叫 `deepseek`、模型 ID 是 `deepseek-chat`，就填 `deepseek/deepseek-chat`（示意，实际以你机器上的为准）。
+- 到底有哪些：`su -c magpie providers`，或直接问网关 `GET /v1/models`；只想扫一眼 ID 就加 `?format=text`，一行一个。
 - 别的设备上把 `127.0.0.1` 换成手机的局域网地址（自检里会给出），例如 `http://192.168.1.100:3425/v1`。
 
 <details>

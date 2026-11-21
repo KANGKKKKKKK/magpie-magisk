@@ -26,6 +26,7 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 - [Why this exists](#why-this-exists)
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
+- [Installing the body](#installing-the-body)
 - [Daily use](#daily-use)
 - [Connecting a client](#connecting-a-client)
 - [The two different keys](#the-two-different-keys)
@@ -79,15 +80,30 @@ to see the state and clean up after itself.
 - [ ] Rooted device with Magisk / KernelSU / APatch
 - [ ] **arm64** (magpie's binary is an arm64 ELF; arm32 and x86_64 will not run)
 - [ ] Familiar with "install from storage" in the manager
-- [ ] magpie's binary: **use it if you have it — let the module install it if you don't** (next step)
+- [ ] magpie's binary: use it if you have it, or let the module install it (step 2)
 
 > [!IMPORTANT]
-> The module does **not** bundle magpie (the arm64 binary is ~87 MB). Without it the service will
-> not start; flashing only warns and does not abort, and the watchdog will not spin retrying.
+> Without the binary the service will not start, but **flashing the module does not fail because of
+> it**: it only warns, and the watchdog will not spin retrying. Getting the binary is [step 2](#steps).
+
+> [!NOTE]
+> The `[Action]` button comes from the manager and needs its `action.sh` support — Magisk has that
+> from 27.0. On older Magisk, or a manager without the button, the module still installs and runs;
+> you just start and stop it from the [CLI](#cli) instead.
 
 ### Steps
 
-**1. Get the binary there (either way)**
+**1. Install the module**
+
+Download the latest `magpie-v*.zip` from [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases),
+then Manager → Modules → Install from storage.
+
+This step **does not need magpie's binary to be there yet**: if it is missing, the module says so
+and finishes installing anyway.
+
+**2. Get the binary there (either way)**
+
+`/data/adb/modules/magpie/` only exists once the module is flashed, so both routes live here.
 
 Already have it — just check:
 
@@ -102,13 +118,8 @@ Don't have it — let the module fetch and install it:
 su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 ```
 
-Or do nothing and tap `[Action]` after flashing; it runs the same flow.
+Rather not type commands: tap `[Action]` in the manager — it runs the same flow.
 Details and the security notes are in [Installing the body](#installing-the-body).
-
-**2. Install the module**
-
-Download the latest `magpie-v*.zip` from [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases),
-then Manager → Modules → Install from storage.
 
 **3. Reboot**
 
@@ -266,7 +277,7 @@ flips — you will not be left chasing a stale address. If your font shows emoji
 `MAGPIE_ICON` to `0` to get `[running]` / `[stopped]` text instead.
 
 > [!NOTE]
-> The `[Action]` button is provided by the manager. Older Magisk builds lack it — use the CLI below.
+> No `[Action]` button in your manager (see [Requirements](#requirements))? Use the CLI below — same thing.
 
 ### Two different "panels"
 
@@ -350,8 +361,11 @@ Any client that accepts a custom OpenAI endpoint will work. Three fields, typica
 }
 ```
 
-- Models are named `<provider>/<model>`. See what exists with `magpie providers`, or ask the
-  gateway: `GET /v1/models`.
+- Models are named `<provider>/<model>`: the provider name you set up in magpie, then its model id.
+  A provider called `deepseek` with model id `deepseek-chat` is `deepseek/deepseek-chat`
+  (illustrative; use what your own device reports).
+- To see what exists, run `magpie providers`, or ask the gateway: `GET /v1/models` — add
+  `?format=text` for one id per line.
 - On another device, replace `127.0.0.1` with the phone's LAN address (`doctor.sh` reports it),
   e.g. `http://192.168.1.100:3425/v1`.
 
