@@ -137,6 +137,15 @@ if [ -f "$B/run/resolv.conf" ] && grep -qx 'nameserver 223.5.5.5' "$B/run/resolv
 else
   bad "没有生成 resolv.conf"
 fi
+# 配置被写成空的时候不能把 DNS 弄没：Go 会退回 127.0.0.1:53，等于原生通道全断
+printf 'magpie_path="%s"\nMAGPIE_DNS=""\n' "$B" > "$B/cfg"
+sh "$B/scripts/magpie.service" start >/dev/null 2>&1
+if grep -qx 'nameserver 223.5.5.5' "$B/run/resolv.conf" 2>/dev/null; then
+  ok "MAGPIE_DNS 为空时保留了原有 DNS"
+else
+  bad "MAGPIE_DNS 为空时把 DNS 写坏了"
+fi
+printf 'magpie_path="%s"\n' "$B" > "$B/cfg"
 
 echo
 echo "== 5 自定义 magpie_path：magpie 命令跟着配置走"

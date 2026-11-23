@@ -562,7 +562,7 @@ flowchart TD
 <details>
 <summary>Three design decisions: DNS, CA bundle, LAN address</summary>
 
-- **DNS comes from a module-provided `/etc/resolv.conf`.** magpie is a static Go binary, so it can
+- **DNS comes from a module-provided `/etc/resolv.conf`.** magpie is a Go static PIE that links no libc, so it can
   only use the pure Go resolver, which reads that one file. Android has no such file: Go then falls
   back to `127.0.0.1:53` / `[::1]:53`, where nothing listens, and every native channel dies with
   `connection refused`. The module ships `system/etc/resolv.conf`, Magisk overlays it onto

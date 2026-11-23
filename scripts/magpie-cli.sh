@@ -85,7 +85,7 @@ done
 # 网关地址
 [ -n "$MAGPIE_ADDR" ] || export MAGPIE_ADDR="127.0.0.1:3425"
 
-# 上游 DNS：magpie 本体是静态编译的 Go 程序，只能读 /etc/resolv.conf。
+# 上游 DNS：magpie 本体是不链接 libc 的 Go 静态 PIE，只能读 /etc/resolv.conf。
 # 模块用 Magisk 覆盖提供 /etc/resolv.conf，内容由 magpie.service 按 MAGPIE_DNS 重写，
 # 所以改完这里重启服务即可（首次装上新版要重启一次手机才会出现覆盖文件）。
 _mp_conf="/data/adb/magpie/scripts/magpie.config"

@@ -95,7 +95,7 @@ magpie_rss_mb() {
 
 # ---------- DNS ----------
 #
-# magpie 本体是静态编译的 Go 程序（cgoAvailable == false），解析域名只能用
+# magpie 本体是不链接 libc 的 Go 静态 PIE（cgoAvailable == false），解析域名只能用
 # 纯 Go 解析器。它只认 /etc/resolv.conf；读不到就把服务器置为
 # 127.0.0.1:53 与 [::1]:53，而 Android 上这两个地址没人监听，
 # 于是所有原生 Go 通道都报 `lookup ... on [::1]:53: connection refused`。

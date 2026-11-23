@@ -524,7 +524,7 @@ flowchart TD
 <details>
 <summary>三个设计取舍：DNS、CA 证书、局域网地址（点开展开）</summary>
 
-- **DNS 靠模块覆盖的 `/etc/resolv.conf`**。magpie 是静态编译的 Go 程序，解析域名只认这个文件；Android 上没有它，Go 就退回问 `127.0.0.1:53` / `[::1]:53`，而那里没人监听，于是原生通道全部 `connection refused`。模块自带 `system/etc/resolv.conf`，由 Magisk 覆盖挂载，内容按 `MAGPIE_DNS` 重写——不启动本地 dnsmasq，所以不会和系统热点的 dnsmasq 抢端口（v0.2 踩过这个坑）。
+- **DNS 靠模块覆盖的 `/etc/resolv.conf`**。magpie 是不链接 libc 的 Go 静态 PIE，解析域名只认这个文件；Android 上没有它，Go 就退回问 `127.0.0.1:53` / `[::1]:53`，而那里没人监听，于是原生通道全部 `connection refused`。模块自带 `system/etc/resolv.conf`，由 Magisk 覆盖挂载，内容按 `MAGPIE_DNS` 重写——不启动本地 dnsmasq，所以不会和系统热点的 dnsmasq 抢端口（v0.2 踩过这个坑）。
   顺便纠正旧文档：`DNS_LOCAL_HOSTNAMES` 不是 Go 的变量，本体里也搜不到，v0.9.0 及以前注入的那行从未生效。
 - **CA 证书自己更新**。给系统证书目录算指纹（文件数 + 目录 mtime，`/system/etc/security/cacerts` 与 APEX 那份一起算），存在 `ca-bundle.crt.stamp`；启动服务和调用 `magpie` 命令时比对，不一致就重建。先写临时文件、校验有证书才原子替换，失败保留旧包继续用。
 

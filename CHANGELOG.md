@@ -9,7 +9,7 @@
 
 ### 修复
 
-- **DNS 改用 Magisk 覆盖的 `/etc/resolv.conf`**。magpie 本体是静态编译的 Go 程序
+- **DNS 改用 Magisk 覆盖的 `/etc/resolv.conf`**。magpie 本体是不链接 libc 的 Go 静态 PIE
   （`cgoAvailable == false`），只能走纯 Go 解析器；它只认 `/etc/resolv.conf`，Android
   上没有这个文件时会把服务器置为 `127.0.0.1:53` / `[::1]:53`，而这两个地址没人监听。
   现在模块自带 `system/etc/resolv.conf`，`magpie.service` 启动时按 `MAGPIE_DNS` 重写它，

@@ -175,7 +175,7 @@ case "$MAGPIE_WEB_ADDR" in
 esac
 
 echo "[8/9] DNS 解析"
-# magpie 是静态编译的 Go 程序，解析域名只走 /etc/resolv.conf。
+# magpie 是不链接 libc 的 Go 静态 PIE，解析域名只走 /etc/resolv.conf。
 # 这个文件不存在时 Go 会去问 127.0.0.1:53 / [::1]:53，安卓上没人监听，
 # 于是原生通道全部 `connection refused`——所以先看文件在不在，再看上游答不答。
 if [ -r /etc/resolv.conf ]; then

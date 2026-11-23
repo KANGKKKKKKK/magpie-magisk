@@ -52,7 +52,7 @@ rotate_log() {
 
 clean_logs() { rotate_log "$LOG"; }
 
-# DNS：magpie 本体是静态编译的 Go 程序，cgo 解析器不可用，只能走纯 Go 解析器。
+# DNS：magpie 本体是不链接 libc 的 Go 静态 PIE，cgo 解析器不可用，只能走纯 Go 解析器。
 # 纯 Go 解析器只认 /etc/resolv.conf；Android 没有这个文件，读不到就退回
 # 127.0.0.1:53 / [::1]:53（那里没人监听），于是原生通道全部 connection refused。
 # 所以模块自带 system/etc/resolv.conf，由 Magisk 覆盖到 /etc/resolv.conf；
@@ -227,7 +227,8 @@ ensure_ca_bundle() {
 # 覆盖文件是 magpie 唯一的上游来源，所以这里失败就等于原生通道全废，要出声。
 sync_resolv_conf() {
   magpie_resolv_body "$DNS_SERVERS" > "$RESOLV_CONF.tmp" 2>/dev/null
-  if [ ! -s "$RESOLV_CONF.tmp" ]; then
+  # 没有一条 nameserver 就用不了（Go 会退回 127.0.0.1:53），宁可保留旧的
+  if [ ! -s "$RESOLV_CONF.tmp" ] || ! grep -q '^nameserver ' "$RESOLV_CONF.tmp" 2>/dev/null; then
     rm -f "$RESOLV_CONF.tmp" 2>/dev/null
     log Warn "MAGPIE_DNS 为空或格式不对, 保留现有 DNS 配置"
     return 1

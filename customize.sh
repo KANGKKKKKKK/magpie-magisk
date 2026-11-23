@@ -21,23 +21,32 @@ _CONF=/data/adb/magpie/scripts/magpie.config
 [ -f "$_CONF" ] && . "$_CONF" 2>/dev/null
 magpie_path=${magpie_path:-/data/adb/magpie}
 
-# DNS：magpie 是静态编译的 Go 程序，只认 /etc/resolv.conf。
+# DNS：magpie 是不链接 libc 的 Go 静态 PIE，只认 /etc/resolv.conf。
 # 这里按 MAGPIE_DNS 生成模块覆盖，开机后由 Magisk 挂成 /etc/resolv.conf；
 # 老版本注入的 DNS_LOCAL_HOSTNAMES 是无效的（Go 与 magpie 都不读）。
 _RESOLV="$MODPATH/system/etc/resolv.conf"
 if [ -n "${MAGPIE_DNS:-}" ]; then
   mkdir -p "$MODPATH/system/etc"
-  : > "$_RESOLV"
+  # 先写临时文件、确认里面真有 nameserver 再替换：
+  # 配置写错时保留模块自带那份，别把能用的 DNS 覆盖成空的。
+  _RESOLV_NEW="$_RESOLV.new"
+  : > "$_RESOLV_NEW"
   for _ns in $MAGPIE_DNS; do
     case "$_ns" in
       *[!0-9a-fA-F:.]*) continue ;;
     esac
-    echo "nameserver $_ns" >> "$_RESOLV"
+    echo "nameserver $_ns" >> "$_RESOLV_NEW"
   done
-  echo "options timeout:2 attempts:2" >> "$_RESOLV"
-  set_perm "$MODPATH/system/etc" 0 0 0755
-  set_perm "$_RESOLV" 0 0 0644
-  ui_print "- 上游 DNS：$MAGPIE_DNS（写入 /etc/resolv.conf 覆盖）"
+  echo "options timeout:2 attempts:2" >> "$_RESOLV_NEW"
+  if grep -q '^nameserver ' "$_RESOLV_NEW" 2>/dev/null; then
+    mv -f "$_RESOLV_NEW" "$_RESOLV" 2>/dev/null
+    set_perm "$MODPATH/system/etc" 0 0 0755
+    set_perm "$_RESOLV" 0 0 0644
+    ui_print "- 上游 DNS：$MAGPIE_DNS（写入 /etc/resolv.conf 覆盖）"
+  else
+    rm -f "$_RESOLV_NEW" 2>/dev/null
+    ui_print "! MAGPIE_DNS 里没有有效的 DNS 地址，保留模块自带的 /etc/resolv.conf"
+  fi
 fi
 MAGPIE_BIN="$magpie_path/bin/magpie"
 if [ -x "$MAGPIE_BIN" ]; then
