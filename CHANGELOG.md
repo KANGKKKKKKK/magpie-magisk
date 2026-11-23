@@ -1,5 +1,29 @@
 # 变更记录
 
+## v0.9.2 — 2026-11-23
+
+v0.9.1 的真机复查补齐。主链路在重启后已实测通过：`/etc/resolv.conf` 覆盖挂上
+（与模块文件同一 inode）、开机日志报 `DNS 上游 ...`、`doctor` 的 `[8/9]` 变绿、
+原生通道与 GitHub 同步都恢复正常。这一版只收紧两处边界。
+
+### 修复
+
+- **`MAGPIE_DNS` 写空时不再把 DNS 抹掉**。以前生成逻辑只写出 `options` 一行，
+  覆盖文件里就没有 `nameserver` 了 —— 等于把上游删光，Go 又会退回
+  `127.0.0.1:53` / `[::1]:53`。现在两处生成都要求至少有一条 `nameserver`：
+  `sync_resolv_conf` 不合格就直接返回、不动现有配置并告警；`customize.sh`
+  先写临时文件再校验，不合格保留模块自带那份。
+- **`lib.sh` 缺失时也能生成 DNS**。fallback 分支此前只补了 `lan_ip`，
+  `magpie_resolv_body` 是空的，结果会生成空文件并报「MAGPIE_DNS 为空或格式不对」——
+  把原因指向配置，而真实原因是依赖文件缺失。现在 fallback 里带上同样的实现。
+
+### 其他
+
+- 措辞校正：本体不是「静态编译」，而是**不链接 libc 的 Go 静态 PIE**
+  （进程映射里有 linker64、没有 libc.so → `cgoAvailable == false`）。结论不变，
+  但仍按实测改了 README、README_EN、CHANGELOG 和各脚本注释里的说法。
+- `tests/test-service.sh` 增加一条断言（`MAGPIE_DNS` 为空时保留原有 DNS），13 项全过。
+
 ## v0.9.1 — 2026-11-23
 
 修一个从 v0.2 起就存在的失效配置：**`MAGPIE_DNS` 从来没真正生效**。原生 Go 通道
