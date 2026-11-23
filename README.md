@@ -2,7 +2,7 @@
 
 # Magpie AI 网关 · Android 模块
 
-把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自启，被杀自动拉回，一键启停。
+把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自启，被杀自动拉回，`[执行]` 菜单里启停。
 
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
@@ -122,18 +122,18 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # 八项自检，出问题会告诉你怎么修
 ```
 
-管理器里那行描述应该也从「点 [执行] 启动或停止」变成「magpie 运行中 (v…) | 点 [执行] 停止」。
+管理器里那行描述会从刷入时的静态文字变成「🟢 运行中 v… | 仅本机」；开过局域网之后则是「🟢 运行中 v… | 192.168.x.x:3425」。
 
 **5. 打开面板**
 
-服务已经在跑，**这时不要点 `[执行]`**——它此刻是停止按钮。直接打开面板地址：
+点 `[执行]` → 选 6「打开面板」，会带着访问密码直接用浏览器打开。也可以自己取地址：
 
 ```sh
 su -c cat /data/adb/magpie/run/web.url
 # http://127.0.0.1:3430/?k=<32 位访问密码>
 ```
 
-把打印出来的地址粘进手机浏览器即可。
+把打印出来的地址粘进手机浏览器即可。这是 magpie 本体的界面，别和[模块自带的 webroot 面板](#两个面板别弄混)弄混。
 
 > [!TIP]
 > 想从电脑上打开面板，先把 [配置](#配置) 里的 `MAGPIE_WEB_ADDR` 改成 `0.0.0.0:3430` 并重启服务，再用面板/自检里给出的局域网地址访问。**开之前先看一眼下面的[两把密钥](#两把密钥的区别)那一节。**
@@ -148,7 +148,7 @@ chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 
 ## 安装本体（让模块来做）
 
-本体没装时，`[执行]` 不再是启停开关，而是安装入口。命令行也一样：
+本体没装时，`[执行]` 不再是音量键菜单，而是安装入口。命令行也一样：
 
 ```sh
 su -c sh /data/adb/modules/magpie/scripts/install.sh status    # 只检测
@@ -255,17 +255,18 @@ Magisk 的文本框不支持光标控制，所以那里只画一次菜单、每�
 
 ### 两个「面板」，别弄混
 
-模块里有两个完全不同的页面，地址和用途都不一样：
+有两个完全不同的页面，地址和用途都不一样。下面把 magpie 本体那个叫 **P1**、模块自带那个叫 **P2**，后文不再说左右：
 
-<p align="center"><img src="docs/panel-magpie.png" width="240" alt="magpie 自带的面板"> <img src="docs/panel.png" width="240" alt="模块自带的 webroot 面板"></p>
+<p align="center"><img src="docs/panel-magpie.jpg" width="240" alt="P1：magpie 自带的面板"> <img src="docs/panel.png" width="240" alt="P2：模块自带的 webroot 面板"></p>
 
-（左：magpie 自带的面板，停在「插件 › 内置」页。右：模块自带的 webroot 面板，里面的 API Key 与访问密码默认折叠为「点击「显示」查看」，截图未展开。）
+**P1**：magpie 自带的面板，截图停在「关于」页（版本号、更新开关）；日常配模型、供应商、额度、密钥都在这里。  
+**P2**：模块自带的 webroot 面板，要靠 KernelSU WebUI / WebUI-X 托管才能打开；里面的 API Key 与访问密码默认折叠为「点击「显示」查看」，截图未展开。
 
-| | magpie 自带的面板 | 模块自带的 webroot 面板 |
+| | P1：magpie 自带的面板 | P2：模块自带的 webroot 面板 |
 | --- | --- | --- |
-| 地址 | `http://<host>:3430/?k=<data/web.key>` | 没有自己的地址：在 KernelSU WebUI / WebUI-X 里打开 |
+| 地址 | `http://<host>:3430/?k=<data/web.key>`；也可以用 `[执行]` → 6 打开 | 没有自己的地址：在 KernelSU WebUI / WebUI-X 里打开 |
 | 谁提供 | magpie 自己（`serve --web=…`） | `webroot/index.html`，需要 **KernelSU 的 WebUI** 或 Magisk 的 **WebUI-X** 模块来托管 |
-| 能看到什么 | magpie 的完整应用界面（Agents、会话、资源库、供应商、网关、插件、用量…） | 服务状态与 PID、网关地址与 API Key、面板地址与访问密码、日志尾 |
+| 能看到什么 | magpie 的完整应用界面（Agent、会话、资源库、供应商、网关、额度、模型、插件、设置…） | 服务状态与 PID、网关地址与 API Key、面板地址与访问密码、日志尾 |
 | 纯 Magisk 下 | ✅ 可用，地址由 `run/web.url` 给出 | ❌ 没有宿主就打不开；此时 `webroot/status.json` 仍然会写，脚本可以直接读 |
 
 ### 命令行
@@ -411,7 +412,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | 404 | Base URL 少了 `/v1` |
 | 401 | 从别的设备访问时，key 必须是一把**已启用**的网关 key；本机回环访问不校验，所以「本机能用、电脑 401」是正常的 |
 | `model not found` | 该模型没在 magpie 里启用，或那把 key 的 models 限制不含它 |
-| 面板打开是 401 | 链接少了 `?k=`。用 `run/web.url` 里的完整地址，或点 `[执行]` 启动时自动打开 |
+| 面板打开是 401 | 链接少了 `?k=`。用 `run/web.url` 里的完整地址，或 `[执行]` → 选 6「打开面板」（会带上密码） |
 | 面板能开，但里面的 API Key 显示「点击「显示」查看」 | 这是刻意的，点一下即可 |
 
 一条命令查完这些：`su -c sh /data/adb/modules/magpie/scripts/doctor.sh`
@@ -551,8 +552,8 @@ magpie-magisk/
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
 ├── docs/
-│   ├── panel.png                     README 里的 webroot 面板截图
-│   ├── panel-magpie.png              README 里的 magpie 本体界面截图
+│   ├── panel.png                     README 里的 P2 截图（webroot 面板）
+│   ├── panel-magpie.jpg              README 里的 P1 截图（magpie 本体界面）
 │   └── social-preview.png            仓库 Social preview 用图（1280×640）
 ├── .github/workflows/release.yml     tag → 打包 → 发版 → 回写 update.json
 └── META-INF/com/google/android/      Magisk 刷机脚本

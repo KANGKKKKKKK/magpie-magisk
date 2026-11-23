@@ -2,7 +2,7 @@
 
 # Magpie AI Gateway · Android Module
 
-Turn [magpie](https://github.com/yetone/magpie) into a persistent Android service: starts on boot, comes back when killed, one button to toggle.
+Turn [magpie](https://github.com/yetone/magpie) into a persistent Android service: starts on boot, comes back when killed, start/stop from the `[Action]` menu.
 
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
@@ -134,20 +134,21 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # eight checks, says what to fix
 ```
 
-The module row in the manager should now read something like
-`🟢 running v0.1.4260 | 192.168.1.5:3425` instead of the static description.
+The module row should now read `🟢 运行中 v0.1.4260 | 仅本机` (`| 192.168.1.5:3425` once LAN is on)
+instead of the static description; the status strings themselves are Chinese.
 
 **5. Open the panel**
 
-The service is already running, so **do not tap `[Action]` now** — at this point it is a stop
-button. Instead, read the panel URL:
+Tap `[Action]` → 6 to open the panel in a browser, with the key already in the URL. Or read the
+panel URL yourself:
 
 ```sh
 su -c cat /data/adb/magpie/run/web.url
 # http://127.0.0.1:3430/?k=<32-char access password>
 ```
 
-Paste that into the phone's browser.
+Paste that into the phone's browser. That is magpie's own panel — see
+[the two panels](#two-different-panels) before mixing it up with the module's.
 
 > [!TIP]
 > To open the panel from a computer, set `MAGPIE_WEB_ADDR` to `0.0.0.0:3430` (see
@@ -164,7 +165,7 @@ chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 
 ## Installing the body
 
-When no body is present, `[Action]` stops being a toggle and becomes the install entry point.
+When no body is present, `[Action]` stops being the volume-key menu and becomes the install entry point.
 The same thing from a shell:
 
 ```sh
@@ -281,19 +282,22 @@ flips — you will not be left chasing a stale address. If your font shows emoji
 
 ### Two different "panels"
 
-There are two unrelated web pages. Do not mix them up:
+There are two unrelated web pages. This README labels magpie's own panel **P1** and the module's
+webroot one **P2**, so there is no left/right to get confused about:
 
-| | magpie's own panel | the module's webroot panel |
+<p align="center"><img src="docs/panel-magpie.jpg" width="240" alt="P1: magpie's own panel"> <img src="docs/panel.png" width="240" alt="P2: the module's webroot panel"></p>
+
+**P1**: magpie's own panel, captured on the About page (version, update switches); models,
+providers, quota and keys live here.  
+**P2**: the module's webroot panel. It needs KernelSU WebUI / WebUI-X as a host; the API key
+and access password are collapsed behind a "show" button and are not in the capture.
+
+| | P1: magpie's own panel | P2: the module's webroot panel |
 | --- | --- | --- |
-| URL | `http://<host>:3430/?k=<data/web.key>` | provided by the host, see next column |
+| URL | `http://<host>:3430/?k=<data/web.key>`; or `[Action]` → 6 | provided by the host, see next column |
 | Served by | magpie itself (`serve --web=…`) | `webroot/index.html`, which needs **KernelSU WebUI** or Magisk **WebUI-X** |
-| What you see | magpie's full app (Agents / Sessions / Library / Settings) | service state and PID, gateway URL and API key, panel URL and password, log tail |
+| What you see | magpie's full app (Agent / Sessions / Library / Providers / Gateway / Usage / Models / Plugins / Settings) | service state and PID, gateway URL and API key, panel URL and password, log tail |
 | Plain Magisk | ✅ works; URL comes from `run/web.url` | ❌ no host, nothing renders; `webroot/status.json` is still written and readable from scripts |
-
-![The module's webroot panel](docs/panel.png)
-
-(Screenshot is **the module's webroot panel**, which needs KernelSU WebUI or WebUI-X. The API key
-and access password are collapsed behind a "show" button and are not in the capture.)
 
 ### CLI
 
@@ -429,7 +433,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | 404 | Base URL is missing `/v1` |
 | 401 | From another device the key must be an **enabled** gateway key. Loopback does not validate, so "works here, 401 there" is expected |
 | `model not found` | Model not enabled in magpie, or the key's model restriction excludes it |
-| Panel shows 401 | URL lost its `?k=`. Use the full URL from `run/web.url` |
+| Panel shows 401 | URL lost its `?k=`. Use the full URL from `run/web.url`, or `[Action]` → 6 |
 | API key shows "click to reveal" | Intentional |
 
 The single command that answers most of these: `su -c sh /data/adb/modules/magpie/scripts/doctor.sh`
@@ -594,7 +598,8 @@ magpie-magisk/
 ├── webroot/
 │   └── index.html                    the module panel (needs KernelSU WebUI / WebUI-X)
 ├── docs/
-│   ├── panel.png                     screenshot used in the README
+│   ├── panel.png                     P2 screenshot (the module panel)
+│   ├── panel-magpie.jpg              P1 screenshot (magpie's own panel)
 │   └── social-preview.png            the repo's social preview image (1280×640)
 ├── .github/workflows/release.yml     tag → build → release → update.json
 └── META-INF/com/google/android/      Magisk flash scripts
