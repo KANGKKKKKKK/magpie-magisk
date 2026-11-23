@@ -79,6 +79,17 @@ if [ -f "$_NETLIB" ]; then
   . "$_NETLIB"
 else
   lan_ip() { return 1; }
+  # lib.sh 缺失时 DNS 生成也得能跑：否则 sync_resolv_conf 拿不到这个函数，
+  # 生成出空文件、报「MAGPIE_DNS 为空或格式不对」，把原因指向配置，误导排查。
+  magpie_resolv_body() {
+    for _ns in $1; do
+      case "$_ns" in
+        *[!0-9a-fA-F:.]*|'') continue ;;
+      esac
+      echo "nameserver $_ns"
+    done
+    echo "options timeout:2 attempts:2"
+  }
 fi
 
 # 把 run/lan.url 刷成当前地址；没有可用地址就删掉它。
