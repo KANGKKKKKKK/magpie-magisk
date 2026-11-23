@@ -1,14 +1,14 @@
 # 测试
 
 四个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程被桩替代。
-合计 98 条断言（39 + 8 + 40 + 11），在桌面 Linux 与 Android 上各跑一遍都是全通过。
+合计 100 条断言（39 + 8 + 40 + 13），在桌面 Linux 与 Android 上各跑一遍都是全通过。
 
 | 套件 | 断言数 | 测什么 |
 | --- | --- | --- |
 | `test-install.sh` | 39 | 安装器的 17 个用例 |
 | `test-watchdog.sh` | 8 | 看门狗的决定逻辑 |
 | `test-action.sh` | 40 | `[执行]` 菜单：安装分支、退路一键启停、子命令、按键解析、两种界面模式、收尾关窗口 |
-| `test-service.sh` | 11 | 进程清理、开机目录、配置路径 |
+| `test-service.sh` | 13 | 进程清理、开机目录、配置路径、DNS 生成 |
 
 需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service 不需要。
 
@@ -82,7 +82,7 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 sh tests/test-service.sh
 ```
 
-11 条断言，覆盖几个曾经出问题、但纯逻辑测试看不出来的地方：
+13 条断言，覆盖几个曾经出问题、但纯逻辑测试看不出来的地方：
 
 1. **首次开机 `run` 目录还不存在**：`service.sh` 的所有日志重定向都指向
    `run/watchdog.log`，目录不在时重定向会失败、命令根本不会执行 —— 结果就是永远起不来。
@@ -93,6 +93,8 @@ sh tests/test-service.sh
 4. **`start` 前只清 MCP 孤儿**：按命令行里的 ` mcp ` 判断，用户手上正在跑的
    `magpie update`、`gateway-key` 不会被误杀。
 5. **自定义 `magpie_path`**：`magpie` 命令读的是配置里的目录，不是写死的默认路径。
+6. **`start` 按 `MAGPIE_DNS` 生成 `resolv.conf`**：Go 静态 PIE 只认这个文件；
+   配置被写空时不能把已有的 `nameserver` 抹掉（否则又退回 `127.0.0.1:53`）。
 
 进程判定全部换成桩，占位进程用 `sleep` 顶替，跑完即收，不接触真实 magpie。
 

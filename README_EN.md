@@ -45,8 +45,10 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 [magpie](https://github.com/yetone/magpie) is a Go program written for the desktop. It runs on a
 phone, but it hits four walls in a row:
 
-- **DNS does not resolve.** Go finds no `/etc/resolv.conf`, falls back to `::1:53`, and the log
-  fills with `connection refused`.
+- **DNS does not resolve.** Go finds no `/etc/resolv.conf`, falls back to `127.0.0.1:53` and
+  `[::1]:53`, and the log fills with `connection refused`.
+  Worse, it only hits requests on the pure Go path: providers served through Bun plugins keep
+  working, so it looks like "some models work, some don't".
 - **HTTPS fails outright.** Go only looks at paths like `/etc/ssl/certs/ca-certificates.crt`,
   none of which exist on Android — Android keeps certificates as
   `/system/etc/security/cacerts/<hash>.0`, one file per certificate.
@@ -67,7 +69,8 @@ to see the state and clean up after itself.
 | Live status | The module row shows state and the address to use ([example](#the-action-button)) without tapping anything |
 | Self-check | `scripts/doctor.sh` runs nine checks and tells you what to fix |
 | CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE` and `MAGPIE_BUN` filled in, and says so when DNS is not set up |
-| CA bundle | Merges system roots for the static Go binary, rebuilds when system CAs change |
+| Upstream DNS | Ships `system/etc/resolv.conf`, rewritten from `MAGPIE_DNS`; no dnsmasq, no port 53 |
+| CA bundle | Merges system roots for the Go static PIE, rebuilds when system CAs change |
 | Log rotation | Rotates to `.1` past 5 MB, keeps one generation |
 | Online update | The manager can pull new versions directly |
 | Installs the body | No body yet? Tapping `[Action]` downloads and installs it: sha256 checked, atomic replace, no debris left on failure |
@@ -124,6 +127,10 @@ Details and the security notes are in [Installing the body](#installing-the-body
 **3. Reboot**
 
 The module waits for `sys.boot_completed` before starting. No need to unlock the screen.
+
+This reboot is also what puts the DNS overlay in place (`system/etc/resolv.conf` →
+`/etc/resolv.conf`, mounted by Magisk at boot). Skip it and native channels keep failing to
+resolve — `[8/9]` in `doctor.sh` says so outright.
 
 **4. Verify**
 
@@ -592,7 +599,7 @@ magpie-magisk/
 ├── service.sh                        boot start + watchdog
 ├── action.sh                         the manager's [Action] button
 ├── uninstall.sh                      cleanup on removal
-├── system/etc/resolv.conf            DNS overlay: upstream for the static Go binary (from MAGPIE_DNS)
+├── system/etc/resolv.conf            DNS overlay: upstream for the Go static PIE (from MAGPIE_DNS)
 ├── update.json                       manifest for online updates
 ├── build.sh                          build the flashable zip
 ├── scripts/
@@ -685,9 +692,10 @@ python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manife
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 39 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 8 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
+sh tests/test-service.sh                                  # process and dirs, 13 assertions
 ```
 
-98 assertions total, all in temp directories with stubbed process checks — a running service is
+100 assertions total, all in temp directories with stubbed process checks — a running service is
 never touched. Details and known gaps in [tests/README.md](tests/README.md).
 
 Releasing:

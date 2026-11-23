@@ -43,7 +43,8 @@
 
 [magpie](https://github.com/yetone/magpie) 是为桌面写的 Go 程序。搬到手机上能跑，但会连续撞上四件事：
 
-- **DNS 查不到**。Go 找不到 `/etc/resolv.conf`，退回查 `::1:53`，日志里刷 `connection refused`。
+- **DNS 查不到**。Go 找不到 `/etc/resolv.conf`，退回查 `127.0.0.1:53` 与 `[::1]:53`，日志里刷 `connection refused`。
+  更麻烦的是它只影响纯 Go 的请求路径：走 Bun 插件的供应商照常工作，所以表现为「有的模型能用、有的不能用」。
 - **HTTPS 全挂**。Go 只认 `/etc/ssl/certs/ca-certificates.crt` 这类固定路径，Android 上一个都没有——它的证书是 `/system/etc/security/cacerts/<hash>.0`，一证书一文件。
 - **开机不自启**。Android 没有 systemd，重启之后得手动再起一次。
 - **被杀就没了**。清理类 App、内存回收、系统「一键清理」都能直接 kill 掉它，而它自己不会回来。对下游客户端来说，这等于出口断了。
@@ -60,7 +61,8 @@
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
 | 自检 | `scripts/doctor.sh` 九项检查，直接告诉你哪里不对、下一步做什么 |
 | 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
-| CA 证书 | 合并系统根证书供静态 Go 使用，系统 CA 变化时自动重建 |
+| DNS 上游 | 模块自带 `system/etc/resolv.conf`，按 `MAGPIE_DNS` 重写；不启 dnsmasq，不占 53 端口 |
+| CA 证书 | 合并系统根证书供 Go 静态 PIE 使用，系统 CA 变化时自动重建 |
 | 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份 |
 | 在线更新 | 管理器里可直接收到新版本 |
 | 安装本体 | 本体没装时，点 `[执行]` 就能下载并装好：sha256 校验、原子替换、失败不留残骸 |
@@ -112,6 +114,8 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 **3. 重启**
 
 模块会等 `sys.boot_completed` 再拉起服务，不需要解锁屏幕。
+
+这次重启也负责把 DNS 覆盖挂上（`system/etc/resolv.conf` → `/etc/resolv.conf`，Magisk 在开机时挂载）。跳过重启的话原生通道会一直解析失败，`doctor.sh` 的 `[8/9]` 会直接指出来。
 
 **4. 验证**
 
@@ -542,7 +546,7 @@ magpie-magisk/
 ├── service.sh                        开机自启 + 看门狗
 ├── action.sh                         管理器 [执行] 按钮
 ├── uninstall.sh                      卸载清理
-├── system/etc/resolv.conf            DNS 覆盖：给静态 Go 程序提供上游（按 MAGPIE_DNS 生成）
+├── system/etc/resolv.conf            DNS 覆盖：给 Go 静态 PIE 提供上游（按 MAGPIE_DNS 生成）
 ├── update.json                       在线更新用的清单
 ├── build.sh                          打包成可刷入的 zip
 ├── scripts/
@@ -623,10 +627,10 @@ python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 39 条
 sh tests/test-watchdog.sh                                 # 看门狗 8 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
-sh tests/test-service.sh                                  # 进程与目录 11 条
+sh tests/test-service.sh                                  # 进程与目录 13 条
 ```
 
-四个套件共 98 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+四个套件共 100 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
 `.github/workflows/ci.yml` 在每次推 main 和 PR 时跑同一套；发版工作流打包前也会先跑。
 细节与已知缺口见 [tests/README.md](tests/README.md)。
 
