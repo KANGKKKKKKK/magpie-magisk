@@ -13,7 +13,7 @@ rm -f "$ZIP"
 # 排除运行时产物与仓库文件，只打模块实际需要的东西
 zip -r -9 "$ZIP" \
   module.prop customize.sh service.sh action.sh uninstall.sh \
-  scripts webroot/index.html \
+  scripts webroot/index.html system \
   META-INF \
   -x 'webroot/status.json' -x 'webroot/lastlog.txt' >/dev/null
 

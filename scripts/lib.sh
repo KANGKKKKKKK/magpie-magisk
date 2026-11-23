@@ -93,6 +93,29 @@ magpie_rss_mb() {
   [ "$_sum" -gt 0 ] && echo "$((_sum / 1024))"
 }
 
+# ---------- DNS ----------
+#
+# magpie 本体是静态编译的 Go 程序（cgoAvailable == false），解析域名只能用
+# 纯 Go 解析器。它只认 /etc/resolv.conf；读不到就把服务器置为
+# 127.0.0.1:53 与 [::1]:53，而 Android 上这两个地址没人监听，
+# 于是所有原生 Go 通道都报 `lookup ... on [::1]:53: connection refused`。
+# （Go 标准库里没有 DNS_LOCAL_HOSTNAMES，magpie 也不读它，v0.9.0 及以前那份
+#  export 从来没有生效过。）所以模块用 Magisk 覆盖提供 /system/etc/resolv.conf，
+# 内容由 magpie.service 按 MAGPIE_DNS 重写。
+
+# 打出一份 resolv.conf 内容。$1 = 服务器列表（空格分隔）
+# 只输出 nameserver 与 options 两种行，不写注释：
+# 解析实现一旦遇到整行都没法识别的写法，会把整份文件当无效处理。
+magpie_resolv_body() {
+  for _ns in $1; do
+    case "$_ns" in
+      *[!0-9a-fA-F:.]*|'') continue ;;
+    esac
+    echo "nameserver $_ns"
+  done
+  echo "options timeout:2 attempts:2"
+}
+
 # ---------- 本体可用性 ----------
 
 # 是不是 ELF（只看头 4 字节）

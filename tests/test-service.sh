@@ -131,6 +131,12 @@ chmod 755 "$B/bin/magpie"
 sh "$B/scripts/magpie.service" start >/dev/null 2>&1
 if alive "$MCP"; then bad "MCP 孤儿没被清"; else ok "启动前清了 MCP 孤儿"; fi
 if alive "$CLI"; then ok "没有误杀普通 magpie 命令"; else bad "把普通命令也杀了"; fi
+# 启动前会按 MAGPIE_DNS 生成 DNS 配置：Go 本体只认 /etc/resolv.conf
+if [ -f "$B/run/resolv.conf" ] && grep -qx 'nameserver 223.5.5.5' "$B/run/resolv.conf" 2>/dev/null; then
+  ok "按 MAGPIE_DNS 生成了 resolv.conf"
+else
+  bad "没有生成 resolv.conf"
+fi
 
 echo
 echo "== 5 自定义 magpie_path：magpie 命令跟着配置走"

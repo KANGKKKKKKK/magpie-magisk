@@ -64,7 +64,7 @@ echo "  配置   $CONF"
 echo "  监听   网关 $MAGPIE_ADDR  面板 ${MAGPIE_WEB_ADDR:-未设置}"
 echo
 
-echo "[1/8] 本体与进程"
+echo "[1/9] 本体与进程"
 _st_raw=$(sh "$MODDIR/scripts/install.sh" status 2>/dev/null)
 _st=$(printf '%s' "$_st_raw" | sed -n 's/^state=\([a-z]*\).*/\1/p')
 _bv=$(printf '%s' "$_st_raw" | sed -n 's/.*version=\([^ ]*\).*/\1/p')
@@ -97,7 +97,7 @@ else
   warn "服务未运行（本体未就绪，属预期）" "装好本体后再启动：sh $MODDIR/scripts/magpie.service start"
 fi
 
-echo "[2/8] 端口监听"
+echo "[2/9] 端口监听"
 for _p in "$API_PORT:网关" "$WEB_PORT:面板"; do
   _port=${_p%%:*}; _name=${_p##*:}
   if ss -ltn 2>/dev/null | grep -q "[:.]$_port "; then
@@ -107,7 +107,7 @@ for _p in "$API_PORT:网关" "$WEB_PORT:面板"; do
   fi
 done
 
-echo "[3/8] 本机可用性"
+echo "[3/9] 本机可用性"
 _c=$(http_code "http://127.0.0.1:$API_PORT/" 5)
 if [ "$_c" = "200" ]; then
   ok "网关响应正常（HTTP $_c）"
@@ -117,7 +117,7 @@ else
   bad "网关无响应" "进程在但端口不通，通常是还没启动完或端口被占"
 fi
 
-echo "[4/8] 面板与访问密码"
+echo "[4/9] 面板与访问密码"
 WEB_KEY=$(cat "$magpie_path/data/web.key" 2>/dev/null)
 if [ -n "$WEB_KEY" ]; then
   ok "访问密码存在（${#WEB_KEY} 位）"
@@ -132,7 +132,7 @@ else
   warn "没有 data/web.key" "首次启动服务时会自动生成"
 fi
 
-echo "[5/8] 网关密钥"
+echo "[5/9] 网关密钥"
 if [ -x "$magpie_path/bin/magpie" ]; then
   _n=$(HOME="$magpie_path/data" MAGPIE_HOME="$magpie_path/data" \
        "$magpie_path/bin/magpie" gateway-key list 2>/dev/null \
@@ -144,7 +144,7 @@ if [ -x "$magpie_path/bin/magpie" ]; then
   fi
 fi
 
-echo "[6/8] CA 证书包"
+echo "[6/9] CA 证书包"
 CA="$magpie_path/data/certs/ca-bundle.crt"
 if [ -s "$CA" ]; then
   _n=$(grep -c 'BEGIN CERTIFICATE' "$CA" 2>/dev/null)
@@ -153,7 +153,7 @@ else
   warn "没有证书包" "重启服务会自动生成；HTTPS 若失败可删掉它再重启"
 fi
 
-echo "[7/8] 局域网暴露"
+echo "[7/9] 局域网暴露"
 case "$MAGPIE_ADDR" in
   127.0.0.1:*|localhost:*)
     ok "网关只监听本机，局域网不可达" ;;
@@ -174,7 +174,36 @@ case "$MAGPIE_WEB_ADDR" in
   *) warn "面板已对局域网开放" "不知道访问密码的人会看到 401，但密码泄露等于网关密钥也泄露" ;;
 esac
 
-echo "[8/8] 日志与磁盘"
+echo "[8/9] DNS 解析"
+# magpie 是静态编译的 Go 程序，解析域名只走 /etc/resolv.conf。
+# 这个文件不存在时 Go 会去问 127.0.0.1:53 / [::1]:53，安卓上没人监听，
+# 于是原生通道全部 `connection refused`——所以先看文件在不在，再看上游答不答。
+if [ -r /etc/resolv.conf ]; then
+  _dns=$(sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')
+  if [ -n "$_dns" ]; then
+    ok "/etc/resolv.conf 存在（上游 ${_dns% }）"
+  else
+    bad "/etc/resolv.conf 里没有 nameserver" "改 MAGPIE_DNS 后重启服务，或重启一次手机让覆盖生效"
+  fi
+else
+  bad "/etc/resolv.conf 不存在" "原生 Go 通道会全部解析失败；重启一次手机让模块覆盖生效"
+fi
+if [ -n "$DL_BB" ]; then
+  # 覆盖还没挂上时也测一下配置里的第一台上游：能分辨「文件没生效」和「DNS 本身不通」
+  _srv=${_dns%% *}
+  [ -n "$_srv" ] || _srv=${MAGPIE_DNS%% *}
+  [ -n "$_srv" ] || _srv=223.5.5.5
+  # nslookup 会把「服务器」也打成 Address 行，所以只看 Name: 之后的才是答案
+  _addr=$("$DL_BB" nslookup api.deepseek.com "$_srv" 2>/dev/null \
+    | awk '/^Name:/{f=1;next} f && /^Address [0-9]*: /{sub(/^Address [0-9]*: /,""); print $1}' | head -1)
+  if [ -n "$_addr" ]; then
+    ok "上游 $_srv 能解析 api.deepseek.com（$_addr）"
+  else
+    warn "上游 $_srv 解析 api.deepseek.com 失败" "换一个 MAGPIE_DNS（如 223.5.5.5）后重启服务"
+  fi
+fi
+
+echo "[9/9] 日志与磁盘"
 for _f in "$magpie_path/run/magpie.log" "$magpie_path/run/watchdog.log"; do
   if [ -f "$_f" ]; then
     _sz=$(stat -c %s "$_f" 2>/dev/null)

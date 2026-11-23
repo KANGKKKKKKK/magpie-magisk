@@ -58,8 +58,8 @@
 | 进程守护 | 20 秒巡检，被杀或回收后自动拉回；用户主动停止时不强行恢复 |
 | 音量键菜单 | 点 `[执行]` 开菜单：切网关、看接入信息、启停、重启、开面板，音量键选、不用打字 |
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
-| 自检 | `scripts/doctor.sh` 八项检查，直接告诉你哪里不对、下一步做什么 |
-| 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`、上游 DNS |
+| 自检 | `scripts/doctor.sh` 九项检查，直接告诉你哪里不对、下一步做什么 |
+| 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
 | CA 证书 | 合并系统根证书供静态 Go 使用，系统 CA 变化时自动重建 |
 | 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份 |
 | 在线更新 | 管理器里可直接收到新版本 |
@@ -119,7 +119,7 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 # running (PID <pid>)
 
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # 八项自检，出问题会告诉你怎么修
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # 九项自检，出问题会告诉你怎么修
 ```
 
 管理器里那行描述会从刷入时的静态文字变成「🟢 运行中 v… | 仅本机」；开过局域网之后则是「🟢 运行中 v… | 192.168.x.x:3425」。
@@ -285,7 +285,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service start
 su -c sh /data/adb/modules/magpie/scripts/magpie.service stop
 su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # 八项自检
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # 九项自检
 ```
 
 `start` 失败返回非 0，日志在 `/data/adb/magpie/run/magpie.log`。
@@ -450,7 +450,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | `magpie_path` | `/data/adb/magpie` | 数据目录，二进制 / 日志 / magpie 自身数据都在里面 |
 | `MAGPIE_ADDR` | `127.0.0.1:3425` | API 网关监听地址 |
 | `MAGPIE_WEB_ADDR` | `127.0.0.1:3430` | WebUI 监听地址；留空则用 `MAGPIE_ADDR` 的 host + 3430 |
-| `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | 上游 DNS，空格分隔 |
+| `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | 上游 DNS，空格分隔；写进模块覆盖的 `/etc/resolv.conf`，改完重启服务生效 |
 | `MAGPIE_ICON` | `1` | 管理器状态图标：`1` 用 🟢/🔴，`0` 用 `[运行中]`/`[已停止]` |
 
 脚本按顺序找配置文件：`MAGPIE_CONF`（显式指定，排障与测试用）→ `/data/adb/magpie/scripts/magpie.config`（用户改的那份）→ 模块里的 `scripts/magpie.config`。所以**改配置请改数据目录那份**，它不会被模块更新覆盖；都不在时使用内置默认值，且默认全部监听 `127.0.0.1`。
@@ -465,17 +465,18 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ## 自检与排障
 
-`scripts/doctor.sh` 一次跑八项检查（只读，不改任何配置）：
+`scripts/doctor.sh` 一次跑九项检查（只读，不改任何配置）：
 
 ```
-[1/8] 本体与进程      本体装了没 / 能不能跑 / 版本 / PID / oom_score_adj
-[2/8] 端口监听        网关 / 面板端口有没有人听
-[3/8] 本机可用性      网关是否返回 200
-[4/8] 面板与访问密码  data/web.key 在不在？带密码能不能进
-[5/8] 网关密钥        有几把已启用的 key
-[6/8] CA 证书包       证书张数与权限
-[7/8] 局域网暴露      是否已对局域网开放、对外广播的地址是什么
-[8/8] 日志与磁盘      日志大小、数据目录可写、剩余空间
+[1/9] 本体与进程      本体装了没 / 能不能跑 / 版本 / PID / oom_score_adj
+[2/9] 端口监听        网关 / 面板端口有没有人听
+[3/9] 本机可用性      网关是否返回 200
+[4/9] 面板与访问密码  data/web.key 在不在？带密码能不能进
+[5/9] 网关密钥        有几把已启用的 key
+[6/9] CA 证书包       证书张数与权限
+[7/9] 局域网暴露      是否已对局域网开放、对外广播的地址是什么
+[8/9] DNS 解析        /etc/resolv.conf 在不在、上游能不能解析域名
+[9/9] 日志与磁盘      日志大小、数据目录可写、剩余空间
 ```
 
 | 现象 | 处理 |
@@ -488,6 +489,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | 启动失败，日志说端口占用 | 上次进程没退干净，`pidof magpie` 确认后 kill，再 `start` |
 | 面板数据一动不动 | 属预期：webroot 面板读的是 `status.json`，即启停那一刻的快照 |
 | HTTPS 报证书错误 | 删掉 `/data/adb/magpie/data/certs/ca-bundle.crt*` 再重启，会自动重建 |
+| 原生通道报 `lookup ... on [::1]:53: connection refused` | Go 没有可用上游。`cat /etc/resolv.conf` 看覆盖在不在；不在就重启一次手机，再跑 doctor 的 `[8/9] DNS 解析` |
 | 停止后又自己起来 | 属预期：看门狗会把意外退出的进程拉回。要彻底关掉自愈，停用整个模块 |
 | 改了 `magpie.config` 没生效 | 确认改的是 `/data/adb/magpie/scripts/magpie.config`，然后 `restart` |
 | 开机没自启 | 看 `run/watchdog.log`；手动停过服务会留 `.user_stopped` 标记，`start` 会清掉它 |
@@ -522,7 +524,8 @@ flowchart TD
 <details>
 <summary>三个设计取舍：DNS、CA 证书、局域网地址（点开展开）</summary>
 
-- **DNS 不占 53 端口**。用 Go 官方的 `DNS_LOCAL_HOSTNAMES` 直连公网 DNS，不启动本地 dnsmasq，因此不会和系统热点的 dnsmasq 抢端口——这是 v0.2 踩过的坑。
+- **DNS 靠模块覆盖的 `/etc/resolv.conf`**。magpie 是静态编译的 Go 程序，解析域名只认这个文件；Android 上没有它，Go 就退回问 `127.0.0.1:53` / `[::1]:53`，而那里没人监听，于是原生通道全部 `connection refused`。模块自带 `system/etc/resolv.conf`，由 Magisk 覆盖挂载，内容按 `MAGPIE_DNS` 重写——不启动本地 dnsmasq，所以不会和系统热点的 dnsmasq 抢端口（v0.2 踩过这个坑）。
+  顺便纠正旧文档：`DNS_LOCAL_HOSTNAMES` 不是 Go 的变量，本体里也搜不到，v0.9.0 及以前注入的那行从未生效。
 - **CA 证书自己更新**。给系统证书目录算指纹（文件数 + 目录 mtime，`/system/etc/security/cacerts` 与 APEX 那份一起算），存在 `ca-bundle.crt.stamp`；启动服务和调用 `magpie` 命令时比对，不一致就重建。先写临时文件、校验有证书才原子替换，失败保留旧包继续用。
 
   信任范围就是系统本来那些根证书：没有额外安装任何证书，没有中间人，也没有关掉校验。
@@ -539,13 +542,14 @@ magpie-magisk/
 ├── service.sh                        开机自启 + 看门狗
 ├── action.sh                         管理器 [执行] 按钮
 ├── uninstall.sh                      卸载清理
+├── system/etc/resolv.conf            DNS 覆盖：给静态 Go 程序提供上游（按 MAGPIE_DNS 生成）
 ├── update.json                       在线更新用的清单
 ├── build.sh                          打包成可刷入的 zip
 ├── scripts/
 │   ├── magpie.service                start / stop / restart / status
 │   ├── status.sh                     生成状态描述、status.json、日志尾
 │   ├── install.sh                    检测 / 下载 / 校验 / 部署本体
-│   ├── doctor.sh                     八项自检
+│   ├── doctor.sh                     九项自检
 │   ├── lib.sh                        局域网地址 + 进程识别 + 本体可用性，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
 │   └── magpie.config                 配置（默认值）
@@ -568,6 +572,7 @@ magpie-magisk/
 /data/adb/magpie/run/lan.url           局域网地址（开放局域网时）
 /data/adb/magpie/run/.user_stopped     用户主动停止的标记
 /data/adb/magpie/run/magpie.pid        PID 文件
+/data/adb/magpie/run/resolv.conf       本次生效的 DNS 配置（参照用）
 /data/adb/magpie/install-info.txt      安装记录（版本、来源、摘要，权限 600）
 /data/adb/magpie/bin/magpie.bak        旧本体备份，回退用
 /data/adb/magpie/.install.lock         安装互斥锁
@@ -608,6 +613,7 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - KernelSU / APatch 的路径都已经在脚本里覆盖（`ksud`、`/data/adb/ap/bin`、`/data/adb/ksud`），但**只在 Magisk 31.1 上实测过**，KernelSU / APatch 未实测。
 - 只在 arm64 + Android 14（HyperOS 2.0）实测；理论上 Android 10+ 的 arm64 设备都适用。
 - 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
+- **DNS 覆盖要重启一次手机才生效**：`system/etc/resolv.conf` 由 Magisk 在开机时挂载，装或更新模块后得重启；之后改 `MAGPIE_DNS` 重启服务即可重写覆盖文件，若 doctor 里上游还是旧的，再重启一次手机。
 
 ## 开发与测试
 

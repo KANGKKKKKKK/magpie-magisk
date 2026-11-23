@@ -65,8 +65,8 @@ to see the state and clean up after itself.
 | Watchdog | Checks every 20 s, restarts the process if killed; respects a manual stop |
 | Volume-key menu | Tapping `[Action]` opens a menu: switch gateway, see addresses, start/stop/restart, open the panel — pick with the volume keys, no typing |
 | Live status | The module row shows state and the address to use ([example](#the-action-button)) without tapping anything |
-| Self-check | `scripts/doctor.sh` runs eight checks and tells you what to fix |
-| CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE`, `MAGPIE_BUN` and upstream DNS filled in |
+| Self-check | `scripts/doctor.sh` runs nine checks and tells you what to fix |
+| CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE` and `MAGPIE_BUN` filled in, and says so when DNS is not set up |
 | CA bundle | Merges system roots for the static Go binary, rebuilds when system CAs change |
 | Log rotation | Rotates to `.1` past 5 MB, keeps one generation |
 | Online update | The manager can pull new versions directly |
@@ -131,7 +131,7 @@ The module waits for `sys.boot_completed` before starting. No need to unlock the
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 # running (PID <pid>)
 
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # eight checks, says what to fix
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # nine checks, says what to fix
 ```
 
 The module row should now read `🟢 运行中 v0.1.4260 | 仅本机` (`| 192.168.1.5:3425` once LAN is on)
@@ -316,7 +316,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service start
 su -c sh /data/adb/modules/magpie/scripts/magpie.service stop
 su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # eight self-checks
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # nine self-checks
 ```
 
 `start` returns non-zero on failure. Logs are in `/data/adb/magpie/run/magpie.log`.
@@ -481,7 +481,7 @@ current exposure plainly.
 | `magpie_path` | `/data/adb/magpie` | Data directory: binary, logs, magpie's own data |
 | `MAGPIE_ADDR` | `127.0.0.1:3425` | Gateway listen address |
 | `MAGPIE_WEB_ADDR` | `127.0.0.1:3430` | WebUI listen address; empty means `MAGPIE_ADDR`'s host + 3430 |
-| `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | Upstream DNS, space separated |
+| `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | Upstream DNS, space separated; written into the module's `/etc/resolv.conf` overlay, effective after a service restart |
 | `MAGPIE_ICON` | `1` | Status icon in the manager: `1` = 🟢/🔴, `0` = `[running]`/`[stopped]` text |
 
 The scripts look for the config file in order: `/data/adb/magpie/scripts/magpie.config` first, then
@@ -497,17 +497,18 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ## Self-check and troubleshooting
 
-`scripts/doctor.sh` runs eight read-only checks:
+`scripts/doctor.sh` runs nine read-only checks:
 
 ```
-[1/8] binary and process    installed? runs? version? PID? oom_score_adj?
-[2/8] listeners             is anything on the gateway / panel ports
-[3/8] local reachability    does the gateway answer 200
-[4/8] panel and password    is data/web.key there, does it work
-[5/8] gateway keys          how many are enabled
-[6/8] CA bundle             certificate count and permissions
-[7/8] LAN exposure          open to the subnet? what address is advertised?
-[8/8] logs and storage      log sizes, data dir writable, free space
+[1/9] binary and process    installed? runs? version? PID? oom_score_adj?
+[2/9] listeners             is anything on the gateway / panel ports
+[3/9] local reachability    does the gateway answer 200
+[4/9] panel and password    is data/web.key there, does it work
+[5/9] gateway keys          how many are enabled
+[6/9] CA bundle             certificate count and permissions
+[7/9] LAN exposure          open to the subnet? what address is advertised?
+[8/9] DNS                   is /etc/resolv.conf there, can the upstream resolve
+[9/9] logs and storage      log sizes, data dir writable, free space
 ```
 
 | Symptom | Fix |
@@ -520,6 +521,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | Start fails, log says port in use | Previous process still alive: `pidof magpie`, kill it, `start` again |
 | Panel data never changes | Expected: the webroot panel reads `status.json`, a snapshot from the last toggle |
 | HTTPS fails with certificate errors | Delete `/data/adb/magpie/data/certs/ca-bundle.crt*` and restart; it rebuilds |
+| Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/9]` in doctor |
 | Service comes back after stopping | Expected: the watchdog revives unexpected exits. Disable the module to stop that |
 | Edited `magpie.config` but nothing changed | Make sure you edited `/data/adb/magpie/scripts/magpie.config`, then `restart` |
 | No start on boot | Check `run/watchdog.log`; a manual stop leaves `.user_stopped`, but `start` clears it |
@@ -560,9 +562,14 @@ flowchart TD
 <details>
 <summary>Three design decisions: DNS, CA bundle, LAN address</summary>
 
-- **DNS does not occupy port 53.** It uses Go's `DNS_LOCAL_HOSTNAMES` to query public resolvers
-  directly, with no local dnsmasq, so it never fights the system's tethering dnsmasq for the port.
-  That collision was a real bug in v0.2.
+- **DNS comes from a module-provided `/etc/resolv.conf`.** magpie is a static Go binary, so it can
+  only use the pure Go resolver, which reads that one file. Android has no such file: Go then falls
+  back to `127.0.0.1:53` / `[::1]:53`, where nothing listens, and every native channel dies with
+  `connection refused`. The module ships `system/etc/resolv.conf`, Magisk overlays it onto
+  `/etc/resolv.conf`, and its contents are rewritten from `MAGPIE_DNS`. No local dnsmasq, so it never
+  fights the system's tethering dnsmasq for port 53 (a real bug in v0.2).
+  Also a correction: `DNS_LOCAL_HOSTNAMES` is not a Go variable and does not appear in the binary —
+  what v0.9.0 and earlier exported never took effect.
 - **The CA bundle updates itself.** It fingerprints the system certificate directories (file count
   + directory mtime, over both `/system/etc/security/cacerts` and the APEX copy), stores that in
   `ca-bundle.crt.stamp`, and rebuilds when it differs. Rebuilds write a temp file and swap
@@ -585,6 +592,7 @@ magpie-magisk/
 ├── service.sh                        boot start + watchdog
 ├── action.sh                         the manager's [Action] button
 ├── uninstall.sh                      cleanup on removal
+├── system/etc/resolv.conf            DNS overlay: upstream for the static Go binary (from MAGPIE_DNS)
 ├── update.json                       manifest for online updates
 ├── build.sh                          build the flashable zip
 ├── scripts/
@@ -592,7 +600,7 @@ magpie-magisk/
 │   ├── status.sh                     manager description, status.json, log tail
 │   ├── install.sh                    detect / download / verify / deploy the body
 │   ├── lib.sh                        LAN address, process and body helpers, shared
-│   ├── doctor.sh                     eight self-checks
+│   ├── doctor.sh                     nine self-checks
 │   ├── magpie-cli.sh                 environment wrapper around the binary
 │   └── magpie.config                 configuration defaults
 ├── webroot/
@@ -614,6 +622,7 @@ Generated at runtime, never committed:
 /data/adb/magpie/run/lan.url           LAN address (when exposed)
 /data/adb/magpie/run/.user_stopped     marker for a manual stop
 /data/adb/magpie/run/magpie.pid        PID file
+/data/adb/magpie/run/resolv.conf       DNS config currently in effect (for reference)
 /data/adb/magpie/install-info.txt      install record (version, source, digest; mode 600)
 /data/adb/magpie/bin/magpie.bak        previous body, for rollback
 /data/adb/magpie/.install.lock         install mutex
@@ -664,6 +673,9 @@ cache) and finally verifies nothing is left.
 - Tested on arm64 + Android 14 (HyperOS 2.0); theoretically any arm64 device on Android 10+.
 - Legacy dnsmasq cleanup targets only old processes with `listen-address=::1`; the system's
   tethering dnsmasq is never touched.
+- **The DNS overlay needs one reboot**: `system/etc/resolv.conf` is mounted by Magisk at boot, so
+  installing or updating the module needs a reboot. Afterwards a service restart rewrites the
+  overlay; if doctor still shows the old upstream, reboot once more.
 
 ## Development and tests
 

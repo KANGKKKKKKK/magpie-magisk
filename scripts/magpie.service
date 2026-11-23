@@ -52,15 +52,26 @@ rotate_log() {
 
 clean_logs() { rotate_log "$LOG"; }
 
-# DNS 走公网：Android 无 /etc/resolv.conf，Go 会退回查 ::1:53。
-# 用 DNS_LOCAL_HOSTNAMES 直连公网 DNS，不占 53 端口，避免与热点冲突。
+# DNS：magpie 本体是静态编译的 Go 程序，cgo 解析器不可用，只能走纯 Go 解析器。
+# 纯 Go 解析器只认 /etc/resolv.conf；Android 没有这个文件，读不到就退回
+# 127.0.0.1:53 / [::1]:53（那里没人监听），于是原生通道全部 connection refused。
+# 所以模块自带 system/etc/resolv.conf，由 Magisk 覆盖到 /etc/resolv.conf；
+# 下面 sync_resolv_conf 按 MAGPIE_DNS 重写那份覆盖文件。
+# 注意 Go 标准库并没有 DNS_LOCAL_HOSTNAMES 这个变量（本体里也搜不到），
+# v0.9.0 及以前注入的 export 从来没生效过。
 DNS_SERVERS="$MAGPIE_DNS"
+RESOLV_CONF="$RUN/resolv.conf"
 USER_STOPPED="$RUN/.user_stopped"
 CA_BUNDLE="$magpie_path/data/certs/ca-bundle.crt"
 CA_STAMP="$CA_BUNDLE.stamp"
 
 # 系统根证书的两个来源（此处内容相同，按文件名去重）
 CA_DIRS="/system/etc/security/cacerts /apex/com.android.conscrypt/cacerts"
+
+# 模块目录：DNS 覆盖文件写在这里。脚本被软链调用时 $0 可能是别的路径，兜底到默认位置。
+MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
+[ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
+RESOLV_OVERLAY="$MODDIR/system/etc/resolv.conf"
 
 # 局域网地址规则与 status.sh / action.sh / doctor.sh 共用同一份实现
 _NETLIB="$(dirname "$0")/lib.sh"
@@ -210,6 +221,43 @@ ensure_ca_bundle() {
   return 1
 }
 
+# 按 MAGPIE_DNS 生成 DNS 配置，写到两处：
+#   $RUN/resolv.conf                     本机参照，也方便 user 直接 cat
+#   $MODDIR/system/etc/resolv.conf       Magisk 覆盖，开机后就是 /etc/resolv.conf
+# 覆盖文件是 magpie 唯一的上游来源，所以这里失败就等于原生通道全废，要出声。
+sync_resolv_conf() {
+  magpie_resolv_body "$DNS_SERVERS" > "$RESOLV_CONF.tmp" 2>/dev/null
+  if [ ! -s "$RESOLV_CONF.tmp" ]; then
+    rm -f "$RESOLV_CONF.tmp" 2>/dev/null
+    log Warn "MAGPIE_DNS 为空或格式不对, 保留现有 DNS 配置"
+    return 1
+  fi
+  chmod 644 "$RESOLV_CONF.tmp" 2>/dev/null
+  mv -f "$RESOLV_CONF.tmp" "$RESOLV_CONF" 2>/dev/null
+
+  # 只有真模块目录才写覆盖：测试沙箱里 MODDIR 指向临时目录，
+  # 不挡一下会在那里凭空造出一个 system/etc/ 来。
+  if [ -f "$MODDIR/module.prop" ]; then
+    mkdir -p "$MODDIR/system/etc" 2>/dev/null
+    if ! cmp -s "$RESOLV_CONF" "$RESOLV_OVERLAY" 2>/dev/null; then
+      cp -f "$RESOLV_CONF" "$RESOLV_OVERLAY" 2>/dev/null && chmod 644 "$RESOLV_OVERLAY" 2>/dev/null
+    fi
+  fi
+
+  _want=$(sed -n 's/^nameserver[[:space:]]*//p' "$RESOLV_CONF" 2>/dev/null | tr '\n' ' ')
+  if [ -r /etc/resolv.conf ]; then
+    _live=$(sed -n 's/^nameserver[[:space:]]*//p' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')
+    if [ "$_live" = "$_want" ]; then
+      log Info "DNS 上游 $_want"
+    else
+      log Warn "DNS 覆盖还没挂上(当前 ${_live:-空}), 重启一次后生效"
+    fi
+  else
+    log Warn "DNS: 还没有 /etc/resolv.conf, 重启一次后 MAGPIE_DNS 才会生效"
+  fi
+  return 0
+}
+
 # 把 magpie 命令挂进 PATH
 ensure_cli() {
   _sd=$(dirname "$0")
@@ -249,12 +297,15 @@ start() {
   clean_logs
   ensure_cli
   ensure_ca_bundle
+  sync_resolv_conf
 
   export MAGPIE_ADDR MAGPIE_HOME="$magpie_path/data"
   export HOME="$magpie_path/data" TMPDIR="$RUN"
   export MAGPIE_WEB_KEY="$WEB_KEY"
   [ -s "$CA_BUNDLE" ] && export SSL_CERT_FILE="$CA_BUNDLE"
-  export DNS_LOCAL_HOSTNAMES="$DNS_SERVERS"
+  # DNS 上游来自 /etc/resolv.conf（上面刚写好的 Magisk 覆盖）。
+  # Go 与 magpie 都不认 DNS_LOCAL_HOSTNAMES，那个 export 已删除。
+  export RES_OPTIONS="${RES_OPTIONS:-timeout:2 attempts:2}"
   # 自带的是 glibc 版 Bun，Android 上跑不起来，优先用 Android 版
   _bun=$(ls "$magpie_path/data/.cache/magpie/bun"/*/magpie-bun 2>/dev/null | head -1)
   [ -n "$_bun" ] && export MAGPIE_BUN="$_bun"

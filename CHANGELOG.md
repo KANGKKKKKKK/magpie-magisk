@@ -1,5 +1,34 @@
 # 变更记录
 
+## v0.9.1 — 2026-11-23
+
+修一个从 v0.2 起就存在的失效配置：**`MAGPIE_DNS` 从来没真正生效**。原生 Go 通道
+（DeepSeek、OpenAI、Anthropic、Gemini 这些直连供应商，以及 GitHub 同步）在 Android 上
+一律 `lookup ... on [::1]:53: connection refused`；走 Bun 插件的供应商不受影响，
+所以表现为「有的模型能用、有的不能用」。
+
+### 修复
+
+- **DNS 改用 Magisk 覆盖的 `/etc/resolv.conf`**。magpie 本体是静态编译的 Go 程序
+  （`cgoAvailable == false`），只能走纯 Go 解析器；它只认 `/etc/resolv.conf`，Android
+  上没有这个文件时会把服务器置为 `127.0.0.1:53` / `[::1]:53`，而这两个地址没人监听。
+  现在模块自带 `system/etc/resolv.conf`，`magpie.service` 启动时按 `MAGPIE_DNS` 重写它，
+  开机后由 Magisk 挂成 `/etc/resolv.conf`。不启动本地 dnsmasq，不会和系统热点抢 53。
+- **删掉无效的 `DNS_LOCAL_HOSTNAMES`**。Go 标准库没有这个变量，magpie 本体里也搜不到
+  （整个二进制零命中），v0.9.0 及以前注入的 `export` 只是看起来在工作。README、
+  配置注释里的相关说法一并改正。
+- **自检加一项 `[8/9] DNS 解析`**：看 `/etc/resolv.conf` 在不在、上游能不能解析
+  `api.deepseek.com`，失败时直接给出下一步；其余检查项顺延成 `x/9`。
+- `magpie` 命令在 `/etc/resolv.conf` 缺失时直接提示，不再让它以 `lookup ... refused`
+  这种难以归因的方式失败。
+
+### 注意
+
+- `system/etc/resolv.conf` 由 Magisk 在开机时挂载，**装或更新这一版后要重启一次手机**；
+  之后改 `MAGPIE_DNS` 只需 `magpie.service restart`（若 doctor 显示上游还是旧的，再重启一次）。
+- 触发这一版的原因见 issue #1（报告人 `becausemadoka`：逐文件核对 Go 解析器行为，
+  并给了完整的验证脚本）。
+
 ## v0.9.0 — 2026-11-18
 
 `[执行]` 从「一键启停」升级成**音量键菜单**：不进终端也能切网关、启停、看地址。
