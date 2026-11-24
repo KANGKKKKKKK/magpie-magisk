@@ -38,6 +38,13 @@ public class MagpieTileService extends TileService {
             render(cachedState);
             return;
         }
+        // 先做不需要 root 的检查：模块没了就直接说，别去跑 su
+        if (!Shell.moduleExists()) {
+            cachedState = "nomodule";
+            cachedAt = System.currentTimeMillis();
+            render("nomodule");
+            return;
+        }
         render("working");
         Shell.run("sh " + Shell.SERVICE + " status", new Shell.Callback<Shell.Result>() {
             @Override
@@ -77,6 +84,12 @@ public class MagpieTileService extends TileService {
     }
 
     private void doToggle() {
+        if (!Shell.moduleExists()) {
+            cachedState = "nomodule";
+            cachedAt = System.currentTimeMillis();
+            render("nomodule");
+            return;
+        }
         render("working");
         // 走 toggle：在跑就停、没跑就起。停止会写 .user_stopped，
         // 看门狗不会把用户主动停掉的服务又拉回来。
@@ -101,7 +114,7 @@ public class MagpieTileService extends TileService {
      * <p>失败必须如实显示成「失败」。以前 toggle 失败会落到 else 分支被画成
      * 「已停止」—— 用户点了启动、其实没起来，界面上却是「已停止」，看不出出过事。
      */
-    private static String classify(Shell.Result r, String wantPrefix) {
+    static String classify(Shell.Result r, String wantPrefix) {
         String out = r.trimmed();
         // status 打印的是 "running (PID 123)"，toggle 打印的是裸 "running"，
         // 所以不能只用 endsWith。取最后一行再双向匹配。

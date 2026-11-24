@@ -27,6 +27,22 @@ final class Shell {
     /** 模块目录，用来判断模块装没装。 */
     static final String MODULE_DIR = "/data/adb/modules/magpie";
 
+    /**
+     * 模块在不在。
+     *
+     * <p>这个判断不需要 root：{@code /data/adb/modules} 是 0755，App 能 stat 到子目录。
+     * 有了它才能在跑 su 之前就把「模块没装」和「没拿到 root」分开 ——
+     * 否则模块被删后用户看到的是「需要 root」，去 root 管理器里翻半天，
+     * 而真正原因（模块没了）一个字的提示都没有。
+     */
+    static boolean moduleExists() {
+        try {
+            return new java.io.File(MODULE_DIR).isDirectory();
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
     private static final String[] SU_CANDIDATES = {
             "su",
             "/system/bin/su",

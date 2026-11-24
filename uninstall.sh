@@ -65,13 +65,13 @@ for _n in magpie-bun; do
 done
 
 # 3.5) 顺手卸掉磁贴 App（它只是本模块的配件，留着没有意义）。
-# 注意：从管理器「移除模块」时，卸载脚本跑在模块目录已经消失之后，
-# 这一步拿不到 scripts/tile-app.sh —— 那种情况下要手动卸载。
-if [ -f "$MODDIR/scripts/tile-app.sh" ]; then
-  # shellcheck disable=SC1091
-  . "$MODDIR/scripts/tile-app.sh"
-  if command -v tile_uninstall >/dev/null 2>&1; then
-    tile_uninstall >/dev/null 2>&1 && echo "- 已卸载磁贴 App"
+#
+# 不依赖 scripts/tile-app.sh：从管理器「移除模块」时，模块目录已经先被删了，
+# 那时读不到那个脚本。这里直接按包名卸，一个包名而已，不需要 helper。
+# （包名与 tile-app/AndroidManifest.xml 里的 package 必须一致。）
+if command -v pm >/dev/null 2>&1; then
+  if pm uninstall com.ruin.magpie.tile >/dev/null 2>&1; then
+    echo "- 已卸载磁贴 App"
   fi
 fi
 

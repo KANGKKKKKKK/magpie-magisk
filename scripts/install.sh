@@ -28,6 +28,15 @@ export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
 
+# 公共实现：路径归一化与白名单判断（check_target 要用）。
+# 以前这里只有一句「判断逻辑在 lib.sh」的注释，但从来没 source 过 ——
+# 于是 `command -v magpie_norm_path` 永远为假，归一化分支被静默跳过，
+# 安装器又退回到原来那个 case。
+if [ -f "$MODDIR/scripts/lib.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$MODDIR/scripts/lib.sh"
+fi
+
 CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
 magpie_path=/data/adb/magpie
@@ -293,12 +302,17 @@ human_size() {
 check_target() {
   # 先归一化：写成 "/data/" 时 case 匹配不上 "/data"，会漏过去。
   # 判断逻辑在 lib.sh，与 uninstall.sh 共用同一份。
-  if command -v magpie_norm_path >/dev/null 2>&1; then
-    _norm=$(magpie_norm_path "$magpie_path" 2>/dev/null) || \
-      die "magpie_path 必须是绝对路径：$magpie_path"
-    if [ "$_norm" != "$magpie_path" ]; then
-      die "magpie_path 末尾有多余斜杠：$magpie_path（应写成 $_norm）"
-    fi
+  # lib.sh 缺失时不能「跳过检查就当通过」—— 那等于回到修之前的状态，
+  # 而且用户完全看不出来。这种情况直接拒绝，并说明原因。
+  if ! command -v magpie_norm_path >/dev/null 2>&1; then
+    die "缺少 scripts/lib.sh，无法校验 magpie_path（重装模块可恢复）"
+  fi
+  _norm=$(magpie_norm_path "$magpie_path" 2>/dev/null) || \
+    die "magpie_path 必须是绝对路径：$magpie_path"
+  if [ "$_norm" != "$magpie_path" ]; then
+    # 归一化会解析 . / .. 与重复斜杠，所以差异不一定是「多写了斜杠」。
+    # 报错时直接把解析结果给出来，别让用户猜。
+    die "magpie_path 不是规范路径：$magpie_path（解析后是 $_norm，请直接写这个）"
   fi
   case "$magpie_path" in
     /|/data|/data/adb|/data/adb/modules|/sdcard|/sdcard/*|/storage|/storage/*|/mnt|/mnt/*|/system|/system/*)

@@ -51,12 +51,14 @@
             </intent-filter>
         </activity>
 
+        <!--
+          icon / label 不在这里重复声明：alias 会继承 targetActivity 的。
+          重复声明只会让「改一个忘另一个」变成可能（图标对、名字错）。
+        -->
         <activity-alias
             android:name=".Launcher"
             android:targetActivity=".MainActivity"
             android:exported="true"
-            android:icon="@mipmap/ic_launcher"
-            android:label="@string/app_name"
             android:enabled="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

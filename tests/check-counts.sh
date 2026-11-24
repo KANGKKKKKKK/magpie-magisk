@@ -71,7 +71,8 @@ if command -v javac >/dev/null 2>&1 && [ -f "$HERE/jvm/ClassifyTest.java" ]; the
   _w="$_TMP/count-check-jvm"
   rm -rf "$_w"
   if javac -encoding UTF-8 "$HERE/jvm/ClassifyTest.java" -d "$_w" >/dev/null 2>&1; then
-    JVM=$(java -cp "$_w" ClassifyTest 2>&1 | grep -cE '^  (PASS|FAIL)')
+    JVM=$(java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$_w" ClassifyTest 2>&1 \
+      | grep -cE '^  (PASS|FAIL)')
     say "  jvm/ClassifyTest  $JVM"
   fi
   rm -rf "$_w"

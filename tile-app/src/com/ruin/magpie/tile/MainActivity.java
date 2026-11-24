@@ -167,19 +167,34 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         status.setText("…");
         hint.setText(R.string.tile_hint);
+
+        // 模块没了就不必去跑 su：直接说清楚，别让用户去 root 管理器里翻
+        if (!Shell.moduleExists()) {
+            status.setText(R.string.state_unavailable);
+            hint.setText(R.string.module_missing);
+            grant.setVisibility(View.GONE);
+            return;
+        }
+
         Shell.run("sh " + Shell.SERVICE + " status", new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                if (!r.ok) {
-                    // su 拿不到：要么没授权，要么模块没装
+                // 与磁贴共用同一套判定，避免「磁贴说启动失败、界面说需要 root」
+                String state = MagpieTileService.classify(r, "stopped");
+                if ("noroot".equals(state)) {
                     status.setText(R.string.state_no_root);
                     hint.setText(R.string.root_needed);
                     grant.setVisibility(View.VISIBLE);
                     return;
                 }
                 grant.setVisibility(View.GONE);
-                if (r.trimmed().startsWith("running")) {
+                if ("running".equals(state)) {
                     status.setText(R.string.state_running);
+                } else if ("failed".equals(state)) {
+                    status.setText(R.string.state_failed);
+                } else if ("nomodule".equals(state)) {
+                    status.setText(R.string.state_unavailable);
+                    hint.setText(R.string.module_missing);
                 } else {
                     status.setText(R.string.state_stopped);
                 }

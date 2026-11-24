@@ -15,7 +15,8 @@ import android.content.pm.PackageManager;
  *
  * <p>恢复入口有两处：
  * <ul>
- *   <li>磁贴长按（TileService 支持 onLongClick，打开本页）</li>
+ *   <li>磁贴长按（SystemUI 发 ACTION_QS_TILE_PREFERENCES，由 MainActivity 接住；
+ *       TileService 本身没有 onLongClick）</li>
  *   <li>adb：{@code am start -n com.ruin.magpie.tile/.MainActivity}</li>
  * </ul>
  */

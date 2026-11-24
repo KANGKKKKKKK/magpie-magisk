@@ -308,6 +308,16 @@ for bad in /data /data/ /data// /data/// /data/adb /data/adb/ /data/adb/modules 
     ok "拒绝删除 [$bad]"
   fi
 done
+# ".." 与重复斜杠：字符串归一化不够，rm -rf 执行时会做路径解析。
+# /data/../data 在白名单里匹配不上 → 放行 → 实际删的是 /data。
+for bad in /data/../data /data/foo/../data /data/adb/magpie/../../.. /data//adb /data/./adb /..; do
+  if magpie_path_cleanable "$bad"; then
+    bad "含 .. 的路径被放行：[$bad] → 实际会删 $(readlink -m "$bad" 2>/dev/null)"
+  else
+    ok "拒绝删除 [$bad]"
+  fi
+done
+
 # 真正的目标必须仍然可删
 for good in /data/adb/magpie /data/adb/modules/magpie /tmp/magpie-install-test; do
   if magpie_path_cleanable "$good"; then ok "允许删除 $good"

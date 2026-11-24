@@ -6,6 +6,47 @@
 
 这一版还修了一批代码审查发现的问题，其中一个是**数据毁灭级**的。
 
+### 复审补充：`..` 也能绕过（同一条防线的另一半）
+
+上一轮修的是末尾斜杠，但 `case` 匹配发生在**原始字符串**上，而 `rm -rf`
+执行时会做一次 POSIX 路径解析。`magpie_path="/data/../data"` 归一化后仍是
+`/data/../data`，白名单匹配不上 → 放行 → 实际删的是 `/data`。
+
+修复：`magpie_norm_path` 遇到含 `.` / `..` 的路径先用 `readlink -m` 解析成真实路径
+再判定（拿不到时退回 `cd + pwd -P`，再不行就返回失败、由调用方拒绝删除）。
+
+顺带修了同一处的三个问题：
+
+- **`install.sh` 从来没 source 过 `lib.sh`**。上一轮加的归一化分支里写的是
+  `if command -v magpie_norm_path`，而那个函数根本不存在，于是整段被静默跳过 ——
+  安装器又回到原来的 `case`。现在补上 source；**并且 lib.sh 缺失时直接拒绝**
+  而不是「跳过检查就当通过」。
+- **`test-install.sh` 新增 7 条**：用 `install --yes` 的真实入口跑可疑路径
+  （`/data/`、`/data`、`/`、`/data/../data`、`/data//adb` 等），断言明确拒绝。
+  上一轮只测了 lib.sh 里的函数本身，测不出「接线断了」。
+- `check_target` 的报错文案从「末尾有多余斜杠」改成「不是规范路径」并给出解析结果 ——
+  它现在挡的是所有归一化差异，不只是斜杠。
+
+### 磁贴的「模块未安装」终于显示得出来
+
+`classify()` 里有 `nomodule` 分支、`strings.xml` 里有文案，但没有任何代码路径会返回它。
+模块被删后 `sh` 的 stdout 为空、stderr 是 `cannot open`，于是落到 `noroot` ——
+用户看到「需要 root」，去 root 管理器里翻授权，而真正原因一个字都没提。
+
+修复：`Shell.moduleExists()`（`/data/adb/modules` 是 0755，App 能 stat，不需要 root），
+磁贴与界面都先查它再决定要不要跑 su。同时 `MainActivity` 改用与磁贴同一个
+`classify()`，两边不再给出不同结论。
+
+### 其他
+
+| 项 | 说明 |
+| --- | --- |
+| `build.sh` 类清单 | 补上 `LauncherIcon`（决定「隐藏图标」的类），与 `ci.yml` 一致。漏了它时编译能过、dex 也在，运行时才 `NoClassDefFoundError`。 |
+| `LauncherIcon` 注释 | 写着「TileService 支持 onLongClick」，与仓库里另外三处说明矛盾。改成 `ACTION_QS_TILE_PREFERENCES`。 |
+| `uninstall.sh` 卸磁贴 | 改成直接 `pm uninstall com.ruin.magpie.tile`，不依赖 `scripts/tile-app.sh` —— 从管理器移除模块时那个脚本已经没了。 |
+| alias 冗余属性 | 去掉 `icon` / `label`（继承 `targetActivity`），避免「改一个忘另一个」。 |
+| JVM 输出编码 | `java` 加 `-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8`，否则中文用例在 GBK 环境下打成问号。 |
+
 ### 严重：卸载的路径白名单能被一个斜杠绕过
 
 `uninstall.sh` 的 `cleanable()` 用 `case` 整串匹配，而 `/data/` 匹配不上 `/data`
@@ -62,7 +103,8 @@ README 与 FAQ 都让用户改 `/data/adb/magpie/scripts/magpie.config`，
 | 卸载不卸磁贴 App | `uninstall.sh` 现在会调 `tile_uninstall`。注意：从管理器「移除模块」时脚本跑在模块目录已消失之后，那一步拿不到，需手动卸载。 |
 | `grep` 二进制 cmdline | `uninstall.sh` 里对 `/proc/pid/cmdline` 用 `grep -q` 改 `grep -aq`。 |
 
-测试：`test-lib.sh` 从 118 条增到 168 条，另加 10 条 JVM 用例。
+测试：`test-lib.sh` 从 118 条增到 174 条、`test-install.sh` 从 39 条增到 46 条，
+另加 10 条 JVM 用例。合计 299 + 10。
 
 ### 新增
 
@@ -103,7 +145,7 @@ README 与 FAQ 都让用户改 `/data/adb/magpie/scripts/magpie.config`，
 
 `test-lib.sh` 新增 4 条静态断言盯这件事：入口必须在 alias 上、
 alias 要指向 MainActivity、MainActivity 自己不能带 LAUNCHER 类别、
-磁贴必须有 onLongClick。
+磁贴长按的入口（`ACTION_QS_TILE_PREFERENCES`）必须有人接住。
 
 磁贴 App versionCode 4 / versionName 1.2.0。
 

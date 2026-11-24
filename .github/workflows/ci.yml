@@ -55,7 +55,9 @@ jobs:
           # 判错会让「启动失败」看起来像「已停止」。
           W=$(mktemp -d)
           javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W"
-          java -cp "$W" ClassifyTest
+          # -encoding 只影响「读源码」；控制台输出取决于 file/stdout.encoding。
+          # 用例里有中文（"正在停止"），GBK/ASCII 环境下会变成问号，排查时更难看。
+          java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W" ClassifyTest
 
       - name: 磁贴 App 能编译
         run: |

@@ -32,12 +32,16 @@ step() { echo; echo "== $1"; }
 
 # 每个用例一个干净沙箱
 fresh() {
-  rm -rf "$BASE"; mkdir -p "$BASE"
-  sed "s#^CONF=.*#CONF=$BASE/cfg#" "$SRC" > "$BASE/install.sh"
+  rm -rf "$BASE"; mkdir -p "$BASE/scripts"
+  sed "s#^CONF=.*#CONF=$BASE/cfg#" "$SRC" > "$BASE/scripts/install.sh"
   printf 'magpie_path="%s"\n' "$BASE" > "$BASE/cfg"
-  chmod 755 "$BASE/install.sh"
+  chmod 755 "$BASE/scripts/install.sh"
+  # install.sh 的 MODDIR 由脚本位置推导（scripts/ 的上一级），
+  # 所以脚本必须放在 scripts/ 下，否则找不到 lib.sh。
+  # 把真实的 lib.sh 也放进去：check_target 依赖它做路径校验。
+  cp "$HERE/../scripts/lib.sh" "$BASE/scripts/lib.sh"
 }
-run() { sh "$BASE/install.sh" "$@" 2>&1; }
+run() { sh "$BASE/scripts/install.sh" "$@" 2>&1; }
 
 export MAGPIE_MANIFEST_URL="$SRV/manifest.json"
 export MAGPIE_CONFIRM_WINDOW=600
@@ -158,7 +162,7 @@ for t in sh awk sed grep mkdir rm stat df cut tr head sleep date sha256sum od cm
   p=$(command -v "$t" 2>/dev/null) || continue
   ln -sf "$p" "$BASE/nodl/$t" 2>/dev/null
 done
-out=$(env PATH="$BASE/nodl" sh "$BASE/install.sh" plan 2>&1)
+out=$(env PATH="$BASE/nodl" sh "$BASE/scripts/install.sh" plan 2>&1)
 if [ -x /data/adb/magisk/busybox ]; then
   # Android：兜底应该能靠 Root 方案自带的 busybox 成功
   case "$out" in
@@ -187,7 +191,7 @@ time.sleep(120)' >/dev/null 2>&1 &
   HANG=$!
   sleep 0.5
   MAGPIE_MANIFEST_URL="http://127.0.0.1:8898/manifest.json" \
-    sh "$BASE/install.sh" install --yes >/dev/null 2>&1 &
+    sh "$BASE/scripts/install.sh" install --yes >/dev/null 2>&1 &
   INS=$!
   sleep 1.5
   kill -TERM "$INS" 2>/dev/null
@@ -206,6 +210,33 @@ else
 fi
 
 rm -rf "$BASE"
+echo
+echo "== 18 可疑的 magpie_path 要在真实入口被拒绝"
+# 走 install --yes 的真实入口。check_target 只在 cmd_install 里调用，
+# status 不经过它，所以不能用 status 测。
+# 上一轮只测了 lib.sh 里的函数本身，结果 install.sh 根本没 source lib.sh，
+# 归一化分支是死的，测试却是绿的 —— 这一组防的就是那种「接线断了」。
+for _bad in "/data/" "/data" "/" "/data/../data" "/data/adb/modules/" "/data//adb"; do
+  fresh
+  printf 'magpie_path="%s"\n' "$_bad" > "$BASE/cfg"
+  _out=$(MAGPIE_MANIFEST_URL="http://127.0.0.1:1/x" sh "$BASE/scripts/install.sh" install --yes 2>&1)
+  _rc=$?
+  if [ "$_rc" -ne 0 ] && printf '%s' "$_out" | grep -qE '不是规范路径|拒绝把本体安装|缺少 scripts/lib.sh'; then
+    ok "install 拒绝 magpie_path=$_bad"
+  else
+    bad "install 放行了 magpie_path=$_bad（rc=$_rc）：$(printf '%s' "$_out" | head -2)"
+  fi
+done
+# 正常路径要能过 check_target（后续会因取不到清单失败，但那是网络问题）
+fresh
+printf 'magpie_path="%s/data"\n' "$BASE" > "$BASE/cfg"
+_out=$(MAGPIE_MANIFEST_URL="http://127.0.0.1:1/x" sh "$BASE/scripts/install.sh" install --yes 2>&1)
+if printf '%s' "$_out" | grep -qE '不是规范路径|拒绝把本体安装'; then
+  bad "正常路径被误拒：$_out"
+else
+  ok "正常路径通过 check_target"
+fi
+
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"
 [ "$FAIL" = "0" ] || exit 1

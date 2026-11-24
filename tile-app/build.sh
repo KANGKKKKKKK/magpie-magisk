@@ -100,9 +100,11 @@ if [ "$_d8_rc" -ne 0 ]; then
 fi
 [ -s "$WORK/dex/classes.dex" ] || { echo "d8 没有产出 classes.dex" >&2; exit 1; }
 
-# 关键自检：dex 里必须能找到清单声明的 Activity 与 Service。
-# 少了任何一个，装上去就是 ClassNotFoundException 闪退。
-for _need in MainActivity MagpieTileService; do
+# 关键自检：dex 里必须能找到这些类。
+# 少了任何一个，装上去就是 ClassNotFoundException / NoClassDefFoundError 闪退。
+# 这份清单要与 .github/workflows/ci.yml 里的一致 —— 漏掉一个类时
+# 编译能过、dex 也在，问题要到运行时才炸。
+for _need in MagpieTileService MainActivity LauncherIcon Shell; do
   if ! grep -qa "$_need" "$WORK/dex/classes.dex"; then
     echo "dex 里缺少 $_need，拒绝产出 APK" >&2
     exit 1

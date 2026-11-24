@@ -64,7 +64,34 @@ magpie_norm_path() {
     /*) ;;
     *) return 1 ;;
   esac
-  # 折叠重复斜杠（不处理 ".." —— 调用方另有逐级上溯检查）
+
+  # 含 . 或 .. 的路径必须先解析成真实路径再判定。
+  #
+  # 只做字符串归一化是不够的：case 匹配发生在原始串上，而 rm -rf 执行时
+  # 会做一次 POSIX 路径解析。"/data/../data" 在白名单里匹配不上，于是被放行，
+  # 但 rm -rf 实际删的是 /data。
+  #
+  # readlink -m：解析符号链接与 . / ..，且不要求路径存在（toybox 与 coreutils
+  # 都支持 -m）。拿不到时退回 cd + pwd -P；再不行就保守地返回失败
+  # （调用方 magpie_path_cleanable 会据此拒绝删除）。
+  case "$_p" in
+    */.|*/..|*/./*|*/../*|.|..)
+      _r=$(readlink -m "$_p" 2>/dev/null)
+      if [ -n "$_r" ]; then
+        _p=$_r
+      else
+        _d=$(dirname "$_p" 2>/dev/null)
+        _b=$(basename "$_p" 2>/dev/null)
+        _r=$(cd "$_d" 2>/dev/null && pwd -P) || return 1
+        [ -n "$_r" ] || return 1
+        _p="$_r/$_b"
+        _r2=$(readlink -m "$_p" 2>/dev/null)
+        [ -n "$_r2" ] && _p=$_r2
+      fi
+      ;;
+  esac
+
+  # 折叠重复斜杠
   while :; do
     case "$_p" in
       *//*) _p=$(printf '%s' "$_p" | sed 's|//*|/|g') ;;

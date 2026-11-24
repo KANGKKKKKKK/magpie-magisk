@@ -712,14 +712,14 @@ cache) and finally verifies nothing is left.
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 39 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 46 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
 sh tests/test-service.sh                                  # process, dirs, status, session, 26 assertions
-sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA, 168 assertions
+sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA, 174 assertions
 ```
 
-286 assertions total (39 + 13 + 40 + 26 + 168), plus 10 JVM cases in `tests/jvm/`. All run in temp
+299 assertions total (46 + 13 + 40 + 26 + 174), plus 10 JVM cases in `tests/jvm/`. All run in temp
 directories with stubbed process checks — a running service is
 never touched. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
