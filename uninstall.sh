@@ -13,12 +13,15 @@ _CONF=$(magpie_resolve_conf "$MODDIR" 2>/dev/null)
 DATA=${magpie_path:-/data/adb/magpie}
 
 # rm -rf 之前先确认路径像话：配置写错一个字都不能变成删系统目录
+# 能不能删这个路径。实现在 lib.sh（与 install.sh 共用同一份判断），
+# 这里只做「lib.sh 缺失时的保守兜底」：一律不删。
+# 宁可留下垃圾，也不能在缺库时 rm -rf 一个没校验过的路径。
 cleanable() {
-  case "$1" in
-    ''|/|/data|/data/adb|/data/adb/modules|/sdcard|/sdcard/*|/storage|/storage/*|/mnt|/mnt/*|/system|/system/*)
-      return 1 ;;
-    /*) return 0 ;;
-  esac
+  if command -v magpie_path_cleanable >/dev/null 2>&1; then
+    magpie_path_cleanable "$1"
+    return $?
+  fi
+  echo "! lib.sh 缺失，拒绝删除任何路径（$1）" >&2
   return 1
 }
 
@@ -61,12 +64,23 @@ for _n in magpie-bun; do
   [ -n "$_pid" ] && kill -9 $_pid 2>/dev/null
 done
 
+# 3.5) 顺手卸掉磁贴 App（它只是本模块的配件，留着没有意义）。
+# 注意：从管理器「移除模块」时，卸载脚本跑在模块目录已经消失之后，
+# 这一步拿不到 scripts/tile-app.sh —— 那种情况下要手动卸载。
+if [ -f "$MODDIR/scripts/tile-app.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$MODDIR/scripts/tile-app.sh"
+  if command -v tile_uninstall >/dev/null 2>&1; then
+    tile_uninstall >/dev/null 2>&1 && echo "- 已卸载磁贴 App"
+  fi
+fi
+
 # 4) 只收旧版监听 ::1:53 的 dnsmasq，不要动系统热点的 dnsmasq
 if [ -f "$DATA/run/dnsmasq.pid" ]; then
   _dp=$(cat "$DATA/run/dnsmasq.pid" 2>/dev/null)
   case "$_dp" in
     ''|*[!0-9]*) : ;;
-    *) grep -q 'listen-address=::1' "/proc/$_dp/cmdline" 2>/dev/null && kill -15 "$_dp" 2>/dev/null ;;
+    *) grep -aq 'listen-address=::1' "/proc/$_dp/cmdline" 2>/dev/null && kill -15 "$_dp" 2>/dev/null ;;
   esac
 fi
 [ -f "$DATA/run/dnsmasq.keep.pid" ] && kill -15 "$(cat "$DATA/run/dnsmasq.keep.pid" 2>/dev/null)" 2>/dev/null

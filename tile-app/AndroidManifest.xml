@@ -15,8 +15,8 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.ruin.magpie.tile"
-    android:versionCode="3"
-    android:versionName="1.1.2">
+    android:versionCode="4"
+    android:versionName="1.2.0">
 
     <uses-sdk
         android:minSdkVersion="29"
@@ -29,15 +29,40 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.DayNight">
 
+        <!--
+          桌面入口放在一个 activity-alias 上，而不是 MainActivity 本身。
+          这样「隐藏桌面图标」只要 setComponentEnabledSetting 关掉这个 alias：
+          图标消失，但 MainActivity 仍然可以被显式启动
+          （磁贴长按、adb、其他 App 拉起都行），不会把自己锁死。
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name">
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.DeviceDefault.DayNight">
+            <!--
+              磁贴长按时，SystemUI 会发 ACTION_QS_TILE_PREFERENCES 到磁贴所在包。
+              接住它就能打开设置页 —— 这是「隐藏桌面图标」之后的主要恢复入口。
+              TileService 本身没有 onLongClick（android-34 的 API 里只有
+              onClick / onStartListening / onStopListening），长按走的是这条 Intent。
+            -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+        </activity>
+
+        <activity-alias
+            android:name=".Launcher"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:enabled="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <!--
           磁贴服务。

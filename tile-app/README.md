@@ -19,6 +19,7 @@ App 声明，模块只能往系统里放文件。所以磁贴只能做成一个�
 | 显示当前状态（运行中 / 已停止） | 不代理、不转发流量 |
 | 首次打开时请求 root 授权 | 不做任何配置（配置都在 `magpie.config`） |
 | 「打开面板」跳转到 Web UI | 不联网 |
+| 可隐藏桌面图标（只留磁贴） | 不常驻后台、不监听任何事件 |
 
 ## 安装方式
 
@@ -48,6 +49,26 @@ App 声明，模块只能往系统里放文件。所以磁贴只能做成一个�
 所以必须先打开一次 App 完成授权——这也是这个 App 有界面的唯一理由。
 
 如果没授权就点磁贴，磁贴会显示「需要 root」并置灰。
+
+## 隐藏桌面图标
+
+App 里有个「桌面图标」开关。隐藏之后桌面不再有图标，只剩控制中心磁贴。
+
+实现方式：桌面入口（`MAIN` + `LAUNCHER`）挂在 `activity-alias`（`.Launcher`）上，
+而不是 `MainActivity` 本身。隐藏 = `setComponentEnabledSetting` 关掉这个 alias。
+
+**为什么不用别的方式**：如果直接关掉 `MainActivity`，用户就再也进不来这个
+设置页，也就没法把图标恢复回去——等于自己把自己锁死。
+
+**恢复入口**（三选一）：
+
+1. 长按控制中心里的 Magpie 磁贴 → 打开设置页
+   （SystemUI 发 `ACTION_QS_TILE_PREFERENCES`，`MainActivity` 接住）
+2. `adb shell am start -n com.ruin.magpie.tile/.MainActivity`
+3. 任何能显式启动该 Activity 的方式（快捷方式 App、Tasker 等）
+
+已验证：禁用 alias 后 `resolve-activity -c LAUNCHER` 返回 *No activity found*，
+同时 `am start -n .../.MainActivity` 仍返回 `Status: ok`。
 
 ## 状态怎么读
 

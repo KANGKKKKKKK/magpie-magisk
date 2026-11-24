@@ -63,14 +63,51 @@ aapt package -f -m -J "$WORK/gen" -M "$HERE/AndroidManifest.xml" \
 echo "→ 编译"
 # 用 -source/-target 8 而不是 --release：--release 会忽略 -bootclasspath，
 # 那样 javac 会拿 JDK 自带的类去校验，Android 的类全找不到。
-javac -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
+#
+# 输出先落文件再过滤：直接 `javac ... | grep ...` 有两个坑：
+#   1. 管道让 $? 变成 grep 的退出码，javac 失败会被当成成功（set -e 也不管用）；
+#   2. 过滤规则写宽一点就把 error 也滤掉了。
+# 曾经因此打出一个只有部分类的 APK，装上去一启动就 ClassNotFoundException。
+javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
   -d "$WORK/classes" \
-  $(find "$HERE/src" "$WORK/gen" -name '*.java') 2>&1 \
-  | grep -vE 'bootstrap class path|source value 8|target value 8|obsolete|Xlint' || true
+  $(find "$HERE/src" "$WORK/gen" -name '*.java') >"$WORK/javac.log" 2>&1
+_javac_rc=$?
+# 只滤掉 javac 关于 -source/-target 已过时的提示，其余原样打出来
+grep -vE 'bootstrap class path|source value 8|target value 8|obsolete|Xlint' \
+  "$WORK/javac.log" || true
+if [ "$_javac_rc" -ne 0 ]; then
+  echo "编译失败（javac 退出码 $_javac_rc）" >&2
+  exit 1
+fi
+
+# 兜底自检：每个源文件都必须产出对应的 .class，防止「编译没报错但类没生成」
+for _java in $(find "$HERE/src" -name '*.java'); do
+  _cls="$WORK/classes/$(echo "${_java#"$HERE/src/"}" | sed 's/\.java$/.class/')"
+  if [ ! -f "$_cls" ]; then
+    echo "编译产物缺失：${_cls#"$WORK/classes/"}" >&2
+    exit 1
+  fi
+done
 
 echo "→ dex"
 "$BT/d8" --min-api 29 --output "$WORK/dex" \
-  $(find "$WORK/classes" -name '*.class')
+  $(find "$WORK/classes" -name '*.class') >"$WORK/d8.log" 2>&1
+_d8_rc=$?
+grep -vE '^Warning' "$WORK/d8.log" || true
+if [ "$_d8_rc" -ne 0 ]; then
+  echo "dex 生成失败（d8 退出码 $_d8_rc）" >&2
+  exit 1
+fi
+[ -s "$WORK/dex/classes.dex" ] || { echo "d8 没有产出 classes.dex" >&2; exit 1; }
+
+# 关键自检：dex 里必须能找到清单声明的 Activity 与 Service。
+# 少了任何一个，装上去就是 ClassNotFoundException 闪退。
+for _need in MainActivity MagpieTileService; do
+  if ! grep -qa "$_need" "$WORK/dex/classes.dex"; then
+    echo "dex 里缺少 $_need，拒绝产出 APK" >&2
+    exit 1
+  fi
+done
 
 echo "→ 打包"
 aapt package -f -M "$HERE/AndroidManifest.xml" -S "$HERE/res" \

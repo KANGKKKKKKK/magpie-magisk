@@ -9,6 +9,7 @@
     <string name="state_working">处理中…</string>
     <string name="state_no_root">需要 root</string>
     <string name="state_unavailable">模块未安装</string>
+    <string name="state_failed">启动失败</string>
 
     <!-- App 界面 -->
     <string name="intro">这个 App 只做一件事：把 Magpie 的启动/停止放进控制中心。</string>
@@ -22,4 +23,11 @@
     <string name="root_failed">没能获得 root 权限</string>
     <string name="module_missing">没找到 magpie 模块（/data/adb/modules/magpie）。先刷入模块再来。</string>
     <string name="tile_hint">装好后请在「控制中心 → 编辑」里把 Magpie 磁贴拖出来。</string>
+
+    <!-- 桌面图标开关 -->
+    <string name="label_launcher">桌面图标</string>
+    <string name="btn_hide_icon">隐藏桌面图标</string>
+    <string name="btn_show_icon">显示桌面图标</string>
+    <string name="launcher_hidden_note">已隐藏。要再打开这个页面：长按控制中心里的 Magpie 磁贴。</string>
+    <string name="launcher_hide_failed">没能修改桌面图标，系统拒绝了这次操作。</string>
 </resources>

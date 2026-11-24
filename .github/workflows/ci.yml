@@ -41,6 +41,15 @@ jobs:
           shellcheck -s sh -e SC1090,SC1091 \
             service.sh action.sh uninstall.sh customize.sh scripts/*.sh
 
+      - name: 磁贴的状态判定逻辑
+        run: |
+          set -eu
+          # 纯 JVM，不依赖 Android SDK。这段逻辑决定磁贴显示什么，
+          # 判错会让「启动失败」看起来像「已停止」。
+          W=$(mktemp -d)
+          javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W"
+          java -cp "$W" ClassifyTest
+
       - name: 磁贴 App 能编译
         run: |
           set -eu
@@ -65,12 +74,33 @@ jobs:
             exit 0
           fi
           W=$(mktemp -d)
+          # aapt -J 不会自己创建目标目录，缺了会报
+          # "Unable to open class file .../gen/.../R.java" —— 而它的退出码
+          # 还是 0，光看 $? 发现不了。
+          mkdir -p "$W/gen" "$W/classes"
           aapt package -f -m -J "$W/gen" -M tile-app/AndroidManifest.xml \
             -S tile-app/res -I "$JAR"
-          javac -source 8 -target 8 -bootclasspath "$JAR" -d "$W/classes" \
-            $(find tile-app/src "$W/gen" -name '*.java') 2>&1 \
-            | grep -vE 'bootstrap class path|source value 8|target value 8|obsolete|Xlint' || true
-          test -f "$W/classes/com/ruin/magpie/tile/MagpieTileService.class"
+          # 源码注释是中文，不指定编码时平台默认非 UTF-8 就会一片
+          # "unmappable character"。
+          # 这里不用 `javac ... | grep ...`：管道会让 $? 变成 grep 的退出码，
+          # 编译失败会被当成成功。先落文件、查退出码、再过滤。
+          javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$JAR" \
+            -d "$W/classes" \
+            $(find tile-app/src "$W/gen" -name '*.java') > "$W/javac.log" 2>&1
+          _rc=$?
+          grep -vE 'bootstrap class path|source value 8|target value 8|obsolete|Xlint' \
+            "$W/javac.log" || true
+          if [ "$_rc" -ne 0 ]; then
+            echo "::error::磁贴 App 编译失败"
+            exit 1
+          fi
+          # 清单声明的两个组件都必须在，防止「只编出一个类」的假绿
+          for c in MagpieTileService MainActivity LauncherIcon Shell; do
+            if [ ! -f "$W/classes/com/ruin/magpie/tile/$c.class" ]; then
+              echo "::error::缺少编译产物 $c.class"
+              exit 1
+            fi
+          done
           echo "磁贴 App 编译通过"
 
       - name: 测试

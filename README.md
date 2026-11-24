@@ -663,6 +663,16 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 磁贴显示「运行中 / 已停止」，点击切换。停止走的是同一条 `stop` 路径，
 会写 `.user_stopped` 标记，看门狗不会把用户主动停掉的服务又拉回来。
 
+**长按磁贴**可以打开 App 的设置页 —— 这也是隐藏桌面图标之后的恢复入口
+（`TileService` 没有 `onLongClick`，长按是 SystemUI 发
+`ACTION_QS_TILE_PREFERENCES`，由 `MainActivity` 接住）。
+
+App 里有个「桌面图标」开关，可以隐藏桌面图标（只留控制中心磁贴）。
+实现上桌面入口挂在一个 `activity-alias` 上，隐藏只是关掉这个 alias，
+`MainActivity` 本身仍然可以被显式启动，所以不会把自己锁死。
+图标隐藏后要再打开设置页：**长按控制中心里的 Magpie 磁贴**，
+或用 `am start -n com.ruin.magpie.tile/.MainActivity`。
+
 细节见 [tile-app/README.md](tile-app/README.md)。
 
 ## 已知限制
@@ -689,10 +699,10 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 39 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
 sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 20 条
-sh tests/test-lib.sh                                      # 地址/IP/JSON/tag/CA 纯函数 110 条
+sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA 纯函数 168 条
 ```
 
-五个套件共 222 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+五个套件共 286 条断言（39 + 13 + 40 + 26 + 168），另有 10 条 JVM 用例，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 

@@ -38,10 +38,72 @@ addr_port() {
 # 回环地址？认 127/8、localhost、::1（含方括号与完整写法）。
 # 空主机（":3425"）表示监听全部网卡，不算回环。
 is_loopback_host() {
-  case "$1" in
+  # IPv6 的十六进制位大小写不敏感：::FFFF:127.0.0.1 与 ::ffff:127.0.0.1 是同一个地址。
+  # 以前只匹配小写，大写写法会被判成「已开放局域网」—— 安全边界说反了。
+  _h=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$_h" in
     127.*|localhost|::1|\[::1\]|0:0:0:0:0:0:0:1) return 0 ;;
+    # IPv4-mapped：::ffff:127.x 仍然是回环
+    ::ffff:127.*|\[::ffff:127.*\]) return 0 ;;
   esac
   return 1
+}
+
+# ---------- 路径 ----------
+
+# 归一化一个绝对路径，用于「这个路径能不能删 / 能不能往里装」这类判断。
+#
+# 为什么要单独做：直接拿原串去 case 匹配会被一个多余的斜杠绕过 ——
+# `/data` 在白名单里，`/data/` 不在，于是落到「是绝对路径就放行」那一支。
+# 触发只需要配置里写成 magpie_path="/data/"，后果是 rm -rf /data。
+#
+# 规则：剥掉所有末尾斜杠；"//" 折叠成 "/"；剥完是空串则输出 "/"。
+magpie_norm_path() {
+  _p=$1
+  case "$_p" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  # 折叠重复斜杠（不处理 ".." —— 调用方另有逐级上溯检查）
+  while :; do
+    case "$_p" in
+      *//*) _p=$(printf '%s' "$_p" | sed 's|//*|/|g') ;;
+      *) break ;;
+    esac
+  done
+  # 剥末尾斜杠；根目录剥完是空串，补回 "/"
+  while [ "${_p%/}" != "$_p" ]; do
+    _p=${_p%/}
+  done
+  [ -n "$_p" ] || _p="/"
+  echo "$_p"
+}
+
+# 这个路径是不是「绝不能删」的那一类。返回 0 表示可以删。
+# 传进来的路径会先归一化，所以 "/data/" 与 "/data" 等价。
+magpie_path_cleanable() {
+  _c=$(magpie_norm_path "$1" 2>/dev/null) || return 1
+
+  # 精确拦：这些目录本身绝不能被整个删掉
+  case "$_c" in
+    ''|/|/data|/data/adb|/data/adb/modules|/data/local|/data/app|/data/data|/data/system)
+      return 1 ;;
+    /sdcard|/storage|/storage/emulated|/storage/emulated/0)
+      return 1 ;;
+    /mnt|/system|/vendor|/product|/apex)
+      return 1 ;;
+  esac
+
+  # 前缀拦：这些目录下面的任何东西也不删。
+  # /data/adb/modules/<某个模块> 不在此列 —— 那正是要删的目标。
+  case "$_c" in
+    /data/adb/modules/*/*) return 1 ;;
+    /sdcard/*|/storage/*|/mnt/*) return 1 ;;
+    /system/*|/vendor/*|/product/*|/apex/*) return 1 ;;
+    /data/local/*|/data/app/*|/data/data/*|/data/system/*) return 1 ;;
+  esac
+
+  return 0
 }
 
 # ---------- 局域网地址 ----------

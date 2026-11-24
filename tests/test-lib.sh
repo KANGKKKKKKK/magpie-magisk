@@ -258,6 +258,116 @@ case "$_r" in *已是最新*) ok "已装版本更新时不动" ;; *) bad "把更
 
 rm -rf "$_ta" 2>/dev/null
 
+echo "== 14 磁贴 App 的桌面图标开关（activity-alias）"
+# 隐藏图标靠关闭 activity-alias 实现，MainActivity 必须保持可启动，
+# 否则用户再也进不来设置页、也没法把图标恢复回来。
+_ma="$HERE/../tile-app/AndroidManifest.xml"
+if [ -f "$_ma" ]; then
+  # LAUNCHER 入口必须挂在 alias 上，不能挂在 MainActivity 上
+  if grep -q 'android:name=".Launcher"' "$_ma" && grep -q 'activity-alias' "$_ma"; then
+    ok "桌面入口由 activity-alias 承载"
+  else
+    bad "没找到 activity-alias，隐藏图标会连设置页一起关掉"
+  fi
+  # alias 要指向 MainActivity
+  if grep -A3 'activity-alias' "$_ma" | grep -q 'targetActivity=".MainActivity"'; then
+    ok "alias 指向 MainActivity"
+  else
+    bad "alias 的 targetActivity 不是 MainActivity"
+  fi
+  # MainActivity 自身不能带 LAUNCHER 类别（否则关掉 alias 图标还在）。
+  # 注意它是自闭合标签 <activity ... />，不能按「到 </activity>」的范围取 ——
+  # 那样会把后面的 activity-alias 也吃进来，误报。
+  _act=$(awk '/<activity$/{f=1} f{print} f&&/\/>$/{exit} f&&/<\/activity>/{exit}' "$_ma")
+  case "$_act" in
+    *LAUNCHER*) bad "MainActivity 自己声明了 LAUNCHER，隐藏图标会失效" ;;
+    *) ok "MainActivity 不带 LAUNCHER 类别" ;;
+  esac
+  # 磁贴长按的恢复入口：TileService 没有 onLongClick（android-34 的 API 里
+  # 只有 onClick / onStartListening / onStopListening），长按走的是
+  # ACTION_QS_TILE_PREFERENCES 这个 Intent。必须有人接住它。
+  if grep -q 'QS_TILE_PREFERENCES' "$_ma"; then
+    ok "接住了 QS_TILE_PREFERENCES（图标隐藏后的恢复入口）"
+  else
+    bad "没有接 QS_TILE_PREFERENCES，隐藏图标后用户没法回到设置页"
+  fi
+else
+  echo "  SKIP  没有 tile-app/AndroidManifest.xml"
+fi
+
+echo "== 15 路径白名单（卸载 / 安装共用）"
+# 这一组守的是一个数据毁灭风险：case 整串匹配时 "/data/" 匹配不上 "/data"，
+# 会落到「是绝对路径就放行」那一支，于是 rm -rf /data。
+for bad in /data /data/ /data// /data/// /data/adb /data/adb/ /data/adb/modules \
+           /data/adb/modules/ / /sdcard /sdcard/ /storage /storage/emulated/0 \
+           /mnt /mnt/ /system /system/ /vendor /data/local /data/app /data/data /data/system \
+           /data/adb/modules/magpie/scripts relative ''; do
+  if magpie_path_cleanable "$bad"; then
+    bad "危险路径被放行：[$bad]"
+  else
+    ok "拒绝删除 [$bad]"
+  fi
+done
+# 真正的目标必须仍然可删
+for good in /data/adb/magpie /data/adb/modules/magpie /tmp/magpie-install-test; do
+  if magpie_path_cleanable "$good"; then ok "允许删除 $good"
+  else bad "把正常目标也拦了：$good"; fi
+done
+
+# 归一化本身
+_n=$(magpie_norm_path "/data///") ; [ "$_n" = "/data" ] && ok "归一化 /data/// → /data" || bad "归一化结果不对：$_n"
+_n=$(magpie_norm_path "///") ; [ "$_n" = "/" ] && ok "归一化 /// → /" || bad "归一化结果不对：$_n"
+
+# 直接从 uninstall.sh 原文抽 cleanable 来跑：脚本与测试不会各改各的
+_un="$HERE/../uninstall.sh"
+if [ -f "$_un" ]; then
+  eval "$(sed -n '/^cleanable()/,/^}/p' "$_un")"
+  # 抽出来的 cleanable 依赖 lib.sh 里的实现（上面已 source），应能拦住 /data/
+  if cleanable "/data/"; then bad "uninstall.sh 的 cleanable 放行了 /data/"; else ok "uninstall.sh 的 cleanable 拦住 /data/"; fi
+  if cleanable "/data/adb/magpie"; then ok "uninstall.sh 的 cleanable 放行正常目标"; else bad "uninstall.sh 拦了正常目标"; fi
+fi
+
+echo "== 16 IPv6 回环的大小写"
+# IPv6 十六进制位大小写不敏感。以前只匹配小写，::FFFF:127.0.0.1 会被判成
+# 「已开放局域网」—— 安全边界的结论说反了。
+for h in ::1 ::FFFF:127.0.0.1 ::ffff:127.0.0.1 ::FFFF:127.1.2.3 0:0:0:0:0:0:0:1 \
+         127.0.0.1 127.1.2.3 LOCALHOST localhost '[::1]'; do
+  if is_loopback_host "$h"; then ok "[$h] 判为回环"; else bad "[$h] 被误判成非回环"; fi
+done
+for h in ::ffff:192.168.1.1 ::FFFF:8.8.8.8 0.0.0.0 192.168.1.1; do
+  if is_loopback_host "$h"; then bad "[$h] 被误判成回环（安全边界说反）"; else ok "[$h] 判为非回环"; fi
+done
+
+echo "== 17 用户配置的生成（seed_user_config）"
+# README 让用户改 /data/adb/magpie/scripts/magpie.config，但以前没人创建它。
+# 这里直接从 service.sh 原文抽函数来跑，脚本改了测试会跟着改。
+_sd="${TEST_BASE:-$_TMPBASE/magpie-seed-test}"
+rm -rf "$_sd"; mkdir -p "$_sd/scripts" "$_sd/run"
+cp "$HERE/../scripts/magpie.config" "$_sd/scripts/magpie.config"
+: > "$_sd/run/w.log"
+if grep -q '^seed_user_config()' "$HERE/../service.sh"; then
+  MP="$_sd/data"; MODDIR="$_sd"; WATCH_LOG="$_sd/run/w.log"
+  eval "$(sed -n '/^seed_user_config()/,/^}/p' "$HERE/../service.sh")"
+  seed_user_config
+  _cfg="$MP/scripts/magpie.config"
+  [ -f "$_cfg" ] && ok "首次调用生成了用户配置" || bad "没有生成用户配置"
+  _perm=$(stat -c %a "$_cfg" 2>/dev/null)
+  [ "$_perm" = "600" ] && ok "权限 600" || bad "权限是 $_perm，应为 600"
+  # 用户改过之后不能再被覆盖
+  echo "# 用户改过" >> "$_cfg"
+  seed_user_config
+  if [ "$(tail -1 "$_cfg")" = "# 用户改过" ]; then ok "已存在时不覆盖用户改动"
+  else bad "把用户的配置覆盖掉了"; fi
+  # 不留下临时文件
+  case "$(ls "$MP/scripts" 2>/dev/null | tr '\n' ' ')" in
+    *tmp*) bad "留下了临时文件" ;;
+    *) ok "没有残留临时文件" ;;
+  esac
+  rm -rf "$_sd"
+else
+  bad "service.sh 里没有 seed_user_config"
+fi
+
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"
 

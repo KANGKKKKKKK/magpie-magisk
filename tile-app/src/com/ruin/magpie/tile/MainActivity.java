@@ -24,6 +24,8 @@ public class MainActivity extends Activity {
     private TextView status;
     private TextView hint;
     private Button grant;
+    private Button launcherBtn;
+    private TextView launcherNote;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -35,6 +37,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshStatus();
+        refreshLauncherToggle();
     }
 
     private View buildUi() {
@@ -123,6 +126,39 @@ public class MainActivity extends Activity {
         lp.topMargin = dp(8);
         root.addView(panel, lp);
 
+        // ---- 桌面图标开关 ----
+        TextView launcherLabel = new TextView(this);
+        launcherLabel.setText(R.string.label_launcher);
+        launcherLabel.setTextSize(13f);
+        launcherLabel.setAlpha(0.7f);
+        lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(28);
+        root.addView(launcherLabel, lp);
+
+        launcherBtn = new Button(this);
+        launcherBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleLauncher();
+            }
+        });
+        lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        root.addView(launcherBtn, lp);
+
+        launcherNote = new TextView(this);
+        launcherNote.setTextSize(13f);
+        launcherNote.setAlpha(0.7f);
+        lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        root.addView(launcherNote, lp);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         return scroll;
@@ -187,6 +223,24 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    /** 按当前状态刷新「隐藏/显示桌面图标」按钮与提示。 */
+    private void refreshLauncherToggle() {
+        boolean hidden = LauncherIcon.isHidden(this);
+        launcherBtn.setText(hidden ? R.string.btn_show_icon : R.string.btn_hide_icon);
+        launcherNote.setText(hidden ? getString(R.string.launcher_hidden_note) : "");
+        launcherNote.setVisibility(hidden ? View.VISIBLE : View.GONE);
+    }
+
+    private void toggleLauncher() {
+        boolean hidden = LauncherIcon.isHidden(this);
+        if (!LauncherIcon.setHidden(this, !hidden)) {
+            launcherNote.setText(R.string.launcher_hide_failed);
+            launcherNote.setVisibility(View.VISIBLE);
+            return;
+        }
+        refreshLauncherToggle();
     }
 
     private int dp(int v) {

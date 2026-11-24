@@ -56,7 +56,7 @@ else
   magpie_running() { magpie_main_pid >/dev/null 2>&1; }
   addr_host() { case "$1" in \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;; *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac; }
   addr_port() { case "$1" in \[*\]:*) _p=${1##*\]:} ;; *:*) _p=${1##*:} ;; *) return 1 ;; esac; case "$_p" in ''|*[!0-9]*) return 1 ;; esac; echo "$_p"; }
-  is_loopback_host() { case "$1" in 127.*|localhost|::1|\[::1\]) return 0 ;; esac; return 1; }
+  is_loopback_host() { _h=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]'); case "$_h" in 127.*|localhost|::1|\[::1\]|::ffff:127.*) return 0 ;; esac; return 1; }
 fi
 
 CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"

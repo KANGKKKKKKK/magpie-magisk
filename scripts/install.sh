@@ -291,8 +291,17 @@ human_size() {
 }
 
 check_target() {
+  # 先归一化：写成 "/data/" 时 case 匹配不上 "/data"，会漏过去。
+  # 判断逻辑在 lib.sh，与 uninstall.sh 共用同一份。
+  if command -v magpie_norm_path >/dev/null 2>&1; then
+    _norm=$(magpie_norm_path "$magpie_path" 2>/dev/null) || \
+      die "magpie_path 必须是绝对路径：$magpie_path"
+    if [ "$_norm" != "$magpie_path" ]; then
+      die "magpie_path 末尾有多余斜杠：$magpie_path（应写成 $_norm）"
+    fi
+  fi
   case "$magpie_path" in
-    /|/data|/data/adb|/sdcard|/sdcard/*|/storage|/storage/*|/mnt|/mnt/*|/system|/system/*)
+    /|/data|/data/adb|/data/adb/modules|/sdcard|/sdcard/*|/storage|/storage/*|/mnt|/mnt/*|/system|/system/*)
       die "拒绝把本体安装到 $magpie_path" ;;
   esac
   case "$magpie_path" in

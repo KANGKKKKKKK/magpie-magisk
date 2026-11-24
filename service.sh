@@ -84,11 +84,37 @@ install_pending_tile_app() {
   fi
 }
 
+# 把模块自带的那份配置复制到数据目录，供用户改。
+#
+# README 与 FAQ 都让用户改 /data/adb/magpie/scripts/magpie.config，
+# 但以前没有任何地方创建它 —— 照文档做的用户第一步就撞上「文件不存在」。
+#
+# 只在不存时复制，已存在绝不动：用户改过的配置不能被模块更新覆盖。
+# 先写临时文件再 mv，避免复制到一半被读到半份配置。
+seed_user_config() {
+  _dst="$MP/scripts/magpie.config"
+  [ -f "$_dst" ] && return 0
+  _src="$MODDIR/scripts/magpie.config"
+  [ -f "$_src" ] || return 0
+  mkdir -p "$MP/scripts" 2>/dev/null || return 0
+  _tmp="$_dst.tmp.$$"
+  if cp -f "$_src" "$_tmp" 2>/dev/null; then
+    chmod 600 "$_tmp" 2>/dev/null
+    if mv -f "$_tmp" "$_dst" 2>/dev/null; then
+      echo "$(date +'%Y-%m-%d %H:%M:%S') 已生成用户配置 $_dst" >>"$WATCH_LOG" 2>/dev/null
+      return 0
+    fi
+    rm -f "$_tmp" 2>/dev/null
+  fi
+  return 1
+}
+
 # 开机后拉起服务，不阻塞启动流程
 (
   wait_boot_completed
   # 等待期间模块可能被禁用（开机那几分钟足够点一下）
   [ -f "$MODDIR/disable" ] && exit 0
+  seed_user_config
   install_pending_tile_app
   rotate_log "$MP/run/magpie.log"
   # 启动日志留在看门狗日志里，否则开机时 stdout 直接丢弃

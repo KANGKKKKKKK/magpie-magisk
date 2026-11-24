@@ -1,5 +1,112 @@
 # 变更记录
 
+## v1.2 — 2026-11-24
+
+磁贴 App 加一个开关：可以隐藏桌面图标，只留控制中心磁贴。
+
+这一版还修了一批代码审查发现的问题，其中一个是**数据毁灭级**的。
+
+### 严重：卸载的路径白名单能被一个斜杠绕过
+
+`uninstall.sh` 的 `cleanable()` 用 `case` 整串匹配，而 `/data/` 匹配不上 `/data`
+（少了 `/data/*` 这一支），于是落到「是绝对路径就放行」那一支，返回可删，
+随后 `rm -rf` 作用在 `/data` 上。**触发只需要配置里写 `magpie_path="/data/"`**，
+多一个斜杠。
+
+实测（修复前）：`/data/`、`/data//`、`/data/adb/`、`/data/adb/modules/` 全部放行。
+
+修复：把归一化与白名单收进 `lib.sh`（`magpie_norm_path` / `magpie_path_cleanable`），
+先剥掉所有末尾斜杠、折叠重复斜杠再比；`uninstall.sh` 与 `install.sh` 共用同一份。
+`lib.sh` 缺失时 `cleanable` 一律返回「不可删」—— 宁可留垃圾，也不能 rm 一个没校验过的路径。
+`test-lib.sh` 新增 25 条用例，其中 2 条**直接从 `uninstall.sh` 原文抽 `cleanable` 来跑**，
+脚本与测试不会各改各的。
+
+### CI 的「磁贴 App 能编译」一直红
+
+`aapt package -J` **不会自己创建目标目录**，`mktemp -d` 里没有 `gen/`，
+于是报 `Unable to open class file .../gen/.../R.java` —— 而它的退出码还是 0，
+光看 `$?` 发现不了。`tile-app/build.sh` 因为提前 `mkdir -p` 所以没暴露。
+
+顺带：`javac` 没给 `-encoding UTF-8`，源码注释是中文，平台编码不是 UTF-8 时
+会一片 `unmappable character`；`javac ... | grep ...` 会让 `$?` 变成 grep 的退出码，
+编译失败被当成成功。
+
+修复：`mkdir -p` + `-encoding UTF-8` + 先落文件查退出码再过滤 + 逐个检查
+`MagpieTileService` / `MainActivity` / `LauncherIcon` / `Shell` 的 `.class` 是否都在。
+
+### 磁贴把「启动失败」画成别的状态
+
+`toggle` 失败时输出 `failed`、退出码非 0，而磁贴的判定是 `!r.ok → noroot`，
+于是「启动失败」被显示成「需要 root」。同时 `status` 输出的是
+`running (PID 123)`，原来的 `endsWith("running")` 根本匹配不上。
+
+修复：抽 `classify()` 按**输出**判定（不看退出码 —— su 成功后退出码来自脚本本身，
+`sh: 脚本不存在` 的 127 也会非 0），取最后一行做双向匹配，新增「启动失败」文案。
+配 `tests/jvm/ClassifyTest.java` 10 条用例，CI 里跑。
+
+### 用户配置那份文件从来没被创建
+
+README 与 FAQ 都让用户改 `/data/adb/magpie/scripts/magpie.config`，
+但全仓库没有任何地方创建它 —— 照文档做的用户第一步就撞上「文件不存在」。
+
+修复：`service.sh` 开机路径补 `seed_user_config`（不存在才复制、先写临时文件再 `mv`、
+权限 600，已存在绝不动）。实测：用户改过之后再跑不会被覆盖。
+
+### 其他
+
+| 项 | 说明 |
+| --- | --- |
+| `is_loopback_host` 大小写 | IPv6 十六进制位大小写不敏感，`::FFFF:127.0.0.1` 原来被判成「已开放局域网」——安全边界说反。现在统一转小写并认 `::ffff:127.*`。 |
+| 线程池构造 | 原来靠「先 setKeepAliveTime 再 allowCoreThreadTimeOut」的顺序才不崩。改成一次给全参数的 `ThreadPoolExecutor` 构造，去掉顺序依赖。 |
+| 磁贴不自退 | 加 `onTileRemoved() → stopSelf()`。系统只在磁贴被移除时解绑，收起面板不会。 |
+| 卸载不卸磁贴 App | `uninstall.sh` 现在会调 `tile_uninstall`。注意：从管理器「移除模块」时脚本跑在模块目录已消失之后，那一步拿不到，需手动卸载。 |
+| `grep` 二进制 cmdline | `uninstall.sh` 里对 `/proc/pid/cmdline` 用 `grep -q` 改 `grep -aq`。 |
+
+测试：`test-lib.sh` 从 118 条增到 168 条，另加 10 条 JVM 用例。
+
+### 新增
+
+- **隐藏桌面图标**。App 里多一个「桌面图标」开关。隐藏后桌面不再有图标，
+  只剩磁贴，适合不想让桌面多一个图标的人。
+
+  实现：桌面入口（MAIN + LAUNCHER）挂到 `activity-alias`（`.Launcher`）上，
+  隐藏 = 关掉这个 alias。**不能直接关 MainActivity** —— 那样用户再也进不来
+  设置页，也没法把图标恢复回去，等于把自己锁死。
+
+- **磁贴长按打开设置页**。这是隐藏图标后的主要恢复入口；
+  另有 `adb shell am start -n com.ruin.magpie.tile/.MainActivity` 兜底。
+
+  实现上不能用 `TileService.onLongClick` —— **android-34 的 API 里根本没有这个方法**
+  （只有 `onClick` / `onStartListening` / `onStopListening`）。长按时 SystemUI
+  发的是 `ACTION_QS_TILE_PREFERENCES`，由 `MainActivity` 接住。
+
+### 修了一个会让 App 装不上的构建缺陷
+
+`tile-app/build.sh` 里原来是 `javac ... 2>&1 | grep -vE '...' || true`。
+两个问题叠在一起：
+
+1. 管道让 `$?` 变成 `grep` 的退出码，**javac 编译失败会被当成成功**，`set -e` 也不管用；
+2. 过滤规则写宽了，把 `error:` 也一并滤掉。
+
+结果：带编译错误也能打出 APK，dex 里只有部分类，装上去一启动就是
+`ClassNotFoundException: Didn't find class "MainActivity"`。
+
+现在 javac / d8 的输出先落文件、检查退出码、再过滤；另加两道自检：
+每个源文件都必须产出对应 `.class`，dex 里必须能找到清单声明的
+`MainActivity` 与 `MagpieTileService`，缺任何一个就拒绝产出 APK。
+
+### 验证
+
+- 禁用 alias 后 `resolve-activity -c LAUNCHER` → *No activity found*（图标消失）
+- 同时 `am start -n .../.MainActivity` → `Status: ok`（不会锁死）
+- 重新启用后 LAUNCHER 入口恢复
+
+`test-lib.sh` 新增 4 条静态断言盯这件事：入口必须在 alias 上、
+alias 要指向 MainActivity、MainActivity 自己不能带 LAUNCHER 类别、
+磁贴必须有 onLongClick。
+
+磁贴 App versionCode 4 / versionName 1.2.0。
+
 ## v1.1 — 2026-11-24
 
 加了一个可选的配套 App：把 Magpie 的启动/停止放进下拉控制中心。

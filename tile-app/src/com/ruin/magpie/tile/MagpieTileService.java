@@ -42,19 +42,26 @@ public class MagpieTileService extends TileService {
         Shell.run("sh " + Shell.SERVICE + " status", new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state;
-                if (!r.ok) {
-                    state = "noroot";
-                } else if (r.trimmed().startsWith("running")) {
-                    state = "running";
-                } else {
-                    state = "stopped";
-                }
+                String state = classify(r, "stopped");
                 cachedState = state;
                 cachedAt = System.currentTimeMillis();
                 render(state);
             }
         });
+    }
+
+    /**
+     * 磁贴被移除 / 替换时，让服务自己结束。
+     *
+     * <p>注释里写过「收起控制中心就该被销毁」，但实际上系统只在磁贴被移除时
+     * 解绑，单纯收起面板不会 —— 进程会留一阵。这里显式 stopSelf 收干净。
+     */
+    @Override
+    public void onTileRemoved() {
+        super.onTileRemoved();
+        cachedState = null;
+        cachedAt = 0L;
+        stopSelf();
     }
 
     @Override
@@ -76,24 +83,48 @@ public class MagpieTileService extends TileService {
         Shell.run("sh " + Shell.SERVICE + " toggle", new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state;
-                if (!r.ok) {
-                    state = "noroot";
-                } else {
-                    String out = r.trimmed();
-                    if (out.endsWith("running")) {
-                        state = "running";
-                    } else if (out.endsWith("stopped")) {
-                        state = "stopped";
-                    } else {
-                        state = "stopped";
-                    }
-                }
+                String state = classify(r, "stopped");
                 cachedState = state;
                 cachedAt = System.currentTimeMillis();
                 render(state);
             }
         });
+    }
+
+    /**
+     * 把 su 的返回结果翻译成磁贴状态。
+     *
+     * <p>判据是「输出」而不是退出码：su 成功把命令交给 sh 之后，退出码来自脚本
+     * 本身，所以 `sh: 脚本不存在` 的 127 也带着非 0；只看 !ok 会把它误判成
+     * 「没 root」，用户看到的提示完全对不上。
+     *
+     * <p>失败必须如实显示成「失败」。以前 toggle 失败会落到 else 分支被画成
+     * 「已停止」—— 用户点了启动、其实没起来，界面上却是「已停止」，看不出出过事。
+     */
+    private static String classify(Shell.Result r, String wantPrefix) {
+        String out = r.trimmed();
+        // status 打印的是 "running (PID 123)"，toggle 打印的是裸 "running"，
+        // 所以不能只用 endsWith。取最后一行再双向匹配。
+        String last = out;
+        int nl = out.lastIndexOf('\n');
+        if (nl >= 0) {
+            last = out.substring(nl + 1).trim();
+        }
+        if (last.equals("running") || last.startsWith("running ")) {
+            return "running";
+        }
+        if (last.equals("stopped") || last.startsWith("stopped ")) {
+            return "stopped";
+        }
+        if (last.equals("failed") || last.startsWith("failed ")) {
+            return "failed";
+        }
+        // 输出为空且命令失败：这才是「根本没拿到 root / su 不可用」
+        if (out.isEmpty() && !r.ok) {
+            return "noroot";
+        }
+        // 有输出但认不出来（例如 status 打印了别的），沿用上次已知状态
+        return wantPrefix;
     }
 
     /** 把状态画到磁贴上。 */
@@ -118,6 +149,11 @@ public class MagpieTileService extends TileService {
             label = getString(R.string.tile_label);
             sub = getString(R.string.state_no_root);
             tileState = Tile.STATE_UNAVAILABLE;
+        } else if ("failed".equals(state)) {
+            // 如实显示失败：不要画成「已停止」，否则用户以为只是没启动
+            label = getString(R.string.tile_label);
+            sub = getString(R.string.state_failed);
+            tileState = Tile.STATE_INACTIVE;
         } else if ("nomodule".equals(state)) {
             label = getString(R.string.tile_label);
             sub = getString(R.string.state_unavailable);

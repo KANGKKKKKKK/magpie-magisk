@@ -6,9 +6,7 @@ import android.os.Looper;
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 
 /**
@@ -50,22 +48,33 @@ final class Shell {
      * <p>allowCoreThreadTimeOut(true) + 5 秒空闲回收：点击后线程很快消失，
      * 进程没有其他组件时自然被系统回收，不占内存也不耗电。
      */
-    private static final ExecutorService POOL = Executors.newFixedThreadPool(2, new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "magpie-su");
-            t.setDaemon(true);
-            return t;
-        }
-    });
+    /**
+     * 执行 su 的线程池。
+     *
+     * <p>直接构造 ThreadPoolExecutor，不用 {@code Executors.newFixedThreadPool}：
+     * 后者造出来的 keepAliveTime 是 0，而「核心线程可超时回收」要求它非 0，
+     * 于是必须先 setKeepAliveTime 再 allowCoreThreadTimeOut —— 两句写反就抛
+     * IllegalArgumentException，且发生在类初始化里，整个 App 起不来。
+     * 一次给全参数就没有这个顺序依赖。
+     *
+     * <p>守护线程 + 5 秒空闲回收：磁贴是绑定服务，收起控制中心后进程不该被
+     * 一个线程池留住。
+     */
+    private static final ThreadPoolExecutor POOL = new ThreadPoolExecutor(
+            2, 2,
+            5, java.util.concurrent.TimeUnit.SECONDS,
+            new java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+            new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "magpie-su");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
 
     static {
-        // 顺序不能颠倒：allowCoreThreadTimeOut(true) 在 keepAliveTime 为 0 时
-        // 会抛 IllegalArgumentException（"Core threads must have nonzero keep alive
-        // times"），而且是在类初始化里抛，表现为 App 与磁贴一启动就崩。
-        java.util.concurrent.ThreadPoolExecutor pool = (java.util.concurrent.ThreadPoolExecutor) POOL;
-        pool.setKeepAliveTime(5, java.util.concurrent.TimeUnit.SECONDS);
-        pool.allowCoreThreadTimeOut(true);
+        POOL.allowCoreThreadTimeOut(true);
     }
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
