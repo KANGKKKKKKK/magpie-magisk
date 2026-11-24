@@ -499,6 +499,10 @@ the module's `scripts/magpie.config`. **Edit the one in the data directory** —
 replaced on update. If neither exists, built-in defaults apply and everything listens on
 `127.0.0.1`.
 
+The data-directory copy is **created automatically at boot** (`seed_user_config` in
+`service.sh`): copied from the module only when absent, mode 600, never overwritten.
+So you can edit it directly — no need to create it first.
+
 Three hard rules for listen addresses — a bad value is rejected instead of being papered over:
 
 - **The port is mandatory.** `MAGPIE_ADDR=127.0.0.1` (no port) makes `magpie.service start` refuse
@@ -711,11 +715,12 @@ python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manife
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 39 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
-sh tests/test-service.sh                                  # process, dirs, status output, session, 20 assertions
-sh tests/test-lib.sh                                      # pure helpers, 110 assertions
+sh tests/test-service.sh                                  # process, dirs, status, session, 26 assertions
+sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA, 168 assertions
 ```
 
-222 assertions total, all in temp directories with stubbed process checks — a running service is
+286 assertions total (39 + 13 + 40 + 26 + 168), plus 10 JVM cases in `tests/jvm/`. All run in temp
+directories with stubbed process checks — a running service is
 never touched. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
 wrong port and you get a pile of fake failures. Details and known gaps in

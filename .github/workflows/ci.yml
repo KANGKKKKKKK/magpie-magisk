@@ -41,6 +41,13 @@ jobs:
           shellcheck -s sh -e SC1090,SC1091 \
             service.sh action.sh uninstall.sh customize.sh scripts/*.sh
 
+      - name: 文档里的测试数字是否与实际一致
+        run: |
+          set -eu
+          # 断言数散落在 README / README_EN / tests/README / CHANGELOG 四处，
+          # 手改容易漏（已经出现过 222 vs 232 vs 286）。这一步直接跑测试数一遍。
+          sh tests/check-counts.sh
+
       - name: 磁贴的状态判定逻辑
         run: |
           set -eu

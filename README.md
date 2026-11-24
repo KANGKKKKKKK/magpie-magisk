@@ -479,6 +479,10 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 
 脚本按顺序找配置文件：`MAGPIE_CONF`（显式指定，排障与测试用）→ `/data/adb/magpie/scripts/magpie.config`（用户改的那份）→ 模块里的 `scripts/magpie.config`。所以**改配置请改数据目录那份**，它不会被模块更新覆盖；都不在时使用内置默认值，且默认全部监听 `127.0.0.1`。
 
+数据目录那份**由模块在开机时自动生成**（`service.sh` 的 `seed_user_config`）：
+不存在才从模块里复制一份、权限 600，已存在绝不动。所以照本文档直接去改就行，
+不用先手动创建。
+
 改了 `magpie_path` 也无需额外搬文件：服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本都会按配置里的路径工作（配置本身始终从上面几个位置读，不依赖新目录）。
 
 改完重启服务生效：
@@ -587,8 +591,10 @@ magpie-magisk/
 │   ├── build.sh                      产出已签名的 magpie-tile.apk
 │   └── README.md                     为什么需要它、怎么构建、密钥怎么管
 ├── tests/
-│   ├── test-lib.sh                   lib.sh 纯函数：地址切分、端口边界、IP 校验、JSON 转义
+│   ├── test-lib.sh                   lib.sh 纯函数：地址/路径/IP/JSON/tag/CA
 │   ├── test-install.sh / test-service.sh / test-action.sh / test-watchdog.sh
+│   ├── jvm/ClassifyTest.java         磁贴状态判定的 JVM 单测（不需要 Android）
+│   ├── check-counts.sh               实测各套件并核对文档里的数字
 │   └── make-fixtures.py             生成安装器夹具（--base 指定清单里的服务地址）
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
@@ -714,6 +720,15 @@ TEST_SRV="$TEST_SRV" sh tests/test-install.sh
 ```
 
 `.github/workflows/ci.yml` 在每次推 main 和 PR 时跑同一套；发版工作流打包前也会先跑。
+
+断言数散落在 README / README_EN / tests/README / CHANGELOG 四处，手改容易漏
+（出现过 222 / 232 / 286 三次不一致）。加完测试跑一次：
+
+```sh
+sh tests/check-counts.sh      # 实测各套件并核对文档，不一致则非零退出
+```
+
+CI 里也有这一步。
 细节与已知缺口见 [tests/README.md](tests/README.md)。
 
 发版流程：
