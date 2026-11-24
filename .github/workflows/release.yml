@@ -108,6 +108,20 @@ jobs:
           mkdir -p dist
           if [ -n "${KEYSTORE_B64:-}" ] && [ -n "${MAGPIE_KS_PASS:-}" ]; then
             echo "有签名密钥，构建磁贴 App"
+            # runner 上没预装 aapt / zipalign（它们不在 build-tools 里，
+            # 是 Debian 的独立包）。缺了会直接导致构建失败。
+            if ! command -v aapt >/dev/null 2>&1 || ! command -v zipalign >/dev/null 2>&1; then
+              echo "安装 aapt / zipalign"
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq aapt zipalign
+            fi
+            # runner 的 ANDROID_HOME 指向的 SDK 里通常没有 android-34 平台，
+            # 只有 build-tools。缺 android.jar 时 aapt 无法解析资源。
+            if [ ! -f "${ANDROID_HOME:-/nonexistent}/platforms/android-34/android.jar" ]; then
+              echo "安装 android-34 平台"
+              yes | "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager" \
+                "platforms;android-34" >/dev/null 2>&1 || true
+            fi
             printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/magpie-tile.jks"
             export MAGPIE_KEYSTORE="$RUNNER_TEMP/magpie-tile.jks"
             export MAGPIE_KS_PASS

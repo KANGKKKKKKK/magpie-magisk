@@ -18,12 +18,16 @@ TILE_SRC="$PWD/tile-app"
 TILE_APK="$PWD/magpie-tile.apk"
 if [ -n "${MAGPIE_KEYSTORE:-}" ] && [ -f "${MAGPIE_KEYSTORE}" ] && [ -n "${MAGPIE_KS_PASS:-}" ]; then
   echo "构建磁贴 App ..."
-  if ! sh "$TILE_SRC/build.sh" "$PWD/.tile-build" >/dev/null 2>&1; then
+  # 不吞输出：构建失败时最需要看到的就是它自己报的那句
+  # （缺 aapt / 缺 android.jar / 签名失败……）。
+  # 传绝对路径：tile-app/build.sh 内部会 cd，相对路径会落到它自己的目录里
+  TILE_OUT="$PWD/.tile-build"
+  if ! sh "$TILE_SRC/build.sh" "$TILE_OUT"; then
     echo "磁贴 App 构建失败" >&2
     exit 1
   fi
-  cp -f "$PWD/.tile-build/magpie-tile.apk" "$TILE_APK"
-  rm -rf "$PWD/.tile-build"
+  cp -f "$TILE_OUT/magpie-tile.apk" "$TILE_APK"
+  rm -rf "$TILE_OUT"
 else
   if [ -f "$TILE_APK" ]; then
     echo "警告：没有签名密钥，使用仓库里现成的 magpie-tile.apk（可能不是最新）" >&2
