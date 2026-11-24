@@ -116,6 +116,12 @@ seed_user_config() {
   [ -f "$MODDIR/disable" ] && exit 0
   seed_user_config
   install_pending_tile_app
+  # 用户隐藏过桌面图标的话，在这里重新落实（组件状态会被系统重置）
+  if [ -f "$MODDIR/scripts/tile-app.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$MODDIR/scripts/tile-app.sh"
+    tile_reconcile_launcher "$MP/run" >>"$WATCH_LOG" 2>&1
+  fi
   rotate_log "$MP/run/magpie.log"
   # 启动日志留在看门狗日志里，否则开机时 stdout 直接丢弃
   sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1

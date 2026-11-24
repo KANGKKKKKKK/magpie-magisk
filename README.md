@@ -705,10 +705,10 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 46 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
 sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 20 条
-sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA 纯函数 174 条
+sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA 纯函数 177 条
 ```
 
-五个套件共 299 条断言（46 + 13 + 40 + 26 + 174），另有 10 条 JVM 用例，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+五个套件共 302 条断言（46 + 13 + 40 + 26 + 177），另有 13 条 JVM 用例，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 

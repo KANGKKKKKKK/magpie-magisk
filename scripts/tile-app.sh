@@ -46,3 +46,32 @@ tile_install() {
 tile_uninstall() {
   pm uninstall "$TILE_PKG" 2>&1 | grep -q 'Success'
 }
+
+# 「桌面图标已隐藏」的意图记在这里，而不是 App 自己的 SharedPreferences。
+#
+# 为什么不用 App 的 prefs：App 数据在 CE 存储（/data/user/0/...），
+# 模块脚本跑在 Magisk 的 mount namespace 里，看不到那条路径 ——
+# 只有 /proc/<app pid>/root 下才能读到，而开机时 App 还没启动。
+# 放模块自己的 run 目录，App 与脚本都能读写。
+TILE_LAUNCHER_FLAG=".tile_launcher_hidden"
+
+# 把「隐藏桌面图标」的意图在系统侧重新落实一次。
+#
+# 组件启用状态是系统侧的，会在覆盖安装、清除数据、部分系统更新、
+# 以及模块更新时被重置回 default —— 隐藏过的图标就自己冒出来了。
+# 用户隐藏图标后不会再打开 App，所以不能只靠 App 启动时对账，
+# 开机（模块服务启动）时也要做一次。
+tile_reconcile_launcher() {
+  _run_dir=${1:-/data/adb/magpie/run}
+  _flag="$_run_dir/$TILE_LAUNCHER_FLAG"
+  [ -f "$_flag" ] || return 0
+  _comp="$TILE_PKG/.Launcher"
+  # 已经在禁用列表里就不动
+  pm dump "$TILE_PKG" 2>/dev/null \
+    | sed -n '/disabledComponents/,/}/p' | grep -q "$_comp" && return 0
+  if pm disable --user 0 "$_comp" >/dev/null 2>&1; then
+    echo "已按用户设置重新隐藏桌面图标"
+    return 0
+  fi
+  return 1
+}

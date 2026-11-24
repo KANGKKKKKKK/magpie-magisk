@@ -1,5 +1,46 @@
 # 变更记录
 
+## v1.2.2 — 2026-11-24
+
+修「隐藏过的桌面图标会自己冒出来」。
+
+### 问题
+
+`activity-alias` 的启用状态是**系统侧**的，会在覆盖安装、清除数据、
+部分系统更新、以及模块更新时被重置回 `default`。一旦重置，隐藏过的图标
+就自己回来了 —— 而 App 里记的还是「已隐藏」，两边对不上。
+
+用户隐藏图标后**不会再打开 App**，所以只在 `onCreate` 里对账不够，
+开机时也得补一次。
+
+### 修法
+
+| 位置 | 做什么 |
+| --- | --- |
+| App `LauncherIcon.reconcile()` | 打开 App 时对账：记录说隐藏但系统被重置 → 重新隐藏 |
+| `service.sh` 开机路径 | `tile_reconcile_launcher` 读标记文件，已隐藏但系统重置 → 重新禁用 |
+
+**意图记在 `/data/adb/magpie/run/.tile_launcher_hidden`，不是 App 的
+SharedPreferences**：App 数据在 CE 存储，模块脚本跑在 Magisk 的 mount
+namespace 里看不到那条路径（实测只有 `/proc/<app pid>/root` 下能读到，
+而开机时 App 还没启动）。放模块自己的 run 目录，两边都能访问。
+
+### 验证（真机端到端）
+
+1. 点「隐藏桌面图标」→ 入口 `No activity found`，标记文件已写入
+2. 模拟系统重置（`pm enable`）→ 图标自己冒出来
+3. 跑开机对账 → 输出「已按用户设置重新隐藏桌面图标」，入口回到 `No activity found`
+
+`test-lib.sh` 新增 3 条：没有标记时不动作、有标记且未禁用则隐藏、已禁用时幂等。
+合计 302 条（46 + 13 + 40 + 26 + 177），另有 13 条 JVM 用例。
+
+### 已知降级
+
+手动删掉 `/data/adb/magpie/run/` 目录会连带丢掉标记，那种情况下图标会保持
+系统状态、不再自动隐藏。下次打开 App 会重新对账并补写标记。
+
+磁贴 App versionCode 6 / versionName 1.2.2。
+
 ## v1.2 — 2026-11-24
 
 磁贴 App 加一个开关：可以隐藏桌面图标，只留控制中心磁贴。

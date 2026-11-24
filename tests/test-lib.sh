@@ -386,6 +386,31 @@ else
   bad "service.sh 里没有 seed_user_config"
 fi
 
+echo "== 18 桌面图标的开机对账（tile_reconcile_launcher）"
+# 组件启用状态是系统侧的，会被覆盖安装 / 清除数据 / 部分系统更新重置回 default，
+# 隐藏过的图标就自己冒出来。用户隐藏后不会再开 App，所以开机要补一次。
+# 意图记在模块的 run 目录（App 数据在 CE 存储，Magisk namespace 看不到）。
+_tl="${TEST_BASE:-$_TMPBASE}/magpie-tl-test"
+rm -rf "$_tl"; mkdir -p "$_tl/bin" "$_tl/run"
+cp "$HERE/../scripts/tile-app.sh" "$_tl/"
+printf '#!/bin/sh\ncase "$1" in\n  dump)\n    if [ "${FAKE_DISABLED:-}" = "1" ]; then printf "  disabledComponents:\\n    com.ruin.magpie.tile/.Launcher\\n"; else printf "  disabledComponents:\\n"; fi ;;\n  disable) echo disabled; exit 0 ;;\n  uninstall) echo Success ;;\nesac\n' > "$_tl/bin/pm"
+chmod 755 "$_tl/bin/pm"
+
+# 1) 没有标记 → 不动
+_r=$(PATH="$_tl/bin:$PATH" sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
+[ -z "$_r" ] && ok "没有标记时不动作" || bad "没标记却动了：$_r"
+
+# 2) 有标记 + 未禁用 → 重新隐藏
+: > "$_tl/run/.tile_launcher_hidden"
+_r=$(PATH="$_tl/bin:$PATH" sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
+case "$_r" in *重新隐藏*) ok "有标记且未禁用时重新隐藏" ;; *) bad "没重新隐藏：$_r" ;; esac
+
+# 3) 有标记 + 已禁用 → 不动（幂等）
+_r=$(PATH="$_tl/bin:$PATH" FAKE_DISABLED=1 sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
+[ -z "$_r" ] && ok "已禁用时不重复操作" || bad "重复操作了：$_r"
+
+rm -rf "$_tl"
+
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"
 

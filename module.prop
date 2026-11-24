@@ -1,7 +1,7 @@
 id=magpie
 name=Magpie AI 网关
-version=v1.2.1
-versionCode=1103
+version=v1.2.2
+versionCode=1104
 author=KANGKKKKKKK
 description=Magpie AI 网关常驻服务 | 点 [执行] 开音量键菜单：切网关、启停、看地址
 updateJson=https://raw.githubusercontent.com/KANGKKKKKKK/magpie-magisk/main/update.json

@@ -30,6 +30,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 组件启用状态会被系统重置（覆盖安装、清除数据、部分系统更新），
+        // 导致隐藏过的图标自己冒出来。每次打开 App 对一次账。
+        // 放在 setContentView 之前：先把系统状态修正，再按真实状态渲染按钮。
+        LauncherIcon.reconcile(this);
         setContentView(buildUi());
     }
 
