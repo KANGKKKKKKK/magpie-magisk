@@ -18,7 +18,9 @@ OUT=${1:-"$HERE/build"}
 ROOT=$(cd "$HERE/.." && pwd)
 
 # ---- 工具链 ----
-SDK=${ANDROID_SDK:-/opt/android-sdk}
+# SDK 位置：优先 ANDROID_SDK（本地可显式指定），其次 ANDROID_HOME（CI 常用），
+# 最后才退回 /opt/android-sdk。写死一个路径会让 CI 上直接「找不到 build-tools」。
+SDK=${ANDROID_SDK:-${ANDROID_HOME:-/opt/android-sdk}}
 BT=$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1)
 [ -n "$BT" ] || { echo "找不到 build-tools" >&2; exit 1; }
 # 固定用 android-34，不取「最新」：SDK 里可能装着 android-37.0 这种
