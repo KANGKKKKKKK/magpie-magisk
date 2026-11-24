@@ -6,15 +6,39 @@
     (cd /tmp/fx && python3 -m http.server 8899) &
     TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 
+换端口时两处必须是同一个值，否则清单里的下载地址会指向别的端口，
+测试会出现一堆看着像 bug 的假失败:
+
+    TEST_SRV=http://127.0.0.1:18999
+    python3 tests/make-fixtures.py /tmp/fx --base "$TEST_SRV"
+    (cd /tmp/fx && python3 -m http.server 18999) &
+    TEST_SRV="$TEST_SRV" sh tests/test-install.sh
+
 假本体是一个能应答 --version 的脚本，够 install.sh 的自检通过；
 另外造一个「能下载但跑不起来」的变体（用当前平台的原生 /bin/true，
 在 Android 上它因为缺 glibc 装载器而无法执行）。
 """
-import hashlib, json, os, shutil, sys
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import sys
 
-out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/fx"
+argp = argparse.ArgumentParser(description="生成 magpie 安装器的测试夹具")
+argp.add_argument("out", nargs="?", default="/tmp/fx", help="输出目录（默认 /tmp/fx）")
+argp.add_argument(
+    "--base",
+    default="http://127.0.0.1:8899",
+    help="清单里写死的服务根地址（默认 http://127.0.0.1:8899）",
+)
+args = argp.parse_args()
+
+out = args.out
+base = args.base.rstrip("/")
+if not base.startswith(("http://", "https://")):
+    sys.exit("--base 必须以 http:// 或 https:// 开头：%s" % base)
 os.makedirs(out, exist_ok=True)
-base = "http://127.0.0.1:8899"
 
 # 假本体：应答 --version
 # shebang 按运行平台选：Android 上没有 /bin/sh，桌面 Linux 上没有 /system/bin/sh

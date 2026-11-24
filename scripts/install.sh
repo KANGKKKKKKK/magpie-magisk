@@ -28,7 +28,7 @@ export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
 
-CONF=/data/adb/magpie/scripts/magpie.config
+CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
 magpie_path=/data/adb/magpie
 [ -f "$CONF" ] && . "$CONF" 2>/dev/null
@@ -147,7 +147,20 @@ pick_downloader() {
   return 1
 }
 
-# 下载 $1 到 $2，超时 60 秒。成功返回 0。
+# 下载超时分两种，不能合成一个数：
+#   DL_STALL  多久没有任何数据就放弃（连接超时 / 传输停滞）。默认 60 秒。
+#   DL_TOTAL  整次下载的总上限。默认 30 分钟。
+# 以前 wget 只给了 -T 60（那是停滞超时，不是总时限），curl 只给了 --max-time 600
+# （那是总时限）：慢网下 87 MB 走 curl 需要 >145 KB/s，反而更容易被掐；
+# 而 wget 那侧一旦服务器长期不响应，也没有总上限兜底。
+DL_STALL=${MAGPIE_DL_STALL:-60}
+DL_TOTAL=${MAGPIE_DL_TIMEOUT:-1800}
+
+# 有 timeout 就用它给 wget 补一个总上限（wget 自己没有总时限参数）。
+# 没有就直接跑：停滞超时还在，不会永远挂着 —— 只是少一层保险。
+have_timeout() { command -v timeout >/dev/null 2>&1; }
+
+# 下载 $1 到 $2。成功返回 0。
 dl_fetch() {
   _url="$1"; _out="$2"
   pick_downloader || return 127
@@ -155,10 +168,30 @@ dl_fetch() {
   # 87 MB 下到一半按 Ctrl-C / 管理器被杀时就会干等好几分钟。
   # wait 是可中断的，信号一到马上就能跑 on_signal。
   case "$DL_KIND" in
-    wget)    wget -q -O "$_out" -T 60 "$_url" 2>/dev/null & ;;
-    busybox) "$DL_CMD" wget -q -O "$_out" -T 60 "$_url" 2>/dev/null & ;;
-    curl)    "$DL_CMD" -fsSL --max-time 600 -o "$_out" "$_url" 2>/dev/null & ;;
-    *)       return 127 ;;
+    wget|busybox)
+      # busybox 是 multicall，后面还要跟子命令 wget；系统 wget 不用。
+      if [ "$DL_KIND" = "busybox" ]; then
+        _wget_wrap="$DL_CMD wget"
+      else
+        _wget_wrap="wget"
+      fi
+      # $_wget_wrap 故意不加引号：busybox 那条是 "busybox wget" 两个词，
+      # 加引号会整体当一个命令名去找。系统 wget 那条只有一个词，分词后等价。
+      # shellcheck disable=SC2086
+      if have_timeout; then
+        timeout "$DL_TOTAL" $_wget_wrap -q -O "$_out" -T "$DL_STALL" "$_url" 2>/dev/null &
+      else
+        $_wget_wrap -q -O "$_out" -T "$DL_STALL" "$_url" 2>/dev/null &
+      fi
+      ;;
+    curl)
+      # --speed-limit/--speed-time 等价于 wget 的 -T：60 秒内平均低于 1 KB/s 就断。
+      # --max-time 才是总上限。
+      "$DL_CMD" -fsSL --connect-timeout "$DL_STALL" \
+        --speed-limit 1024 --speed-time "$DL_STALL" \
+        --max-time "$DL_TOTAL" -o "$_out" "$_url" 2>/dev/null &
+      ;;
+    *) return 127 ;;
   esac
   DL_PID=$!
   wait "$DL_PID"
@@ -514,7 +547,6 @@ load_manifest() {
   M_SUM=$(printf '%s' "$_seg" | str_field sha256)
   M_GH=$(printf '%s' "$_seg" | str_field github)
   M_CDN=$(printf '%s' "$_seg" | str_field url)
-  M_TAG=$(str_field url < "$_mf")
   rm -f "$_mf"
   [ -n "$_seg" ] || return 1
   return 0

@@ -12,10 +12,19 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC="$HERE/.."
 SRV=${TEST_SRV:-}
-B=${TEST_BASE:-/tmp/magpie-action-test}
+# 临时目录：Android 上没有 /tmp，退到 TMPDIR 或 /data/local/tmp
+if [ -d /tmp ] && [ -w /tmp ]; then
+  _TMPBASE=/tmp
+else
+  _TMPBASE=${TMPDIR:-/data/local/tmp}
+fi
+B=${TEST_BASE:-$_TMPBASE/magpie-action-test}
 PASS=0; FAIL=0
 
 [ -n "$SRV" ] || { echo "请设置 TEST_SRV，例如 TEST_SRV=http://127.0.0.1:8899"; exit 2; }
+# 清单里的下载地址是生成时写死的：换了端口就必须用 --base 重新生成，
+# 否则会出现一堆「下载失败」的假失败。
+echo "提示：夹具要与地址对应：python3 tests/make-fixtures.py <dir> --base $SRV"
 
 ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
@@ -32,10 +41,12 @@ make_fake_binary() {
 # $1 = ready | missing ；$2 = running | stopped ；$3 = lan | local
 build() {
   rm -rf "$B"; mkdir -p "$B/scripts" "$B/bin"
-  sed -e "s#^CONF=/data/adb/magpie/scripts/magpie.config#CONF=$B/cfg#" \
+  # 整行替换，不匹配具体写法：配置行以后怎么改都不会让沙箱失联
+  sed -e "s#^CONF=.*#CONF=$B/cfg#" \
       -e "s#^SERVICE=.*#SERVICE=\"$B/scripts/magpie.service\"#" \
       "$SRC/action.sh" > "$B/action.sh"
-  sed -e "s#^CONF=/data/adb/magpie/scripts/magpie.config#CONF=$B/cfg#" \
+  # 整行替换，不匹配具体写法：配置行以后怎么改都不会让沙箱失联
+  sed -e "s#^CONF=.*#CONF=$B/cfg#" \
       "$SRC/scripts/install.sh" > "$B/scripts/install.sh"
   printf 'magpie_path="%s"\n' "$B" > "$B/cfg"
   case "${3:-local}" in

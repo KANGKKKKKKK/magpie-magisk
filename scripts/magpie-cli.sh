@@ -31,49 +31,25 @@ REAL_BIN="$magpie_path/bin/magpie"
 
 CA_BUNDLE="$MAGPIE_DATA/certs/ca-bundle.crt"
 CA_STAMP="$CA_BUNDLE.stamp"
-CA_DIRS="/system/etc/security/cacerts /apex/com.android.conscrypt/cacerts"
 
 mkdir -p "$MAGPIE_DATA" 2>/dev/null
 export HOME="$MAGPIE_DATA"
 export MAGPIE_HOME="$MAGPIE_DATA"
 
-# 证书包与 magpie.service 用同一份指纹，系统 CA 变了就重建
-ca_fingerprint() {
-  _fp=""
-  for _d in $CA_DIRS; do
-    if [ -d "$_d" ]; then
-      _n=$(ls -1 "$_d" 2>/dev/null | wc -l | tr -d ' ')
-      _t=$(stat -c %Y "$_d" 2>/dev/null)
-      _fp="$_fp ${_d##*/}=${_n}/${_t:-0}"
-    else
-      _fp="$_fp ${_d##*/}=0/0"
+# 证书包与 magpie.service 共用 lib.sh 里的实现：系统 CA 变了就重建。
+# 指纹只取一次，比对和写 stamp 用同一个值 —— 两次取值之间目录 mtime 变了，
+# 会写进一个永远匹配不上的 stamp，导致每次调用都白重建一遍。
+if command -v magpie_ca_fingerprint >/dev/null 2>&1 \
+   && command -v magpie_write_ca_bundle >/dev/null 2>&1; then
+  _fp=$(magpie_ca_fingerprint)
+  if [ ! -s "$CA_BUNDLE" ] || [ "$(cat "$CA_STAMP" 2>/dev/null)" != "$_fp" ]; then
+    if _n=$(magpie_write_ca_bundle "$CA_BUNDLE" 2>/dev/null); then
+      echo "$_fp" > "$CA_STAMP" 2>/dev/null
     fi
-  done
-  echo "$_fp"
-}
-
-if [ ! -s "$CA_BUNDLE" ] || [ "$(cat "$CA_STAMP" 2>/dev/null)" != "$(ca_fingerprint)" ]; then
-  _fp=$(ca_fingerprint)
-  mkdir -p "$MAGPIE_DATA/certs" 2>/dev/null
-  _tmp="$CA_BUNDLE.tmp"
-  : > "$_tmp" 2>/dev/null
-  _seen=""
-  for _d in $CA_DIRS; do
-    [ -d "$_d" ] || continue
-    for _f in "$_d"/*.0; do
-      [ -f "$_f" ] || continue
-      case " $_seen " in *" ${_f##*/} "*) continue ;; esac
-      _seen="$_seen ${_f##*/}"
-      cat "$_f" >> "$_tmp" 2>/dev/null
-    done
-  done
-  if [ -s "$_tmp" ] && grep -q 'BEGIN CERTIFICATE' "$_tmp" 2>/dev/null; then
-    chmod 600 "$_tmp" 2>/dev/null
-    mv -f "$_tmp" "$CA_BUNDLE" 2>/dev/null
-    echo "$_fp" > "$CA_STAMP" 2>/dev/null
-  else
-    rm -f "$_tmp" 2>/dev/null
   fi
+elif [ ! -s "$CA_BUNDLE" ]; then
+  echo "提示：lib.sh 缺失，无法生成 CA 证书包，HTTPS 请求可能失败。" >&2
+  echo "      重装模块可恢复：管理器点 [执行]，或刷入最新 zip。" >&2
 fi
 [ -s "$CA_BUNDLE" ] && export SSL_CERT_FILE="$CA_BUNDLE"
 
@@ -88,9 +64,15 @@ done
 # 上游 DNS：magpie 本体是不链接 libc 的 Go 静态 PIE，只能读 /etc/resolv.conf。
 # 模块用 Magisk 覆盖提供 /etc/resolv.conf，内容由 magpie.service 按 MAGPIE_DNS 重写，
 # 所以改完这里重启服务即可（首次装上新版要重启一次手机才会出现覆盖文件）。
-_mp_conf="/data/adb/magpie/scripts/magpie.config"
-# shellcheck disable=SC1090
-[ -f "$_mp_conf" ] && . "$_mp_conf" 2>/dev/null
+#
+# 只有上面 magpie_resolve_conf 什么都没找到时才退回默认路径再读一次：
+# lib.sh 缺失时它会返回 1，那次 source 是空的，这里是唯一能读到配置的机会。
+# 反过来，无条件再读一遍会把自定义的 MAGPIE_CONF / magpie_path 覆盖回默认值。
+if [ -z "${_CONF:-}" ]; then
+  _mp_conf="/data/adb/magpie/scripts/magpie.config"
+  # shellcheck disable=SC1090
+  [ -f "$_mp_conf" ] && . "$_mp_conf" 2>/dev/null
+fi
 export RES_OPTIONS="${RES_OPTIONS:-timeout:2 attempts:2}"
 if [ ! -r /etc/resolv.conf ]; then
   echo "提示：/etc/resolv.conf 不存在，Go 解析器没有上游 DNS（原生通道会全部失败）。" >&2

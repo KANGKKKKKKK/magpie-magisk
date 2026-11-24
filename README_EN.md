@@ -64,7 +64,7 @@ to see the state and clean up after itself.
 | Capability | Details |
 | --- | --- |
 | Start on boot | Waits for `sys.boot_completed`, never blocks boot |
-| Watchdog | Checks every 20 s, restarts the process if killed; respects a manual stop |
+| Watchdog | Checks every 30 s, restarts the process if killed; respects a manual stop |
 | Volume-key menu | Tapping `[Action]` opens a menu: switch gateway, see addresses, start/stop/restart, open the panel — pick with the volume keys, no typing |
 | Live status | The module row shows state and the address to use ([example](#the-action-button)) without tapping anything |
 | Self-check | `scripts/doctor.sh` runs nine checks and tells you what to fix |
@@ -486,15 +486,32 @@ current exposure plainly.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `magpie_path` | `/data/adb/magpie` | Data directory: binary, logs, magpie's own data |
-| `MAGPIE_ADDR` | `127.0.0.1:3425` | Gateway listen address |
+| `MAGPIE_ADDR` | `127.0.0.1:3425` | Gateway listen address; **must be `host:port`** |
 | `MAGPIE_WEB_ADDR` | `127.0.0.1:3430` | WebUI listen address; empty means `MAGPIE_ADDR`'s host + 3430 |
 | `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | Upstream DNS, space separated; written into the module's `/etc/resolv.conf` overlay, effective after a service restart |
 | `MAGPIE_ICON` | `1` | Status icon in the manager: `1` = 🟢/🔴, `0` = `[running]`/`[stopped]` text |
+| `MAGPIE_WATCH_INTERVAL` | `30` | Watchdog check interval in seconds; backoff on repeated start failures is derived from it (capped at 10 min) |
+| `MAGPIE_DL_TIMEOUT` | `1800` | Total time limit for the binary download, in seconds |
+| `MAGPIE_DL_STALL` | `60` | Stall timeout: give up after this many seconds without any data |
 
 The scripts look for the config file in order: `/data/adb/magpie/scripts/magpie.config` first, then
 the module's `scripts/magpie.config`. **Edit the one in the data directory** — the module copy is
 replaced on update. If neither exists, built-in defaults apply and everything listens on
 `127.0.0.1`.
+
+Three hard rules for listen addresses — a bad value is rejected instead of being papered over:
+
+- **The port is mandatory.** `MAGPIE_ADDR=127.0.0.1` (no port) makes `magpie.service start` refuse
+  to start and `[Action]` say so explicitly. Older versions silently fell back to 3425, which produced
+  an invalid `status.json`, a bogus `http://127.0.0.1:127.0.0.1/v1` URL, and a wrong LAN badge.
+- **The port must be 1–65535 decimal.** `0`, `99999`, `0x10b1`, `03425` are all rejected.
+- **IPv6 needs brackets**: `[::1]:3425`. `[::1]:3425`, `::1`, `localhost`, `127.0.0.1` all count as
+  local-only and are never reported as LAN-exposed.
+
+Invalid entries in `MAGPIE_DNS` are skipped and named in the log (`8.8.8` would be reported), while
+the valid ones still take effect; only when nothing valid remains is the existing DNS left untouched.
+The check is format-only: a router address such as `192.168.1.1` — or even `127.0.0.1` when the device
+runs its own resolver — is allowed, and `doctor.sh` does a real lookup at runtime.
 
 Restart to apply:
 
@@ -526,7 +543,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | Install: runs, then fails the self-check | First install leaves the sample at `bin/magpie.rejected` with its digest; an existing body is rolled back from `bin/magpie.bak` |
 | Want the previous body back | `install.sh rollback` |
 | Start fails, log says port in use | Previous process still alive: `pidof magpie`, kill it, `start` again |
-| Panel data never changes | Expected: the webroot panel reads `status.json`, a snapshot from the last toggle |
+| Panel data never changes | Check the "数据 HH:MM:SS" in the status bar: a refresh every ~2.5 min is normal. If it has been stuck for over 5 min, the watchdog is probably not running (see `run/watchdog.log`) |
 | HTTPS fails with certificate errors | Delete `/data/adb/magpie/data/certs/ca-bundle.crt*` and restart; it rebuilds |
 | Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/9]` in doctor |
 | Service comes back after stopping | Expected: the watchdog revives unexpected exits. Disable the module to stop that |
@@ -541,7 +558,7 @@ More detail in [CHANGELOG.md](CHANGELOG.md).
 flowchart TD
   subgraph phone["phone"]
     MGR["Magisk / KernelSU manager"] -->|"service.sh on boot"| SVC["magpie serve<br/>gateway :3425 · panel :3430"]
-    WD["watchdog<br/>every 20 s"] -.->|"restart if gone"| SVC
+    WD["watchdog<br/>every 30 s"] -.->|"restart if gone"| SVC
     SVC -->|"status.sh"| SJ["webroot/status.json"]
     SJ -.->|"KernelSU WebUI reads"| WP["module webroot panel"]
   end
@@ -555,7 +572,7 @@ flowchart TD
 <summary>What each entry script does</summary>
 
 - **`service.sh`** — waits for `sys.boot_completed=1`, rotates logs, starts the service, refreshes
-  status. Also runs a 20 s watchdog that restarts the process if it is gone, and refreshes the LAN
+  status. Also runs a 30 s watchdog that restarts the process if it is gone, and refreshes the LAN
   address when it changes. Exits on its own if the module is disabled, being uninstalled, or deleted.
 - **`action.sh`** — the `[Action]` menu. Pick with the volume keys (switch gateway / show
   addresses / start / stop / restart / open panel / quit); also accepts `status`, `gateway`,
@@ -672,8 +689,10 @@ cache) and finally verifies nothing is left.
   use `magpie update` for that (it ships with the binary and follows the vendor).
 - Digests come from usemagpie.ai's manifest; no GPG verification is done. See
   [Installing the body](#installing-the-body).
-- The webroot panel's uptime, memory and log tail are a **snapshot from the last toggle**; they do
-  not tick.
+- The webroot panel is **not live monitoring**. It re-reads `status.json` every 5 s, but that file is
+  rewritten on events (start/stop, gateway switch, LAN address change) plus once every 5 watchdog
+  rounds (~2.5 min). Uptime and memory can lag by a couple of minutes; the "数据 HH:MM:SS" in the
+  status bar is when the file was last written. For the current instantaneous view use `doctor.sh`.
 - magpie itself is not bundled; its own updates are its business.
 - KernelSU / APatch paths are covered in the scripts (`ksud`, `/data/adb/ap/bin`, `/data/adb/ksud`)
   but **only Magisk 31.1 has been tested here**.
@@ -690,13 +709,17 @@ cache) and finally verifies nothing is left.
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 39 assertions
-sh tests/test-watchdog.sh                                 # watchdog, 8 assertions
+sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
-sh tests/test-service.sh                                  # process and dirs, 13 assertions
+sh tests/test-service.sh                                  # process, dirs, status output, session, 20 assertions
+sh tests/test-lib.sh                                      # pure helpers, 110 assertions
 ```
 
-100 assertions total, all in temp directories with stubbed process checks — a running service is
-never touched. Details and known gaps in [tests/README.md](tests/README.md).
+222 assertions total, all in temp directories with stubbed process checks — a running service is
+never touched. When using a different port, generate the fixtures with the same base
+(`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
+wrong port and you get a pile of fake failures. Details and known gaps in
+[tests/README.md](tests/README.md).
 
 Releasing:
 

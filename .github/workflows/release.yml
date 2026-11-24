@@ -45,14 +45,15 @@ jobs:
 
           if [ -n "${INPUT_TAG:-}" ]; then
             TAG="$INPUT_TAG"
-            # 只接受 v1.2 这种形状的 tag
-            case "$TAG" in
-              v[0-9]*.[0-9]*) ;;
-              *) echo "::error::tag 形状不对：$TAG（应形如 v0.8）"; exit 1 ;;
-            esac
-            case "$TAG" in
-              *[!0-9A-Za-z._-]*) echo "::error::tag 含非法字符：$TAG"; exit 1 ;;
-            esac
+            # 只接受 v1.2 / v1.2.3 这种形状的 tag。
+            # 校验实现在 scripts/lib.sh：case 的 glob 会把 v1junk.2 也放行
+            #（除 . 和 [] 外都是通配符），所以那边改成按段显式检查，
+            # 并且由 tests/test-lib.sh 覆盖，改坏了本地就能发现。
+            . scripts/lib.sh
+            if ! is_valid_release_tag "$TAG"; then
+              echo "::error::tag 形状不对：$TAG（应形如 v0.8 或 v0.9.2）"
+              exit 1
+            fi
           else
             TAG="$GITHUB_REF_NAME"
           fi
@@ -78,6 +79,12 @@ jobs:
           done
           echo "语法检查通过"
 
+          # 只查生产脚本：测试文件里大量 a && b || c 是刻意写法，查出来全是噪音。
+          # SC1090/SC1091 是动态 source（先判断 lib.sh 在不在），刻意如此。
+          shellcheck -s sh -e SC1090,SC1091 \
+            service.sh action.sh uninstall.sh customize.sh scripts/*.sh
+          echo "shellcheck 通过"
+
           python3 tests/make-fixtures.py /tmp/fx
           ( cd /tmp/fx && exec python3 -m http.server 8899 --bind 127.0.0.1 ) &
           SRV_PID=$!
@@ -87,7 +94,8 @@ jobs:
           TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
           sh tests/test-watchdog.sh
           TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
-          TEST_SRV=http://127.0.0.1:8899 sh tests/test-service.sh
+          sh tests/test-service.sh
+          sh tests/test-lib.sh
 
       - name: 打包
         run: |

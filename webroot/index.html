@@ -463,7 +463,17 @@ function render(d) {
 
   $('statusDot').className = 'dot ' + (running ? 'on' : 'off');
   $('statusText').textContent = running ? '运行中' : '已停止';
-  $('barSub').textContent = running ? ('PID ' + d.pid) : '';
+  // 数据是事件驱动写出来的快照，不是实时监控：把写入时刻直接标出来，
+  // 免得看到数字不动以为卡住了
+  var sub = running ? ('PID ' + d.pid) : '';
+  if (d.updated) sub += (sub ? ' · ' : '') + '数据 ' + d.updated;
+  $('barSub').textContent = sub;
+  // 监听地址配错时 status.sh 会给出 configError，此时地址字段是空的
+  if (d.configError) {
+    $('statusText').textContent = '配置有误';
+    $('statusDot').className = 'dot off';
+    $('barSub').textContent = d.configError;
+  }
 
   // 首页
   setText('vApiUrl', d.apiUrl);

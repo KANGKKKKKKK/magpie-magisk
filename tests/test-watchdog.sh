@@ -7,11 +7,22 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC="$HERE/../service.sh"
-WD=${TEST_BASE:-/tmp/magpie-watchdog-test}
+# 临时目录：Android 上没有 /tmp，退到 TMPDIR 或 /data/local/tmp
+if [ -d /tmp ] && [ -w /tmp ]; then
+  _TMPBASE=/tmp
+else
+  _TMPBASE=${TMPDIR:-/data/local/tmp}
+fi
+WD=${TEST_BASE:-$_TMPBASE/magpie-watchdog-test}
 PASS=0; FAIL=0
 
 ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+
+# 巡检间隔从 service.sh 读，不在这里写死：改间隔时这条测试不该变红。
+# 取不到就退回 30，并让后面的断言把实际情况打印出来。
+INTERVAL=$(sed -n "s/^WATCH_INTERVAL=\${MAGPIE_WATCH_INTERVAL:-\\([0-9][0-9]*\\)}.*/\\1/p" "$SRC" | head -1)
+[ -n "$INTERVAL" ] || INTERVAL=30
 
 build() {
   rounds="$1"
@@ -26,18 +37,25 @@ build() {
     echo '. "$MODDIR/scripts/lib.sh"'
     echo "wlog() { echo \"\$(date +'%H:%M:%S') \$1\" >> \"$WD/run/watchdog.log\" 2>/dev/null; }"
     echo '_last_lan=""'
+    echo "WATCH_INTERVAL=$INTERVAL"
+    # 循环体里会调 rotate_log（定义在 service.sh 的标记外面）
+    echo "rotate_log() { command -v magpie_rotate_log >/dev/null 2>&1 && magpie_rotate_log \"\$1\" 5242880; return 0; }"
     echo "_wait=0"
     echo "_miss_logged=0"
+    echo "_tick=0"
     echo "_fail=0"
     echo "_n=0"
     echo "while [ \"\$_n\" -lt $rounds ]; do"
     echo "  _n=\$((_n+1))"
   } > "$WD/loop.sh"
 
-  # 循环体：sleep 在循环开头，所以从它之后取，到 done 之前结束
+  # 循环体按 service.sh 里的显式标记抽，不靠缩进猜。
+  # 以前是「从 sleep "$_wait" 到第一个 2 空格缩进的 done」，service.sh 里
+  # 只要在循环前面多一个同缩进的 done（比如给等待函数加个 until…done），
+  # 抽出来就是空的，测试会以一堆莫名其妙的方式红掉。
   awk '
-    /^    sleep "\$_wait"$/ { inside = 1; next }
-    /^  done$/ { exit }
+    /^[ \t]*#<<< WATCHDOG-BODY/ { inside = 1; next }
+    /^[ \t]*#>>> WATCHDOG-BODY/ { exit }
     inside { print }
   ' "$SRC" >> "$WD/loop.sh"
   echo "done" >> "$WD/loop.sh"
@@ -51,9 +69,16 @@ fake_running() { printf '\nmagpie_running() { %s; }\n' "$1" >> "$WD/scripts/lib.
 put_elf()      { mkdir -p "$WD/bin"; printf '\177ELF\002\001\001' > "$WD/bin/magpie"; chmod 755 "$WD/bin/magpie"; }
 logtext()      { cat "$WD/run/watchdog.log" 2>/dev/null; }
 
-echo "== 0 抽出来的循环脚本语法自检"
+echo "== 0 抽出来的循环脚本自检"
 build 3
 fake_running 'return 1'
+# 先确认真的抽到东西了：抽空时后面的断言会以各种奇怪的方式失败，
+# 报错信息指向「没记录」「没拉起」，看不出根因在抽取
+_body_lines=$(grep -c . "$WD/loop.sh" 2>/dev/null)
+[ "${_body_lines:-0}" -gt 10 ] && ok "抽到循环体（$_body_lines 行）" || bad "抽取结果为空或过短（$_body_lines 行）"
+for _k in 'user_stopped' 'magpie_bin_usable' 'rotate_log' 'status.sh'; do
+  grep -q "$_k" "$WD/loop.sh" && ok "循环体里有关键行 $_k" || bad "循环体缺关键行 $_k"
+done
 sh -n "$WD/loop.sh" && ok "语法通过" || bad "语法错误"
 
 echo
@@ -77,7 +102,8 @@ n=$(logtext | grep -c "拉起失败")
 [ "$n" -ge 2 ] && ok "记录了失败（$n 次）" || bad "没有记录失败"
 seq=$(logtext | sed -n 's/.*，\([0-9]*\) 秒后再试.*/\1/p' | tr '\n' ' ')
 echo "     退避序列: $seq"
-case "$seq" in "20 40 80 "*) ok "退避 20/40/80" ;; *) bad "退避不对：$seq" ;; esac
+_w1=$INTERVAL; _w2=$((INTERVAL * 2)); _w3=$((INTERVAL * 4))
+case "$seq" in "$_w1 $_w2 $_w3 "*) ok "退避 $_w1/$_w2/$_w3（间隔 ${INTERVAL}s 起算）" ;; *) bad "退避不对（间隔 ${INTERVAL}s，期望 $_w1 $_w2 $_w3）：$seq" ;; esac
 
 echo
 echo "== 3 本体就位且拉起成功：不报失败"

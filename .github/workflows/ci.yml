@@ -30,6 +30,17 @@ jobs:
           done
           echo "语法检查通过"
 
+      - name: shellcheck
+        run: |
+          set -eu
+          # 只查生产脚本。测试文件里大量 `a && b || c` 是刻意写法，
+          # 查出来全是风格噪音（70 条里 59 条来自 tests/）。
+          # SC1090/SC1091：动态 source（先判断 lib.sh 在不在），刻意如此。
+          # 单处例外用内联 `# shellcheck disable=` 标注并写理由，
+          # 这样能保证例外是「解释过的」，不是「整体关掉」。
+          shellcheck -s sh -e SC1090,SC1091 \
+            service.sh action.sh uninstall.sh customize.sh scripts/*.sh
+
       - name: 测试
         run: |
           set -eu
@@ -43,3 +54,4 @@ jobs:
           sh tests/test-watchdog.sh
           TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
           sh tests/test-service.sh
+          sh tests/test-lib.sh

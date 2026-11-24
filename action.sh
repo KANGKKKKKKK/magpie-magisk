@@ -37,21 +37,50 @@ SERVICE="$MODDIR/scripts/magpie.service"
 # 否则在精简环境里 ip / pidof 可能找不到，局域网地址就探测不出来
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 
-CONF=/data/adb/magpie/scripts/magpie.config
+# 局域网地址、进程识别、地址解析，和 magpie.service / status.sh / doctor.sh 共用。
+# 必须在读配置算端口之前 source：下面要用 addr_port / addr_host。
+# lib.sh 万一缺失，这里补上最小实现，免得后面调用时报 not found。
+_NETLIB="$MODDIR/scripts/lib.sh"
+if [ -f "$_NETLIB" ]; then
+  . "$_NETLIB"
+else
+  lan_ip() { return 1; }
+  magpie_main_pid() {
+    for _p in $(pidof magpie 2>/dev/null); do
+      if tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q -- ' serve'; then
+        echo "$_p"; return 0
+      fi
+    done
+    return 1
+  }
+  magpie_running() { magpie_main_pid >/dev/null 2>&1; }
+  addr_host() { case "$1" in \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;; *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac; }
+  addr_port() { case "$1" in \[*\]:*) _p=${1##*\]:} ;; *:*) _p=${1##*:} ;; *) return 1 ;; esac; case "$_p" in ''|*[!0-9]*) return 1 ;; esac; echo "$_p"; }
+  is_loopback_host() { case "$1" in 127.*|localhost|::1|\[::1\]) return 0 ;; esac; return 1; }
+fi
+
+CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
 [ -f "$CONF" ] && . "$CONF" 2>/dev/null
 
 # 与 magpie.service 保持一致
 magpie_path=${magpie_path:-/data/adb/magpie}
 MAGPIE_ADDR=${MAGPIE_ADDR:-127.0.0.1:3425}
-# 端口必须是纯数字：配置里写成没带端口的地址时退回默认值，
-# 否则后面会拼出 "http://127.0.0.1:0.0.0.0/v1" 这种坏链接
-API_PORT=${MAGPIE_ADDR##*:}
-case "$API_PORT" in ''|*[!0-9]*) API_PORT=3425 ;; esac
+
+# 端口必须是 1..65535 的纯数字。配置写成 127.0.0.1（漏端口）时不能静默退回默认值：
+# 那会让「点启动」看起来成功，实际连的是另一个端口，还拼出
+# "http://127.0.0.1:127.0.0.1/v1" 这种链接。这里只记下错误，
+# 由启动入口拒绝、由状态输出如实说明，不替用户猜。
+API_PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
 WEB_ADDR=${MAGPIE_WEB_ADDR:-}
-[ -n "$WEB_ADDR" ] || WEB_ADDR="${MAGPIE_ADDR%:*}:3430"
-WEB_PORT=${WEB_ADDR##*:}
-case "$WEB_PORT" in ''|*[!0-9]*) WEB_PORT=3430 ;; esac
+[ -n "$WEB_ADDR" ] || WEB_ADDR="$(addr_host "$MAGPIE_ADDR"):3430"
+WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
+ADDR_ERROR=""
+if [ -z "$API_PORT" ]; then
+  ADDR_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用（应为 主机:端口，1-65535；IPv6 用 [::1]:3425）"
+elif [ -z "$WEB_PORT" ]; then
+  ADDR_ERROR="MAGPIE_WEB_ADDR=$WEB_ADDR 的端口不可用（应为 主机:端口，1-65535）"
+fi
 
 # 只认 serve 主进程：MCP 子进程也叫 magpie，用 pidof 会误判
 is_running() { magpie_running; }
@@ -72,22 +101,6 @@ install_ready() {
 
 # 局域网地址实时算，不读 run/lan.url —— 那是启动时的快照，
 # WiFi 换过、热点开关过之后就可能指向一个已经不存在的地址。
-# lib.sh 万一缺失，这里补上最小实现，免得后面调用时报 not found。
-_NETLIB="$MODDIR/scripts/lib.sh"
-if [ -f "$_NETLIB" ]; then
-  . "$_NETLIB"
-else
-  lan_ip() { return 1; }
-  magpie_main_pid() {
-    for _p in $(pidof magpie 2>/dev/null); do
-      if tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q -- ' serve'; then
-        echo "$_p"; return 0
-      fi
-    done
-    return 1
-  }
-  magpie_running() { magpie_main_pid >/dev/null 2>&1; }
-fi
 
 panel_url() {
   _k=$(cat "$magpie_path/data/web.key" 2>/dev/null)
@@ -101,6 +114,13 @@ panel_url() {
 # 接入信息。标签占 8 列（中文按两列算），值从第 10 列起；
 # 「本机 / 平板」这层二级标签也停在同一列。
 print_endpoints() {
+  # 端口非法时不要打印任何地址：那些地址都是拼出来的假地址
+  if [ -n "$ADDR_ERROR" ]; then
+    echo " 配置    $ADDR_ERROR"
+    echo " 文件    $CONF"
+    echo " 进程    $(magpie_main_pid 2>/dev/null)"
+    return 0
+  fi
   _mode=$(gateway_mode)
   _lan_now=$(lan_ip)
   _open=""
@@ -124,13 +144,9 @@ print_endpoints() {
 }
 
 # ---------- 网关监听地址 ----------
-addr_host() { case "$1" in *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac }
-
+# addr_host / is_loopback_host 来自 lib.sh：IPv6 的 [::1]:3425 也能认出是本机
 gateway_mode() {
-  case "$(addr_host "$MAGPIE_ADDR")" in
-    127.0.0.1|localhost|::1) echo local ;;
-    *) echo lan ;;
-  esac
+  if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then echo local; else echo lan; fi
 }
 gateway_host() { case "$1" in lan) echo 0.0.0.0 ;; *) echo 127.0.0.1 ;; esac }
 gateway_other() { case "$(gateway_mode)" in lan) echo local ;; *) echo lan ;; esac }
@@ -183,6 +199,13 @@ wait_ready() {
 
 set_gateway() {
   _to="$1"
+  # 端口读不出来时不能改配置：会写出 "0.0.0.0:" 这种半截地址
+  if [ -n "$ADDR_ERROR" ]; then
+    echo "配置有问题，先改好再切网关："
+    echo "  $ADDR_ERROR"
+    echo "  配置文件 $CONF"
+    return 1
+  fi
   if [ "$_to" = "$(gateway_mode)" ]; then
     echo "网关现在就是「$(gateway_actual)」，不用改。"
     return 0
@@ -217,6 +240,14 @@ set_gateway() {
 }
 
 do_start() {
+  # 端口非法时不启动：让服务用默认端口跑起来，用户只会看到「已启动」然后连不上，
+  # 比直接报错更难查。
+  if [ -n "$ADDR_ERROR" ]; then
+    echo "配置有问题，先改好再启动："
+    echo "  $ADDR_ERROR"
+    echo "  配置文件 $CONF"
+    return 1
+  fi
   echo "启动中 ..."
   sh "$SERVICE" start
   if wait_ready 80; then
@@ -249,6 +280,12 @@ do_stop() {
 }
 
 do_restart() {
+  if [ -n "$ADDR_ERROR" ]; then
+    echo "配置有问题，先改好再重启："
+    echo "  $ADDR_ERROR"
+    echo "  配置文件 $CONF"
+    return 1
+  fi
   echo "重启中 ..."
   sh "$SERVICE" restart >/dev/null 2>&1
   if wait_ready 80; then
@@ -526,9 +563,11 @@ menu() {
     echo
     # 无 --yes：第一次点按只打印方案，窗口内再点一次才真正下载
     sh "$MODDIR/scripts/install.sh" install
+    # 安装器失败时必须把失败码传出去：吞掉它，管理器会把失败显示成成功
+    _rc=$?
     echo
     sync_status
-    exit 0
+    exit "$_rc"
   fi
 
   save_vol
@@ -574,6 +613,9 @@ menu() {
 
 # 自测用：MAGPIE_ACTION_LIB=1 时只加载函数，不执行主流程
 if [ "${MAGPIE_ACTION_LIB:-}" = "1" ]; then
+  # 被 source 时 return 生效、脚本到此为止；被直接执行时 return 会失败，
+  # 由 || exit 0 兜住。两种调用方式都要能正常结束，所以两句都得写。
+  # shellcheck disable=SC2317
   return 0 2>/dev/null || exit 0
 fi
 

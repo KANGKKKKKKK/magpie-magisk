@@ -9,24 +9,8 @@ export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
 
-CONF=/data/adb/magpie/scripts/magpie.config
-[ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
-magpie_path=/data/adb/magpie
-MAGPIE_ADDR="127.0.0.1:3425"
-MAGPIE_WEB_ADDR=""
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
-
-API_PORT=${MAGPIE_ADDR##*:}
-[ -n "$API_PORT" ] || API_PORT=3425
-WEB_PORT=${MAGPIE_WEB_ADDR##*:}
-[ -n "$WEB_PORT" ] || WEB_PORT=3430
-
-OK=0; BAD=0; WARN=0
-ok()   { OK=$((OK + 1));    echo "  ✓ $1"; }
-bad()  { BAD=$((BAD + 1));  echo "  ✗ $1"; [ -n "$2" ] && echo "      → $2"; }
-warn() { WARN=$((WARN + 1)); echo "  ! $1"; [ -n "$2" ] && echo "      → $2"; }
-
-# 进程识别与局域网地址，和运行期脚本共用同一份实现
+# 进程识别与局域网地址，和运行期脚本共用同一份实现。
+# 必须在算端口之前 source：下面要用 addr_port / addr_host / is_loopback_host。
 _NETLIB="$MODDIR/scripts/lib.sh"
 if [ -f "$_NETLIB" ]; then
   . "$_NETLIB"
@@ -34,7 +18,60 @@ else
   magpie_main_pid() { pidof magpie 2>/dev/null | tr ' ' '\n' | head -1; }
   magpie_all_pids() { pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'; }
   lan_ip() { return 1; }
+  addr_host() { case "$1" in \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;; *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac; }
+  addr_port() { case "$1" in \[*\]:*) _p=${1##*\]:} ;; *:*) _p=${1##*:} ;; *) return 1 ;; esac; case "$_p" in ''|*[!0-9]*) return 1 ;; esac; echo "$_p"; }
+  is_loopback_host() { case "$1" in 127.*|localhost|::1|\[::1\]) return 0 ;; esac; return 1; }
 fi
+
+CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
+[ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
+magpie_path=/data/adb/magpie
+MAGPIE_ADDR="127.0.0.1:3425"
+MAGPIE_WEB_ADDR=""
+[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+
+# 端口按 1..65535 校验；非法时留空，由 [2/9] 直接报错，不静默退回默认值
+API_PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
+# 面板地址留空是默认用法：与 magpie.service 一致，用「网关主机 + 3430」推出来
+WEB_ADDR=${MAGPIE_WEB_ADDR:-}
+[ -n "$WEB_ADDR" ] || WEB_ADDR="$(addr_host "$MAGPIE_ADDR"):3430"
+WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
+ADDR_ERROR=""
+if [ -z "$API_PORT" ]; then
+  ADDR_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用（应为 主机:端口，1-65535；IPv6 用 [::1]:3425）"
+elif [ -z "$WEB_PORT" ]; then
+  ADDR_ERROR="面板监听地址 $WEB_ADDR 的端口不可用（MAGPIE_WEB_ADDR 应为 主机:端口）"
+fi
+[ -n "$API_PORT" ] || API_PORT=0
+[ -n "$WEB_PORT" ] || WEB_PORT=0
+
+OK=0; BAD=0; WARN=0
+ok()   { OK=$((OK + 1));    echo "  ✓ $1"; }
+bad()  { BAD=$((BAD + 1));  echo "  ✗ $1"; [ -n "$2" ] && echo "      → $2"; }
+warn() { WARN=$((WARN + 1)); echo "  ! $1"; [ -n "$2" ] && echo "      → $2"; }
+
+# 端口有没有在监听。
+# ss 不是哪儿都有（精简系统、部分 Root 方案的 busybox 没带这个 applet），
+# 所以依次退到 netstat、/proc/net/tcp(6)：宁可多查一处，也不要报假红。
+port_listening() {
+  _want=$1
+  case "$_want" in ''|0|*[!0-9]*) return 1 ;; esac
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q "[:.]$_want " && return 0
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -q "[:.]$_want " && return 0
+  fi
+  _hex=$(printf '%04X' "$_want" 2>/dev/null) || return 1
+  for _f in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$_f" ] || continue
+    awk -v hex="$_hex" '
+      NR > 1 && $4 == "0A" { n = split($2, a, ":"); if (a[n] == hex) { found = 1; exit } }
+      END { exit !found }
+    ' "$_f" 2>/dev/null && return 0
+  done
+  return 1
+}
 
 # 取 HTTP 状态码；连不上则输出空。
 # 注意不能直接调 `wget`：这条路在很多机型上根本不存在（系统没有 wget，
@@ -45,23 +82,31 @@ for _b in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/bu
   [ -x "$_b" ] && { DL_BB="$_b"; break; }
 done
 
-http_code() {
+# 把一次请求的**整条**状态码链打出来，一行一个。
+# 面板带密码访问时会 303 跳到 /（用 cookie 记住），而 wget/curl 都会跟跳转，
+# 于是最终看到的是第二跳的 401——只看最后一个码会把「密码正确」误判成「密码不对」。
+http_codes() {
   _u="$1"; _t="${2:-5}"
   if command -v curl >/dev/null 2>&1; then
-    curl -s -o /dev/null -m "$_t" -w '%{http_code}' "$_u" 2>/dev/null
+    curl -s -o /dev/null -m "$_t" -w '%{http_code}\n' "$_u" 2>/dev/null
     return 0
   fi
   if [ -n "$DL_BB" ]; then
     "$DL_BB" wget -S -O /dev/null -T "$_t" "$_u" 2>&1
   else
     wget -S -O /dev/null -T "$_t" "$_u" 2>&1
-  fi | sed -n 's/.*HTTP\/1\.[01] \([0-9]\{3\}\).*/\1/p' | tail -1
+  fi | sed -n 's/.*HTTP\/1\.[01] \([0-9]\{3\}\).*/\1/p'
+}
+
+# 只看最后一个状态码（网关根路径这种不跳转的用）
+http_code() {
+  http_codes "$1" "$2" | tail -1
 }
 
 echo "Magpie AI 网关 · 自检"
 echo "  模块   $MODDIR"
 echo "  配置   $CONF"
-echo "  监听   网关 $MAGPIE_ADDR  面板 ${MAGPIE_WEB_ADDR:-未设置}"
+echo "  监听   网关 $MAGPIE_ADDR  面板 $WEB_ADDR"
 echo
 
 echo "[1/9] 本体与进程"
@@ -98,14 +143,18 @@ else
 fi
 
 echo "[2/9] 端口监听"
-for _p in "$API_PORT:网关" "$WEB_PORT:面板"; do
-  _port=${_p%%:*}; _name=${_p##*:}
-  if ss -ltn 2>/dev/null | grep -q "[:.]$_port "; then
-    ok "$_name 端口 $_port 在监听"
-  else
-    bad "$_name 端口 $_port 没有监听" "看 $magpie_path/run/magpie.log 的启动报错"
-  fi
-done
+if [ -n "$ADDR_ERROR" ]; then
+  bad "监听地址配置有误" "$ADDR_ERROR"
+else
+  for _p in "$API_PORT:网关" "$WEB_PORT:面板"; do
+    _port=${_p%%:*}; _name=${_p##*:}
+    if port_listening "$_port"; then
+      ok "$_name 端口 $_port 在监听"
+    else
+      bad "$_name 端口 $_port 没有监听" "看 $magpie_path/run/magpie.log 的启动报错"
+    fi
+  done
+fi
 
 echo "[3/9] 本机可用性"
 _c=$(http_code "http://127.0.0.1:$API_PORT/" 5)
@@ -121,7 +170,8 @@ echo "[4/9] 面板与访问密码"
 WEB_KEY=$(cat "$magpie_path/data/web.key" 2>/dev/null)
 if [ -n "$WEB_KEY" ]; then
   ok "访问密码存在（${#WEB_KEY} 位）"
-  _c=$(http_code "http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY" 5)
+  # 看第一跳：303 就说明密码被接受了（后面跟着的 401 是没带 cookie 的第二跳）
+  _c=$(http_codes "http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY" 5 | head -1)
   case "$_c" in
     200|303) ok "带密码可访问面板（HTTP $_c）" ;;
     "")      bad "面板无响应" "检查 $WEB_PORT 是否被占" ;;
@@ -154,25 +204,25 @@ else
 fi
 
 echo "[7/9] 局域网暴露"
-case "$MAGPIE_ADDR" in
-  127.0.0.1:*|localhost:*)
-    ok "网关只监听本机，局域网不可达" ;;
-  *)
-    warn "网关已对局域网开放"
-    # 实时算，不读 run/lan.url —— 那是启动时的快照，WiFi 换过就过期了
-    _lan=$(lan_ip)
-    if [ -n "$_lan" ]; then
-      echo "      → 现在可用的地址 http://$_lan:$API_PORT/v1"
-      echo "      → 别的设备要带一把已启用的网关密钥"
-    else
-      echo "      → 当前没有可用局域网地址（未连 WiFi / 热点未开，或只有移动数据）"
-    fi
-    ;;
-esac
-case "$MAGPIE_WEB_ADDR" in
-  ""|127.0.0.1:*|localhost:*) ;;
-  *) warn "面板已对局域网开放" "不知道访问密码的人会看到 401，但密码泄露等于网关密钥也泄露" ;;
-esac
+# 判定统一走 is_loopback_host：配 ::1 / [::1]:3425 时也算「仅本机」
+if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then
+  ok "网关只监听本机，局域网不可达"
+else
+  warn "网关已对局域网开放"
+  # 实时算，不读 run/lan.url —— 那是启动时的快照，WiFi 换过就过期了
+  _lan=$(lan_ip)
+  if [ -n "$_lan" ]; then
+    echo "      → 现在可用的地址 http://$_lan:$API_PORT/v1"
+    echo "      → 别的设备要带一把已启用的网关密钥"
+  else
+    echo "      → 当前没有可用局域网地址（未连 WiFi / 热点未开，或只有移动数据）"
+  fi
+fi
+# 用推出来的 WEB_ADDR：MAGPIE_WEB_ADDR 留空时会跟着网关主机走，
+# 网关开在 0.0.0.0 上时面板同样是暴露的，不能因为「没显式配」就跳过
+if ! is_loopback_host "$(addr_host "$WEB_ADDR")"; then
+  warn "面板已对局域网开放" "不知道访问密码的人会看到 401，但密码泄露等于网关密钥也泄露"
+fi
 
 echo "[8/9] DNS 解析"
 # magpie 是不链接 libc 的 Go 静态 PIE，解析域名只走 /etc/resolv.conf。

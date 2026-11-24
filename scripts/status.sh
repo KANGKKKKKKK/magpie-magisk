@@ -1,9 +1,23 @@
 #!/system/bin/sh
 # 更新模块状态：管理器描述、webroot/status.json、webroot/lastlog.txt
-# 用法: sh status.sh       更新全部
-#       sh status.sh -q    只打印状态文字
+# 用法: sh status.sh              更新全部（含管理器描述 / module.prop）
+#       sh status.sh -q           只打印状态文字
+#       sh status.sh --webonly    只刷 webroot 下的两个文件，不碰管理器描述
+#
+# --webonly 是给看门狗用的：面板每 5 秒轮询 status.json，要有东西定期重写它
+# 数字才会动；但改模块描述、调 ksud 这些一分钟两次没必要，也太吵。
 
-CONF=/data/adb/magpie/scripts/magpie.config
+WEB_ONLY=0
+_QUIET=0
+for _arg in "$@"; do
+  case "$_arg" in
+    -q) _QUIET=1 ;;
+    --webonly) WEB_ONLY=1 ;;
+  esac
+done
+
+# MAGPIE_CONF 优先：README 与 lib.sh 都这么写，脚本这边以前不认，排障时指定配置无效
+CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$(dirname "$0")/magpie.config"
 
 # 模块目录由脚本位置推导，不写死
@@ -18,12 +32,8 @@ _ENV_ICON="${MAGPIE_ICON-}"
 [ -f "$CONF" ] && . "$CONF" 2>/dev/null
 [ -n "$_ENV_ICON" ] && MAGPIE_ICON="$_ENV_ICON"
 
-PORT=${MAGPIE_ADDR##*:}
-[ -n "$PORT" ] || PORT=3425
-WEB_PORT=${MAGPIE_WEB_ADDR##*:}
-[ -n "$WEB_PORT" ] || WEB_PORT=3430
-
-# 局域网地址与进程识别，和 magpie.service / action.sh / doctor.sh 共用
+# 局域网地址、进程识别、地址解析，和 magpie.service / action.sh / doctor.sh 共用。
+# 必须在算端口之前 source：下面要用 addr_port / addr_host / is_loopback_host。
 _NETLIB="$(dirname "$0")/lib.sh"
 if [ -f "$_NETLIB" ]; then
   . "$_NETLIB"
@@ -32,7 +42,33 @@ else
   magpie_main_pid() { pidof magpie 2>/dev/null | tr ' ' '\n' | head -1; }
   magpie_all_pids() { pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'; }
   magpie_rss_mb() { return 1; }
+  # 没有 lib.sh 时的退路：宽进（只要能切出数字就用），不在这里重复整套校验。
+  addr_host() { case "$1" in \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;; *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac; }
+  addr_port() { case "$1" in \[*\]:*) _p=${1##*\]:} ;; *:*) _p=${1##*:} ;; *) return 1 ;; esac; case "$_p" in ''|*[!0-9]*) return 1 ;; esac; echo "$_p"; }
+  is_loopback_host() { case "$1" in 127.*|localhost|::1|\[::1\]) return 0 ;; esac; return 1; }
+  json_str() { printf '%s' "$1" | tr -d '[:cntrl:]' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 fi
+
+# 端口必须是 1..65535 的纯数字。配置写成 127.0.0.1（漏端口）时不能静默退回默认值：
+# 那会拼出 http://127.0.0.1:127.0.0.1/v1、写出 "apiPort": 127.0.0.1 这种非法 JSON，
+# 面板 r.json() 直接失败，用户还看不见原因。
+PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
+[ -n "$PORT" ] || PORT=""
+# 面板地址留空是默认用法：跟 magpie.service 一样用「网关主机 + 3430」推出来
+WEB_ADDR=${MAGPIE_WEB_ADDR:-}
+[ -n "$WEB_ADDR" ] || WEB_ADDR="$(addr_host "$MAGPIE_ADDR"):3430"
+WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
+[ -n "$WEB_PORT" ] || WEB_PORT=""
+
+CONFIG_ERROR=""
+if [ -z "$PORT" ]; then
+  CONFIG_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用，应写成 主机:端口（1-65535，IPv6 用 [::1]:3425）"
+elif [ -z "$WEB_PORT" ]; then
+  CONFIG_ERROR="面板监听地址 $WEB_ADDR 的端口不可用，MAGPIE_WEB_ADDR 应写成 主机:端口"
+fi
+# 配置有错时仍然输出合法 JSON，但端口类字段留空，不编一个假地址出来
+[ -n "$PORT" ] || PORT=0
+[ -n "$WEB_PORT" ] || WEB_PORT=0
 
 # 只认 serve 主进程：MCP 子进程也叫 magpie，不能拿它们的 PID 当服务状态
 PID=$(magpie_main_pid 2>/dev/null)
@@ -53,13 +89,21 @@ ICON_ON="${MAGPIE_ICON:-1}"
 # 开放局域网且拿得到地址时把地址带上——那才是用户要填进客户端的东西。
 desc_line() {
   _v="$1"
+  # 配置本身有问题时先说这个：此时显示任何地址都是错的
+  if [ -n "$CONFIG_ERROR" ]; then
+    if [ "$ICON_ON" = "0" ]; then
+      echo "[配置有误] 监听地址要写成 主机:端口"
+    else
+      echo "🟠 配置有误 | 监听地址要写成 主机:端口"
+    fi
+    return 0
+  fi
   if [ "$RUNNING" = "1" ]; then
-    case "$MAGPIE_ADDR" in
-      127.0.0.1:*|localhost:*)
-        _where="仅本机" ;;
-      *)
-        if [ -n "$LAN_IP" ]; then _where="$LAN_IP:$PORT"; else _where="无局域网地址"; fi ;;
-    esac
+    if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then
+      _where="仅本机"
+    else
+      if [ -n "$LAN_IP" ]; then _where="$LAN_IP:$PORT"; else _where="无局域网地址"; fi
+    fi
     if [ "$ICON_ON" = "0" ]; then
       echo "[运行中] ${_v:+$_v }| $_where"
     else
@@ -76,7 +120,7 @@ desc_line() {
 
 DESC=$(desc_line "")
 
-if [ "$1" = "-q" ]; then
+if [ "$_QUIET" = "1" ]; then
   echo "$DESC"
   exit 0
 fi
@@ -137,46 +181,76 @@ if [ -z "$API_KEY" ]; then
   [ -f "$_cf" ] && API_KEY=$(sed -n 's/.*"secret"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_cf" 2>/dev/null | head -1)
 fi
 
-# 监听 0.0.0.0 或具体 IP 视为已开放局域网
-case "$MAGPIE_ADDR" in
-  127.0.0.1:*|localhost:*) LAN_OPEN=0 ;;
-  *)                       LAN_OPEN=1 ;;
-esac
+# 监听 0.0.0.0 或具体 IP 视为已开放局域网。
+# 回环判定统一走 is_loopback_host：配 ::1 或 [::1]:3425 时也是「仅本机」。
+if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then LAN_OPEN=0; else LAN_OPEN=1; fi
 
-cat > "$MODDIR/webroot/status.json" <<EOF
+# 端口非法时这些字段留空：不拿 0 拼出一个能点但连不上的地址
+api_url=""; api_root=""; web_url=""
+[ "$PORT" -gt 0 ] 2>/dev/null && { api_url="http://127.0.0.1:$PORT/v1"; api_root="http://127.0.0.1:$PORT"; }
+[ "$WEB_PORT" -gt 0 ] 2>/dev/null && web_url="http://127.0.0.1:$WEB_PORT"
+lan_api=""; lan_web=""
+if [ -n "$LAN_IP" ]; then
+  [ "$PORT" -gt 0 ] 2>/dev/null && lan_api="http://$LAN_IP:$PORT/v1"
+  [ "$WEB_PORT" -gt 0 ] 2>/dev/null && lan_web="http://$LAN_IP:$WEB_PORT"
+fi
+
+# 原子写：同目录临时文件 → 设权限 → mv 替换。
+# 面板每 5 秒来 fetch 一次，直接 > 覆盖的话它可能读到半份 JSON。
+# 权限必须在 mv 之前设好，否则替换后到 chmod 之间有一小段 644 的窗口。
+# 临时名带 $$：并发刷新时不会互相踩，也不用 $RANDOM（dash 里它是空的）。
+write_atomic() {
+  _dst=$1
+  _tmp="$_dst.tmp.$$"
+  if ! cat > "$_tmp" 2>/dev/null; then
+    rm -f "$_tmp" 2>/dev/null
+    return 1
+  fi
+  chmod "${2:-600}" "$_tmp" 2>/dev/null
+  if mv -f "$_tmp" "$_dst" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$_tmp" 2>/dev/null
+  return 1
+}
+
+cat <<EOF | write_atomic "$MODDIR/webroot/status.json" 600
 {
   "running": $([ "$RUNNING" = "1" ] && echo true || echo false),
-  "version": "$VERSION",
-  "binSize": "$BIN_SIZE",
-  "pid": "$PID",
-  "uptime": "$UPTIME",
-  "mem": "$MEM",
+  "version": "$(json_str "$VERSION")",
+  "binSize": "$(json_str "$BIN_SIZE")",
+  "pid": "$(json_str "$PID")",
+  "uptime": "$(json_str "$UPTIME")",
+  "mem": "$(json_str "$MEM")",
   "apiPort": $PORT,
-  "apiUrl": "http://127.0.0.1:$PORT/v1",
-  "apiUrlRoot": "http://127.0.0.1:$PORT",
-  "apiKey": "$API_KEY",
+  "apiUrl": "$(json_str "$api_url")",
+  "apiUrlRoot": "$(json_str "$api_root")",
+  "apiKey": "$(json_str "$API_KEY")",
   "webPort": $WEB_PORT,
-  "webUrl": "http://127.0.0.1:$WEB_PORT",
-  "webUrlKey": "$WEB_URL",
-  "webKey": "$WEB_KEY",
-  "lanIp": "$LAN_IP",
+  "webUrl": "$(json_str "$web_url")",
+  "webUrlKey": "$(json_str "$WEB_URL")",
+  "webKey": "$(json_str "$WEB_KEY")",
+  "lanIp": "$(json_str "$LAN_IP")",
   "lanOpen": $([ "$LAN_OPEN" = "1" ] && echo true || echo false),
-  "lanApiUrl": "$([ -n "$LAN_IP" ] && echo "http://$LAN_IP:$PORT/v1")",
-  "lanWebUrl": "$([ -n "$LAN_IP" ] && echo "http://$LAN_IP:$WEB_PORT")",
+  "lanApiUrl": "$(json_str "$lan_api")",
+  "lanWebUrl": "$(json_str "$lan_web")",
+  "configError": "$(json_str "$CONFIG_ERROR")",
   "updated": "$(date +'%H:%M:%S')"
 }
 EOF
-chmod 600 "$MODDIR/webroot/status.json" 2>/dev/null
 
-# 日志尾供面板直接 fetch
+# 日志尾供面板直接 fetch，同样原子写
 LOG_SRC="$magpie_path/run/magpie.log"
 LOG_OUT="$MODDIR/webroot/lastlog.txt"
 if [ -f "$LOG_SRC" ]; then
-  tail -n 30 "$LOG_SRC" > "$LOG_OUT" 2>/dev/null
+  tail -n 30 "$LOG_SRC" 2>/dev/null | write_atomic "$LOG_OUT" 600
 else
-  echo "(暂无日志, 服务可能还没启动过)" > "$LOG_OUT"
+  echo "(暂无日志, 服务可能还没启动过)" | write_atomic "$LOG_OUT" 600
 fi
-chmod 600 "$LOG_OUT" 2>/dev/null
+
+# 以下改的是管理器里那一行与 module.prop。--webonly 时跳过：
+# 这些内容只在启停、配置变化时才需要动，没必要每 30 秒重写一次。
+if [ "$WEB_ONLY" != "1" ]; then
 
 # KernelSU / APatch 用 ksud 覆盖描述
 for c in /data/adb/ksud /data/adb/ap/bin/ksud; do
@@ -202,3 +276,5 @@ if [ -f "$MODDIR/module.prop" ]; then
     fi
   fi
 fi
+
+fi  # WEB_ONLY

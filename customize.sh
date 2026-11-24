@@ -1,6 +1,6 @@
 # customize.sh —— 刷入时由 Magisk / KernelSU / APatch 调用
 # 只做权限与依赖检查，不改动模块文件内容，也不联网下载
-# （刷入流程里没有可靠的交互终端，91MB 的下载放到模块装好之后由用户确认触发）
+# （刷入流程里没有可靠的交互终端，87 MB 的下载放到模块装好之后由用户确认触发）
 
 ui_print "*******************************"
 ui_print "  Magpie AI 网关 · Android 模块"
@@ -16,7 +16,7 @@ set_perm "$MODPATH/scripts/magpie.config" 0 0 0600
 
 # 本模块只负责调度，不含 magpie 本体
 # 路径按配置读，自定义过 magpie_path 的用户也能看到正确的结果
-_CONF=/data/adb/magpie/scripts/magpie.config
+_CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$_CONF" ] || _CONF="$MODPATH/scripts/magpie.config"
 [ -f "$_CONF" ] && . "$_CONF" 2>/dev/null
 magpie_path=${magpie_path:-/data/adb/magpie}
@@ -26,23 +26,33 @@ magpie_path=${magpie_path:-/data/adb/magpie}
 # 老版本注入的 DNS_LOCAL_HOSTNAMES 是无效的（Go 与 magpie 都不读）。
 _RESOLV="$MODPATH/system/etc/resolv.conf"
 if [ -n "${MAGPIE_DNS:-}" ]; then
+  # 校验只用 lib.sh 那一份：刷入时 lib.sh 一定在包里。
+  # 不在这里另写一套弱校验——看起来校验过、实际漏判，比明说没校验更坑。
+  # shellcheck disable=SC1090
+  [ -f "$MODPATH/scripts/lib.sh" ] && . "$MODPATH/scripts/lib.sh" 2>/dev/null
+  command -v is_ip_addr >/dev/null 2>&1 || is_ip_addr() { [ -n "$1" ]; }
+
   mkdir -p "$MODPATH/system/etc"
   # 先写临时文件、确认里面真有 nameserver 再替换：
   # 配置写错时保留模块自带那份，别把能用的 DNS 覆盖成空的。
   _RESOLV_NEW="$_RESOLV.new"
   : > "$_RESOLV_NEW"
+  _DNS_BAD=""
   for _ns in $MAGPIE_DNS; do
-    case "$_ns" in
-      *[!0-9a-fA-F:.]*) continue ;;
-    esac
-    echo "nameserver $_ns" >> "$_RESOLV_NEW"
+    if is_ip_addr "$_ns"; then
+      echo "nameserver $_ns" >> "$_RESOLV_NEW"
+    else
+      _DNS_BAD="$_DNS_BAD $_ns"
+    fi
   done
   echo "options timeout:2 attempts:2" >> "$_RESOLV_NEW"
+  _DNS_BAD=${_DNS_BAD# }
   if grep -q '^nameserver ' "$_RESOLV_NEW" 2>/dev/null; then
     mv -f "$_RESOLV_NEW" "$_RESOLV" 2>/dev/null
     set_perm "$MODPATH/system/etc" 0 0 0755
     set_perm "$_RESOLV" 0 0 0644
     ui_print "- 上游 DNS：$MAGPIE_DNS（写入 /etc/resolv.conf 覆盖）"
+    [ -n "$_DNS_BAD" ] && ui_print "! 这些项不是合法地址，已跳过：$_DNS_BAD"
   else
     rm -f "$_RESOLV_NEW" 2>/dev/null
     ui_print "! MAGPIE_DNS 里没有有效的 DNS 地址，保留模块自带的 /etc/resolv.conf"

@@ -4,7 +4,7 @@
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
 
 # 读配置；文件缺失时用内置默认值
-CONF=/data/adb/magpie/scripts/magpie.config
+CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$(dirname "$0")/magpie.config"
 [ -f "$CONF" ] && . "$CONF" 2>/dev/null
 
@@ -17,8 +17,42 @@ RUN="$magpie_path/run"
 PIDFILE="$RUN/magpie.pid"
 LOG="$RUN/magpie.log"
 
+# 局域网地址规则与 status.sh / action.sh / doctor.sh 共用同一份实现。
+# 必须在算端口之前 source：下面要用 addr_port / addr_host / is_loopback_host。
+_NETLIB="$(dirname "$0")/lib.sh"
+if [ -f "$_NETLIB" ]; then
+  . "$_NETLIB"
+else
+  lan_ip() { return 1; }
+  addr_host() { case "$1" in \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;; *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac; }
+  addr_port() { case "$1" in \[*\]:*) _p=${1##*\]:} ;; *:*) _p=${1##*:} ;; *) return 1 ;; esac; case "$_p" in ''|*[!0-9]*) return 1 ;; esac; echo "$_p"; }
+  is_loopback_host() { case "$1" in 127.*|localhost|::1|\[::1\]) return 0 ;; esac; return 1; }
+  # lib.sh 缺失时也要能生成出东西，但**不做半套校验**：
+  # 一个看起来做了校验、实际漏判的实现，比明说「没校验」更容易骗过人。
+  # 真正的过滤在 lib.sh 里，这里只保证「非空项原样写出去」，
+  # 有效性仍由 sync_resolv_conf 最后的 `grep '^nameserver '` 兜底。
+  magpie_resolv_body() {
+    for _ns in $1; do
+      [ -n "$_ns" ] || continue
+      echo "nameserver $_ns"
+    done
+    echo "options timeout:2 attempts:2"
+  }
+  magpie_bad_dns() { return 0; }
+fi
+
 WEB_HOST=${MAGPIE_WEB_ADDR:-"${MAGPIE_ADDR%:*}:3430"}
-WEB_PORT=${WEB_HOST##*:}
+
+# 端口必须能解析出来：写成 127.0.0.1（漏端口）时不让它启动。
+# 静默用默认端口跑起来，用户只会看到「已启动」然后连不上，更难查。
+API_PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
+WEB_PORT=$(addr_port "$WEB_HOST" 2>/dev/null)
+ADDR_ERROR=""
+if [ -z "$API_PORT" ]; then
+  ADDR_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用（应为 主机:端口，1-65535；IPv6 用 [::1]:3425）"
+elif [ -z "$WEB_PORT" ]; then
+  ADDR_ERROR="面板监听地址 $WEB_HOST 的端口不可用（MAGPIE_WEB_ADDR 应为 主机:端口）"
+fi
 
 # run / data 目录必须在写任何文件之前建好：
 # 否则下面写 web.key 会失败（data 还不存在），面板密钥每次启动都换一个。
@@ -32,21 +66,28 @@ else
   WEB_KEY=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)
   [ -n "$WEB_KEY" ] && echo "$WEB_KEY" > "$WEB_KEY_FILE"
 fi
-WEB_URL="http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY"
+WEB_URL=""
+[ -n "$WEB_PORT" ] && WEB_URL="http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY"
 
 # 带日期，跨天也能对上时间线
 log() { echo "$(date +'%Y-%m-%d %H:%M:%S') [$1] $2"; }
 
 LOG_MAX_BYTES=5242880
 
-# 超过 5MB 归档为 .1，必须在进程打开日志 fd 之前调用
+# 超过 5MB 归档为 .1，必须在进程打开日志 fd 之前调用。
+# 实现在 lib.sh（service.sh 共用同一份），这里只补说明行。
+# lib.sh 缺失时不轮转、也不每轮喊一次：那种状态下日志变大不是最要紧的问题，
+# 刷屏反而会把它盖住。只在真的超了阈值时提一句。
 rotate_log() {
   _f="$1"
   _sz=$(stat -c %s "$_f" 2>/dev/null)
   [ -n "$_sz" ] && [ "$_sz" -gt "$LOG_MAX_BYTES" ] 2>/dev/null || return 0
-  mv -f "$_f" "$_f.1" 2>/dev/null || return 0
-  : > "$_f" 2>/dev/null
-  chmod 600 "$_f" 2>/dev/null
+  if command -v magpie_rotate_log >/dev/null 2>&1; then
+    magpie_rotate_log "$_f" "$LOG_MAX_BYTES"
+  else
+    log Warn "lib.sh 缺失, 日志轮转跳过（${_f##*/} 已超 5MB）"
+    return 0
+  fi
   log Info "日志超 5MB, 已归档为 ${_f##*/}.1"
 }
 
@@ -65,32 +106,10 @@ USER_STOPPED="$RUN/.user_stopped"
 CA_BUNDLE="$magpie_path/data/certs/ca-bundle.crt"
 CA_STAMP="$CA_BUNDLE.stamp"
 
-# 系统根证书的两个来源（此处内容相同，按文件名去重）
-CA_DIRS="/system/etc/security/cacerts /apex/com.android.conscrypt/cacerts"
-
 # 模块目录：DNS 覆盖文件写在这里。脚本被软链调用时 $0 可能是别的路径，兜底到默认位置。
 MODDIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$MODDIR" ] || MODDIR=/data/adb/modules/magpie
 RESOLV_OVERLAY="$MODDIR/system/etc/resolv.conf"
-
-# 局域网地址规则与 status.sh / action.sh / doctor.sh 共用同一份实现
-_NETLIB="$(dirname "$0")/lib.sh"
-if [ -f "$_NETLIB" ]; then
-  . "$_NETLIB"
-else
-  lan_ip() { return 1; }
-  # lib.sh 缺失时 DNS 生成也得能跑：否则 sync_resolv_conf 拿不到这个函数，
-  # 生成出空文件、报「MAGPIE_DNS 为空或格式不对」，把原因指向配置，误导排查。
-  magpie_resolv_body() {
-    for _ns in $1; do
-      case "$_ns" in
-        *[!0-9a-fA-F:.]*|'') continue ;;
-      esac
-      echo "nameserver $_ns"
-    done
-    echo "options timeout:2 attempts:2"
-  }
-fi
 
 # 把 run/lan.url 刷成当前地址；没有可用地址就删掉它。
 # 返回 0 表示内容有变化（调用方据此决定要不要刷新状态）。
@@ -118,9 +137,11 @@ pin_oom() {
   [ -n "$_p" ] && [ -d "/proc/$_p" ] || return 1
   _cur=$(cat "/proc/$_p/oom_score_adj" 2>/dev/null)
   [ "$_cur" = "-1000" ] && return 0
-  echo -1000 > "/proc/$_p/oom_score_adj" 2>/dev/null \
-    && log Info "oom_score_adj $_cur -> -1000" \
-    || log Warn "无法设置 oom_score_adj (当前 $_cur)"
+  if echo -1000 > "/proc/$_p/oom_score_adj" 2>/dev/null; then
+    log Info "oom_score_adj $_cur -> -1000"
+  else
+    log Warn "无法设置 oom_score_adj (当前 $_cur)"
+  fi
 }
 
 
@@ -142,7 +163,12 @@ legacy_kind() {
   case "$_cl" in
     *listen-address=::1*) echo dnsmasq; return 0 ;;
     "sleep 2147483647 "*)
-      ls -l "/proc/$1/fd" 2>/dev/null | grep -q 'dnsmasq\.fifo' && { echo keep; return 0; }
+      # 老版本用 sleep 2147483647 顶住 FIFO。读 fd 链接判断是不是它：
+      # 用 case 而不是 ls | grep，文件名带特殊字符也不会误判。
+      for _fd in /proc/"$1"/fd/*; do
+        _tgt=$(readlink "$_fd" 2>/dev/null) || continue
+        case "$_tgt" in *dnsmasq.fifo*) echo keep; return 0 ;; esac
+      done
       ;;
   esac
   return 1
@@ -180,53 +206,38 @@ cleanup_legacy_dnsmasq() {
 
 # 系统证书目录指纹：文件数 + 目录 mtime。
 # 装/卸根证书模块、系统升级换了 CA 库，指纹都会变，下次启动自动重建。
+# 实现在 lib.sh（magpie-cli.sh 共用同一份）。不在这里留第二份实现：
+# 两份指纹算法一旦漂移，会出现「证书明明变了却不重建」这种极难查的问题。
 ca_fingerprint() {
-  _fp=""
-  for _d in $CA_DIRS; do
-    if [ -d "$_d" ]; then
-      _n=$(ls -1 "$_d" 2>/dev/null | wc -l | tr -d ' ')
-      _t=$(stat -c %Y "$_d" 2>/dev/null)
-      _fp="$_fp ${_d##*/}=${_n}/${_t:-0}"
-    else
-      _fp="$_fp ${_d##*/}=0/0"
-    fi
-  done
-  echo "$_fp"
+  if command -v magpie_ca_fingerprint >/dev/null 2>&1; then
+    magpie_ca_fingerprint
+    return 0
+  fi
+  echo "lib.sh-missing"
 }
 
 # Go 找不到 Android 证书库，合并系统证书交给 SSL_CERT_FILE。
-# 先写临时文件、校验通过再替换，避免重建失败把能用的旧包弄没。
+# 合并本身在 lib.sh（magpie-cli.sh 共用同一份），这里负责指纹比对、写 stamp 与措辞。
+# 指纹只取一次：以前是「比对时算一次、写 stamp 时再算一次」，
+# 两次之间目录 mtime 变了就会写进一个永远匹配不上的 stamp，下次启动白重建一遍。
 ensure_ca_bundle() {
   _fp=$(ca_fingerprint)
   if [ -s "$CA_BUNDLE" ] && [ "$(cat "$CA_STAMP" 2>/dev/null)" = "$_fp" ]; then
     return 0
   fi
 
-  mkdir -p "$(dirname "$CA_BUNDLE")"
-  _tmp="$CA_BUNDLE.tmp"
-  : > "$_tmp" 2>/dev/null
-  _seen=""
-  for _d in $CA_DIRS; do
-    [ -d "$_d" ] || continue
-    for _f in "$_d"/*.0; do
-      [ -f "$_f" ] || continue
-      case " $_seen " in *" ${_f##*/} "*) continue ;; esac
-      _seen="$_seen ${_f##*/}"
-      cat "$_f" >> "$_tmp" 2>/dev/null
-    done
-  done
-
-  _n=$(grep -c 'BEGIN CERTIFICATE' "$_tmp" 2>/dev/null)
-  if [ -n "$_n" ] && [ "$_n" -gt 0 ] 2>/dev/null; then
-    chmod 600 "$_tmp" 2>/dev/null
-    if mv -f "$_tmp" "$CA_BUNDLE" 2>/dev/null; then
-      echo "$_fp" > "$CA_STAMP" 2>/dev/null
-      log Info "已生成 CA 证书包 ($_n 张)"
-      return 0
-    fi
+  if ! command -v magpie_write_ca_bundle >/dev/null 2>&1; then
+    log Error "lib.sh 缺失, 无法生成 CA 证书包（HTTPS 请求会失败）"
+    [ -s "$CA_BUNDLE" ] && return 0
+    return 1
   fi
 
-  rm -f "$_tmp" 2>/dev/null
+  if _n=$(magpie_write_ca_bundle "$CA_BUNDLE" 2>/dev/null); then
+    echo "$_fp" > "$CA_STAMP" 2>/dev/null
+    log Info "已生成 CA 证书包 ($_n 张)"
+    return 0
+  fi
+
   [ -s "$CA_BUNDLE" ] && { log Warn "CA 证书包重建失败, 继续用旧包"; return 0; }
   log Warn "无法生成 CA 证书包, HTTPS 请求可能失败"
   return 1
@@ -237,11 +248,16 @@ ensure_ca_bundle() {
 #   $MODDIR/system/etc/resolv.conf       Magisk 覆盖，开机后就是 /etc/resolv.conf
 # 覆盖文件是 magpie 唯一的上游来源，所以这里失败就等于原生通道全废，要出声。
 sync_resolv_conf() {
+  # 逐条点名被跳过的项：只写「格式不对」，用户不知道是哪一条，
+  # 也容易误以为整份配置都没生效（实际是其余项照常写入了）。
+  _bad=$(magpie_bad_dns "$DNS_SERVERS" 2>/dev/null | tr '\n' ' ')
+  [ -n "$_bad" ] && log Warn "MAGPIE_DNS 里这些项不是合法地址, 已跳过: $_bad"
+
   magpie_resolv_body "$DNS_SERVERS" > "$RESOLV_CONF.tmp" 2>/dev/null
   # 没有一条 nameserver 就用不了（Go 会退回 127.0.0.1:53），宁可保留旧的
   if [ ! -s "$RESOLV_CONF.tmp" ] || ! grep -q '^nameserver ' "$RESOLV_CONF.tmp" 2>/dev/null; then
     rm -f "$RESOLV_CONF.tmp" 2>/dev/null
-    log Warn "MAGPIE_DNS 为空或格式不对, 保留现有 DNS 配置"
+    log Warn "MAGPIE_DNS 里没有一条可用地址, 保留现有 DNS 配置"
     return 1
   fi
   chmod 644 "$RESOLV_CONF.tmp" 2>/dev/null
@@ -288,6 +304,12 @@ ensure_cli() {
 }
 
 start() {
+  # 端口读不出来就不启动：用默认端口跑起来只会让「已启动」和「连不上」同时出现
+  if [ -n "$ADDR_ERROR" ]; then
+    log Error "$ADDR_ERROR"
+    log Error "配置文件 $CONF"
+    return 1
+  fi
   rm -f "$USER_STOPPED" 2>/dev/null
   # 清理必须在"已在运行"早退之前，否则覆盖安装后旧 dnsmasq 一直清不掉
   cleanup_legacy_dnsmasq
@@ -319,12 +341,24 @@ start() {
   # Go 与 magpie 都不认 DNS_LOCAL_HOSTNAMES，那个 export 已删除。
   export RES_OPTIONS="${RES_OPTIONS:-timeout:2 attempts:2}"
   # 自带的是 glibc 版 Bun，Android 上跑不起来，优先用 Android 版
-  _bun=$(ls "$magpie_path/data/.cache/magpie/bun"/*/magpie-bun 2>/dev/null | head -1)
-  [ -n "$_bun" ] && export MAGPIE_BUN="$_bun"
+  for _b in "$magpie_path/data/.cache/magpie/bun"/*/magpie-bun; do
+    [ -x "$_b" ] && { MAGPIE_BUN="$_b"; export MAGPIE_BUN; break; }
+  done
 
-  # 不加 --web 就只有纯 API，没有网页
-  ( cd "$magpie_path/data" && exec "$BIN" serve --web="$WEB_HOST" ) >>"$LOG" 2>&1 &
-  echo "$!" > "$PIDFILE"
+  # 不加 --web 就只有纯 API，没有网页。
+  #
+  # 用 setsid 让服务脱离调用者的会话与进程组：从管理器 [执行]、Termux、
+  # 或任何「跑完就清理子进程组」的宿主里 start 时，父进程一退出，
+  # 整个组会被连带收掉，表现为「启动成功、二三十秒后自己没了」。
+  # 独立会话后就与调用者生死无关。
+  #
+  # 一律不带参数：setsid 的 -c 在 busybox 里是「强制 fork」，在 util-linux
+  # 里却是「设置控制终端」，语义相反。误用 -c 会在没有 tty 的环境里
+  # 直接失败（Inappropriate ioctl for device），服务根本起不来。
+  _new_session=""
+  if command -v setsid >/dev/null 2>&1; then _new_session="setsid"; fi
+  # shellcheck disable=SC2086  # $_new_session 要么空、要么是两个词，故意分词
+  ( cd "$magpie_path/data" && exec $_new_session "$BIN" serve --web="$WEB_HOST" ) >>"$LOG" 2>&1 &
   echo "$WEB_URL" > "$RUN/web.url"
   chmod 600 "$RUN/web.url" 2>/dev/null
 
@@ -336,6 +370,9 @@ start() {
   done
 
   if pid=$(running); then
+    # PIDFILE 在这里写而不是启动后立刻写：setsid 在部分实现里会 fork 一次，
+    # 紧接着的 $! 可能是中间进程、不是 serve。按实际探测到的 pid 记才准。
+    echo "$pid" > "$PIDFILE" 2>/dev/null
     log Info "已启动 网关 http://$MAGPIE_ADDR"
     log Info "      WebUI $WEB_URL (PID $pid)"
     pin_oom "$pid"

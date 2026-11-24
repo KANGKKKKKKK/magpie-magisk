@@ -1,0 +1,235 @@
+#!/bin/sh
+# lib.sh 里纯函数的表驱动测试
+#
+# 这些函数是「地址写错 → 状态页整份坏掉」那类 bug 的唯一入口：
+#   1. addr_host / addr_port —— 配置写成 127.0.0.1（漏端口）、端口越界、
+#      IPv6 的 [::1]:3425 都要被正确切开或判错
+#   2. is_loopback_host —— 回环判定不统一时，配 ::1 会被报成「已对局域网开放」
+#   3. is_ip_addr 家族 —— MAGPIE_DNS 里写错的项必须被拦住
+#   4. json_str —— 键里出现引号/反斜杠时 status.json 不能变成非法 JSON
+#
+# 全是纯函数，不碰真实进程和文件。
+# 用法: sh tests/test-lib.sh
+#
+# 注意：变量名一律 ASCII —— busybox ash / mksh 不支持多字节变量名
+set -u
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+LIB=${TEST_LIB:-$HERE/../scripts/lib.sh}
+PASS=0; FAIL=0
+
+ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+
+[ -f "$LIB" ] || { echo "找不到 $LIB"; exit 2; }
+# shellcheck disable=SC1090
+. "$LIB"
+
+# 断言 addr_host 的输出
+expect_host() {
+  _want=$1; _in=$2
+  _got=$(addr_host "$_in")
+  if [ "$_got" = "$_want" ]; then ok "host($_in) = $_got" ; else bad "host($_in) = [$_got]，期望 [$_want]"; fi
+}
+
+# 断言 addr_port 的结果；期望值为 "-" 表示应当返回非零
+expect_port() {
+  _want=$1; _in=$2
+  _got=$(addr_port "$_in" 2>/dev/null); _rc=$?
+  if [ "$_want" = "-" ]; then
+    [ "$_rc" -ne 0 ] && ok "port($_in) 被拒" || bad "port($_in) 应为非法，却给出 [$_got]"
+  else
+    [ "$_rc" -eq 0 ] && [ "$_got" = "$_want" ] && ok "port($_in) = $_got" \
+      || bad "port($_in) = [$_got] rc=$_rc，期望 [$_want]"
+  fi
+}
+
+# 断言布尔函数（0/1）
+expect_bool() {
+  _want=$1; _in=$2; _fn=$3
+  if "$_fn" "$_in" >/dev/null 2>&1; then _got=Y; else _got=N; fi
+  if [ "$_got" = "$_want" ]; then ok "$_fn($_in) = $_want"
+  else bad "$_fn($_in) = $_got，期望 $_want"; fi
+}
+
+echo "== 1 地址切分：host"
+expect_host 127.0.0.1    "127.0.0.1:3425"
+expect_host 0.0.0.0      "0.0.0.0:3425"
+expect_host localhost    "localhost:3425"
+expect_host 192.168.1.5  "192.168.1.5:3430"
+expect_host ::1          "[::1]:3425"
+expect_host 2001:db8::1  "[2001:db8::1]:80"
+expect_host ::1          "[::1]"
+expect_host ""           ":3425"
+
+echo "== 2 地址切分：端口"
+expect_port 3425   "127.0.0.1:3425"
+expect_port 65535  "127.0.0.1:65535"
+expect_port 3430   "[::1]:3430"
+expect_port -      "127.0.0.1"          # 漏端口：这正是写出非法 JSON 的那个配置
+expect_port -      "127.0.0.1:"
+expect_port -      "127.0.0.1:0"
+expect_port -      "127.0.0.1:65536"
+expect_port -      "127.0.0.1:99999"
+expect_port -      "127.0.0.1:abc"
+expect_port -      "127.0.0.1:-1"
+expect_port -      "127.0.0.1:12 34"
+expect_port -      "[::1]"
+expect_port -      ""
+
+echo "== 3 回环判定"
+for h in 127.0.0.1 127.1.2.3 localhost ::1 "[::1]" 0:0:0:0:0:0:0:1; do
+  expect_bool Y "$h" is_loopback_host
+done
+for h in 0.0.0.0 "" 192.168.1.5 :: 2001:db8::1 "[::]"; do
+  expect_bool N "$h" is_loopback_host
+done
+
+echo "== 4 IPv4"
+for a in 223.5.5.5 1.1.1.1 8.8.8.8 0.0.0.0 255.255.255.255 192.168.1.1; do
+  expect_bool Y "$a" is_ipv4_addr
+done
+for a in 256.1.1.1 999.999.999.999 1.2.3 1.2.3.4.5 1..2.3 .1.2.3 1.2.3. \
+         abc 01.2.3.4 1.2.3.04 "" 1.2.3.4:53; do
+  expect_bool N "$a" is_ipv4_addr
+done
+
+echo "== 5 IPv6"
+for a in ::1 :: 2001:4860:4860::8888 2001:4860:4860:0:0:0:0:8888 fe80::1 ::ffff:192.168.1.1; do
+  expect_bool Y "$a" is_ipv6_addr
+done
+for a in 1::2::3 ::: ::1:2:3:4:5:6:7:8 1:2:3:4:5:6:7:8:9 12345::1 \
+         ::ffff:999.1.1.1 "fe80::1%wlan0" "" 1.2.3.4; do
+  expect_bool N "$a" is_ipv6_addr
+done
+
+echo "== 6 统一入口 is_ip_addr"
+for a in 223.5.5.5 ::1 2001:db8::1; do expect_bool Y "$a" is_ip_addr; done
+for a in abc example.com 1.2.3 999.1.1.1 ""; do expect_bool N "$a" is_ip_addr; done
+
+echo "== 7 MAGPIE_DNS 过滤"
+body=$(magpie_resolv_body "223.5.5.5 abc 999.999.999.999 8.8.8 1.1.1.1 ::1")
+n=$(printf '%s\n' "$body" | grep -c '^nameserver ')
+if [ "$n" = "3" ]; then ok "3 个合法项被留下"; else bad "留下了 $n 项，期望 3：$body"; fi
+case "$body" in *"nameserver abc"*) bad "abc 不该被写进 resolv.conf" ;; *) ok "非法项 abc 被跳过" ;; esac
+case "$body" in *"nameserver 999.999.999.999"*) bad "越界 IPv4 不该被写进去" ;; *) ok "越界 IPv4 被跳过" ;; esac
+case "$body" in *"options timeout:2 attempts:2"*) ok "options 行仍在" ;; *) bad "丢了 options 行" ;; esac
+
+bad_list=$(magpie_bad_dns "223.5.5.5 abc 8.8.8" | tr '\n' ' ')
+if [ "$bad_list" = "abc 8.8.8 " ]; then ok "被跳过的项能逐个点名"; else bad "点名结果不对：[$bad_list]"; fi
+
+# 一条都不合法时只剩 options 行 —— 调用方据此保留旧配置
+body=$(magpie_resolv_body "abc junk")
+case "$body" in *"nameserver "*) bad "全非法时不该产出 nameserver" ;; *) ok "全非法时没有 nameserver 行" ;; esac
+
+echo "== 8 JSON 转义"
+out=$(json_str 'a"b\c')
+if [ "$out" = 'a\"b\\c' ]; then ok "引号与反斜杠被转义"; else bad "转义结果不对：[$out]"; fi
+out=$(json_str "$(printf 'line1\nline2')")
+case "$out" in *"
+"*) bad "换行没被去掉，会破坏 JSON" ;; *) ok "换行被去掉" ;; esac
+# 真实拼进 JSON 再解析一遍（有 python3 才验）
+if command -v python3 >/dev/null 2>&1; then
+  if printf '{"k":"%s"}' "$(json_str 'a"b\c')" \
+     | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["k"] == "a\"b\\c" else 1)' 2>/dev/null; then
+    ok "拼进 JSON 后仍可解析"
+  else
+    bad "拼进 JSON 后解析失败"
+  fi
+fi
+
+echo "== 9 夹具地址可配（make-fixtures --base）"
+# 端口写死过 8899：换端口跑测试会得到一堆假失败，这条防回归
+if command -v python3 >/dev/null 2>&1; then
+# 临时目录：Android 上没有 /tmp，退到 TMPDIR 或 /data/local/tmp
+if [ -d /tmp ] && [ -w /tmp ]; then
+  _TMPBASE=/tmp
+else
+  _TMPBASE=${TMPDIR:-/data/local/tmp}
+fi
+  _fx="${TEST_BASE:-$_TMPBASE/magpie-lib-test}/fx"
+  rm -rf "$_fx"
+  if python3 "$HERE/make-fixtures.py" "$_fx" --base http://127.0.0.1:18999 >/dev/null 2>&1; then
+    if grep -q '127\.0\.0\.1:18999' "$_fx/manifest.json" 2>/dev/null \
+       && ! grep -q ':8899' "$_fx/manifest.json" 2>/dev/null; then
+      ok "清单里的地址跟着 --base 走"
+    else
+      bad "清单地址没跟着 --base 走"
+    fi
+  else
+    bad "make-fixtures.py --base 执行失败"
+  fi
+  rm -rf "$_fx"
+else
+  echo "  SKIP  没有 python3，跳过"
+fi
+
+echo "== 10 发布 tag 形状"
+# release.yml 以前用 case 的 glob 判断 v[0-9]*.[0-9]*，
+# 除 . 和 [] 外都是通配符，v1junk.2、v1.2.3.4.5 都能过。
+for t in v0.5 v0.9.2 v0.9.2.1 v1.2.3.4 v10.20.30; do
+  if is_valid_release_tag "$t"; then ok "tag($t) 接受"; else bad "tag($t) 被误拒"; fi
+done
+for t in v.2 v0 v1junk.2 v0.9. 'v0.9 2' v1.2.3.4.5 v0..9 0.9.2 V1.2 v-1.2 v0.9.x 1234.5 ''; do
+  if is_valid_release_tag "$t"; then bad "tag([$t]) 被误接受"; else ok "tag([$t]) 被拒"; fi
+done
+
+echo "== 11 CA 证书包合并"
+# 这段逻辑本来在 magpie.service 和 magpie-cli.sh 各有一份，抽到 lib.sh 后
+# 必须确认它仍然「先写临时文件、校验通过才替换」—— 重建失败把能用的旧包
+# 弄没，会让本来正常的 HTTPS 突然全挂。
+_ca=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/ca-$$")
+mkdir -p "$_ca/cacerts" 2>/dev/null
+# 造两段看起来像证书的内容，够 grep BEGIN CERTIFICATE 通过
+printf -- '-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n' > "$_ca/cacerts/aaa.0"
+printf -- '-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n' > "$_ca/cacerts/bbb.0"
+
+_magpie_ca_dirs_save=$MAGPIE_CA_DIRS
+MAGPIE_CA_DIRS="$_ca/cacerts"
+_fp1=$(magpie_ca_fingerprint)
+case "$_fp1" in *cacerts=2/*) ok "指纹含目录与文件数" ;; *) bad "指纹不对：[$_fp1]" ;; esac
+
+_n=$(magpie_write_ca_bundle "$_ca/out.crt"); _rc=$?
+if [ "$_rc" = "0" ] && [ "$_n" = "2" ]; then ok "合并出 2 张证书"
+else bad "合并结果 rc=$_rc n=$_n"; fi
+[ -s "$_ca/out.crt" ] && ok "证书包已落盘" || bad "证书包没生成"
+
+# 没有可用证书时必须失败，且不能动已有的包
+_sha_before=$(sha256sum "$_ca/out.crt" 2>/dev/null | awk '{print $1}')
+MAGPIE_CA_DIRS="$_ca/empty-not-here"
+if magpie_write_ca_bundle "$_ca/out.crt" >/dev/null 2>&1; then
+  bad "没有证书时不该返回成功"
+else
+  ok "没有可用证书时返回失败"
+fi
+_sha_after=$(sha256sum "$_ca/out.crt" 2>/dev/null | awk '{print $1}')
+if [ -n "$_sha_before" ] && [ "$_sha_before" = "$_sha_after" ]; then
+  ok "失败时没有覆盖已有的包"
+else
+  bad "失败时把原包改了"
+fi
+# 不留下临时文件
+case "$(ls "$_ca" 2>/dev/null | tr '\n' ' ')" in
+  *out.crt.tmp*) bad "留下了临时文件" ;;
+  *) ok "没有残留临时文件" ;;
+esac
+MAGPIE_CA_DIRS=$_magpie_ca_dirs_save
+rm -rf "$_ca" 2>/dev/null
+
+echo "== 12 日志轮转"
+_rl=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/rl-$$")
+mkdir -p "$_rl" 2>/dev/null
+printf 'x' > "$_rl/a.log"
+magpie_rotate_log "$_rl/a.log" 1000
+[ -s "$_rl/a.log" ] && ok "没超阈值时不轮转" || bad "没超阈值却轮转了"
+# 造一个超过阈值的文件
+i=0; while [ "$i" -lt 20 ]; do printf 'yyyyyyyyyy' >> "$_rl/a.log"; i=$((i + 1)); done
+magpie_rotate_log "$_rl/a.log" 100
+if [ -f "$_rl/a.log.1" ] && [ ! -s "$_rl/a.log" ]; then ok "超阈值时归档并清空"
+else bad "轮转结果不对（.1 存在=$( [ -f "$_rl/a.log.1" ] && echo y || echo n) 大小=$(stat -c %s "$_rl/a.log" 2>/dev/null)）"; fi
+rm -rf "$_rl" 2>/dev/null
+
+echo
+echo "结果： PASS $PASS ， FAIL $FAIL"
+
+[ "$FAIL" = "0" ] || exit 1

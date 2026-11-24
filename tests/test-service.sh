@@ -15,7 +15,13 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRCDIR=${TEST_SRC_DIR:-$HERE/..}
-B=${TEST_BASE:-/tmp/magpie-service-test}
+# 临时目录：Android 上没有 /tmp，退到 TMPDIR 或 /data/local/tmp
+if [ -d /tmp ] && [ -w /tmp ]; then
+  _TMPBASE=/tmp
+else
+  _TMPBASE=${TMPDIR:-/data/local/tmp}
+fi
+B=${TEST_BASE:-$_TMPBASE/magpie-service-test}
 PASS=0; FAIL=0
 KIDS=""
 
@@ -27,17 +33,18 @@ alive() { kill -0 "$1" 2>/dev/null; }
 # 起一个占位进程顶替 magpie 子进程
 sleeper() { sleep 300 >/dev/null 2>&1 & echo $!; }
 
-# 按命令行匹配收进程：pkill 不一定在（模块脚本环境里常常没有），用 /proc 兜
+# 按命令行匹配收进程：pkill 不一定在（模块脚本环境里常常没有），用 /proc 兜。
+# 一条 grep 扫完所有 cmdline，不再逐个 pid 调 tr：真机上进程数以千计，
+# 每次 reap 两次扫描、七个用例各扫一遍，逐个 fork 会把测试拖成好几分钟。
 kill_matching() {
-  for _d in /proc/[0-9]*; do
+  for _d in $(grep -lF -- "$1" /proc/[0-9]*/cmdline 2>/dev/null); do
     _p=${_d#/proc/}
+    _p=${_p%/cmdline}
+    case "$_p" in ''|*[!0-9]*) continue ;; esac
     [ "$_p" = "$$" ] && continue
-    [ -r "$_d/cmdline" ] || continue
-    _cl=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null)
-    case "$_cl" in
-      *"$1"*) kill -9 "$_p" 2>/dev/null ;;
-    esac
+    kill -9 "$_p" 2>/dev/null
   done
+  return 0
 }
 
 reap() {
@@ -167,6 +174,110 @@ mkdir -p "$B/link"
 ln -sf "$MK/scripts/magpie-cli.sh" "$B/link/magpie"
 out=$(MAGPIE_CONF="$B/cfg2" "$B/link/magpie" --version 2>&1)
 case "$out" in *"9.9.9 custom"*) ok "命令读的是自定义数据目录" ;; *) bad "命令跑错目录：$out" ;; esac
+
+echo "== 6 status.sh：端口写错时不写坏 JSON，并且认 MAGPIE_CONF"
+build
+# 这一节要真的跑 status.sh，不能用 build 里那个空壳
+cp "$SRCDIR/scripts/status.sh" "$B/scripts/status.sh"
+chmod 755 "$B/scripts/status.sh"
+mkdir -p "$B/webroot"
+J="$B/webroot/status.json"
+
+# 漏端口：以前会写出 "apiPort": 127.0.0.1，整份 JSON 都读不出来
+printf 'magpie_path="%s"\nMAGPIE_ADDR="127.0.0.1"\nMAGPIE_WEB_ADDR=""\n' "$B" > "$B/cfg"
+MAGPIE_CONF="$B/cfg" sh "$B/scripts/status.sh" >/dev/null 2>&1
+if grep -q '"apiPort": 0,' "$J" 2>/dev/null; then ok "端口非法时 apiPort 写成 0"
+else bad "apiPort 不是 0：$(grep '"apiPort"' "$J" 2>/dev/null)"; fi
+if grep -q '"configError": ".*端口' "$J" 2>/dev/null; then ok "给出了 configError 说明"
+else bad "没有 configError：$(grep '"configError"' "$J" 2>/dev/null)"; fi
+if grep -q '"apiUrl": ""' "$J" 2>/dev/null && grep -q '"lanApiUrl": ""' "$J" 2>/dev/null; then
+  ok "没有编造 http://127.0.0.1:127.0.0.1 之类的地址"
+else
+  bad "地址字段仍在拼假地址：$(grep -E '"(apiUrl|lanApiUrl)"' "$J" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 合法配置：MAGPIE_CONF 要真的生效，端口跟着配置走
+printf 'magpie_path="%s"\nMAGPIE_ADDR="127.0.0.1:3456"\nMAGPIE_WEB_ADDR=""\n' "$B" > "$B/cfg"
+MAGPIE_CONF="$B/cfg" sh "$B/scripts/status.sh" >/dev/null 2>&1
+if grep -q '"apiPort": 3456,' "$J" 2>/dev/null; then ok "MAGPIE_CONF 生效，端口用的是 3456"
+else bad "配置没生效：$(grep '"apiPort"' "$J" 2>/dev/null)"; fi
+
+echo "== 7 看门狗也要等开机：两条启动路径不会在开机过程中抢着 start"
+# 静态断言：wait_boot_completed 必须出现在看门狗子 shell 里、循环之前。
+# 这条拦的是「给首次拉起的子 shell 加了等待、忘了给看门狗加」。
+_wd_line=$(grep -n '^# 看门狗' "$SRCDIR/service.sh" | head -1 | cut -d: -f1)
+_boot_line=$(awk -v start="${_wd_line:-0}" 'NR > start && /wait_boot_completed/ { print NR; exit }' "$SRCDIR/service.sh")
+_loop_line=$(awk -v start="${_wd_line:-0}" 'NR > start && /^  while :; do$/ { print NR; exit }' "$SRCDIR/service.sh")
+if [ -z "$_wd_line" ] || [ -z "$_boot_line" ] || [ -z "$_loop_line" ]; then
+  bad "定位失败（看门狗=${_wd_line:-?} 等待=${_boot_line:-?} 循环=${_loop_line:-?}）"
+elif [ "$_boot_line" -lt "$_loop_line" ]; then
+  ok "看门狗在进入循环前等待开机完成"
+else
+  bad "看门狗没等开机就开始巡检（等待在第 ${_boot_line:-?} 行，循环在第 $_loop_line 行）"
+fi
+
+# 运行期断言：getprop 一直报「还没开机完成」时，等满上限后仍要启动 ——
+# 以前是无限 until，getprop 不可用时服务永远起不来。
+build
+# 启停脚本换成只记录调用的桩，这样「有没有拉起」完全由 calls.log 说话
+printf '#!/bin/sh\necho "STUB service $*" >> %s/calls.log\nexit 0\n' "$B" > "$B/scripts/magpie.service"
+chmod 755 "$B/scripts/magpie.service"
+# getprop 一直报「还没开机完成」：等满上限后必须继续，不能永远卡住
+mkdir -p "$B/stub"
+printf '#!/bin/sh\nexit 0\n' > "$B/stub/getprop"
+chmod 755 "$B/stub/getprop"
+MAGPIE_BOOT_WAIT_SECS=2 PATH="$B/stub:$PATH" sh "$B/service.sh" >/dev/null 2>&1 &
+SVC=$!
+KIDS="$KIDS $SVC"
+i=0
+while [ "$i" -lt 40 ] && [ ! -s "$B/calls.log" ]; do
+  sleep 0.2; i=$((i + 1))
+done
+if grep -q "STUB service start" "$B/calls.log" 2>/dev/null; then
+  ok "等不到开机完成时超时后仍会启动（不会永远卡住）"
+else
+  bad "getprop 不报开机完成时服务一直没启动"
+fi
+reap
+
+echo
+echo "== 8 start：服务必须脱离调用者的会话"
+# 这条拦的是一个真实事故：从管理器 [执行]、Termux、或任何「跑完就清理
+# 子进程组」的宿主里 start，父进程一退出整组被收，服务表现为
+# 「启动成功、二三十秒后自己没了」。修复靠 setsid。
+if ! command -v setsid >/dev/null 2>&1; then
+  echo "  SKIP  没有 setsid（服务会退回旧行为，不切会话）"
+else
+  build
+  mkdir -p "$B/bin"
+  # 进程判定全部打桩：沙箱与宿主共享 /proc，不打桩 start 会看到真实那个
+  # magpie 并直接「已在运行」早退，测不到启动路径。
+  stub_lib "magpie_main_pid() { return 1; }"
+  stub_lib "magpie_all_pids() { return 0; }"
+  # 假本体：记下自己的 pid 再顶住，方便回头查它的会话号
+  printf '#!/bin/sh\necho $$ > %s/fake.pid\nexec sleep 200\n' "$B" > "$B/bin/magpie"
+  chmod 755 "$B/bin/magpie"
+  _my_sid=$(awk '{print $6}' /proc/$$/stat 2>/dev/null)
+
+  # 只取 start 结果，不关心 --version 之类；6 秒就绪等待可以接受
+  sh "$B/scripts/magpie.service" start >/dev/null 2>&1
+
+  _fp=$(cat "$B/fake.pid" 2>/dev/null)
+  sleep 0.5
+  if [ -z "$_fp" ]; then
+    bad "假本体没被启动（start 没跑到 launch）"
+  else
+    _fsid=$(awk '{print $6}' /proc/"$_fp"/stat 2>/dev/null)
+    if [ -n "$_fsid" ] && [ "$_fsid" != "$_my_sid" ]; then
+      ok "服务跑在独立会话里（sid=$_fsid，调用者 sid=$_my_sid）"
+    else
+      bad "服务仍在调用者的会话里（sid=${_fsid:-?}，调用者 $_my_sid），父进程退出就会被连带收掉"
+    fi
+    kill -9 "$_fp" 2>/dev/null
+    pkill -f "$B/bin/magpie" 2>/dev/null
+  fi
+  rm -f "$B/fake.pid" "$B/data/certs/ca-bundle.crt"* 2>/dev/null
+fi
 
 reap
 echo

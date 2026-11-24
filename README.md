@@ -56,7 +56,7 @@
 | 能力 | 说明 |
 | --- | --- |
 | 开机自启 | 等 `sys.boot_completed` 后拉起，不阻塞开机 |
-| 进程守护 | 20 秒巡检，被杀或回收后自动拉回；用户主动停止时不强行恢复 |
+| 进程守护 | 30 秒巡检，被杀或回收后自动拉回；用户主动停止时不强行恢复 |
 | 音量键菜单 | 点 `[执行]` 开菜单：切网关、看接入信息、启停、重启、开面板，音量键选、不用打字 |
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
 | 自检 | `scripts/doctor.sh` 九项检查，直接告诉你哪里不对、下一步做什么 |
@@ -452,10 +452,28 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `magpie_path` | `/data/adb/magpie` | 数据目录，二进制 / 日志 / magpie 自身数据都在里面 |
-| `MAGPIE_ADDR` | `127.0.0.1:3425` | API 网关监听地址 |
-| `MAGPIE_WEB_ADDR` | `127.0.0.1:3430` | WebUI 监听地址；留空则用 `MAGPIE_ADDR` 的 host + 3430 |
+| `MAGPIE_ADDR` | `127.0.0.1:3425` | API 网关监听地址，**必须写成 `主机:端口`** |
+| `MAGPIE_WEB_ADDR` | `127.0.0.1:3430` | WebUI 监听地址；留空则用 `MAGPIE_ADDR` 的主机 + 3430 |
 | `MAGPIE_DNS` | `223.5.5.5 119.29.29.29 8.8.8.8` | 上游 DNS，空格分隔；写进模块覆盖的 `/etc/resolv.conf`，改完重启服务生效 |
 | `MAGPIE_ICON` | `1` | 管理器状态图标：`1` 用 🟢/🔴，`0` 用 `[运行中]`/`[已停止]` |
+| `MAGPIE_WATCH_INTERVAL` | `30` | 看门狗巡检间隔（秒）。拉起失败时按这个值起算指数退避，最长 10 分钟 |
+| `MAGPIE_DL_TIMEOUT` | `1800` | 下载本体的**总**时限（秒） |
+| `MAGPIE_DL_STALL` | `60` | 下载的停滞超时（秒）：这么久没有任何数据就放弃 |
+
+关于监听地址的三条硬规则，写错了会直接被拦下来，不会「装成没事」：
+
+- **端口必须写**。`MAGPIE_ADDR=127.0.0.1`（漏端口）会让 `magpie.service start` 直接拒绝启动，
+  `[执行]` 里也会明确说要改成 `主机:端口`。以前这里会静默退回 3425，于是面板拿到一份非法
+  `status.json`、地址被拼成 `http://127.0.0.1:127.0.0.1/v1`，反而更难查。
+- **端口必须是 1–65535 的纯数字**。`0`、`99999`、`0x10b1`、带前导零的 `03425` 都算非法。
+- **IPv6 要带方括号**：`[::1]:3425`。不带方括号时最后一个冒号分不清是端口还是地址的一部分。
+  `[::1]:3425`、`::1`、`localhost`、`127.0.0.1` 都按「仅本机」处理，不会被报成已开放局域网。
+
+`MAGPIE_DNS` 里写错的项会被跳过并在日志里逐个点名（例如
+`MAGPIE_DNS 里这些项不是合法地址, 已跳过: 8.8.8`），**其余合法项照常生效**——
+一个笔误不该连累整份配置。一条合法地址都不剩时才保留原有 DNS 不动。
+校验只看格式：`192.168.1.1` 这类路由器 DNS、甚至 `127.0.0.1`（设备上自己跑 DNS 时）都允许，
+能不能连通是运行时的事，`doctor.sh` 会实际查一次。
 
 脚本按顺序找配置文件：`MAGPIE_CONF`（显式指定，排障与测试用）→ `/data/adb/magpie/scripts/magpie.config`（用户改的那份）→ 模块里的 `scripts/magpie.config`。所以**改配置请改数据目录那份**，它不会被模块更新覆盖；都不在时使用内置默认值，且默认全部监听 `127.0.0.1`。
 
@@ -491,7 +509,9 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | 本体装完跑不起来 | 首次安装会把样本留在 `bin/magpie.rejected` 并报出摘要；已装过则自动回退到 `bin/magpie.bak` |
 | 想退回上一版本体 | `install.sh rollback` |
 | 启动失败，日志说端口占用 | 上次进程没退干净，`pidof magpie` 确认后 kill，再 `start` |
-| 面板数据一动不动 | 属预期：webroot 面板读的是 `status.json`，即启停那一刻的快照 |
+| 面板数据一动不动 | 先看状态栏的「数据 HH:MM:SS」：默认约 2.5 分钟刷一次，属正常。若超过 5 分钟没变，多半是看门狗没在跑（`run/watchdog.log` 里应有每轮的记录） |
+| 管理器显示「配置有误 / 端口不可用」 | `MAGPIE_ADDR` / `MAGPIE_WEB_ADDR` 写成了 `127.0.0.1` 这种没有端口的地址。改成 `主机:端口`（IPv6 用 `[::1]:3425`）再重启 |
+| 面板整份打不开，JSON 解析失败 | 旧版本在端口写错时会写出非法 `status.json`；升到 v1.0 后 `cat` 一下确认 `configError` 字段，按提示改配置 |
 | HTTPS 报证书错误 | 删掉 `/data/adb/magpie/data/certs/ca-bundle.crt*` 再重启，会自动重建 |
 | 原生通道报 `lookup ... on [::1]:53: connection refused` | Go 没有可用上游。`cat /etc/resolv.conf` 看覆盖在不在；不在就重启一次手机，再跑 doctor 的 `[8/9] DNS 解析` |
 | 停止后又自己起来 | 属预期：看门狗会把意外退出的进程拉回。要彻底关掉自愈，停用整个模块 |
@@ -506,7 +526,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 flowchart TD
   subgraph phone["手机"]
     MGR["Magisk / KernelSU 管理器"] -->|"service.sh 开机拉起"| SVC["magpie serve<br/>网关 :3425 · 面板 :3430"]
-    WD["看门狗<br/>每 20 秒巡检"] -.->|"进程没了就拉回"| SVC
+    WD["看门狗<br/>每 30 秒巡检"] -.->|"进程没了就拉回"| SVC
     SVC -->|"status.sh"| SJ["webroot/status.json"]
     SJ -.->|"KernelSU WebUI 读"| WP["模块 webroot 面板"]
   end
@@ -519,7 +539,7 @@ flowchart TD
 <details>
 <summary>三个入口脚本各做什么（点开展开）</summary>
 
-- **`service.sh`**：开机后等 `sys.boot_completed=1`，归档日志、启动服务、刷新状态；另外常驻一个 20 秒巡检的看门狗，发现进程没了就重新拉起。模块被禁用、正在卸载或目录被删时，看门狗自行退出。
+- **`service.sh`**：开机后等 `sys.boot_completed=1`，归档日志、启动服务、刷新状态；另外常驻一个 30 秒巡检的看门狗，发现进程没了就重新拉起。模块被禁用、正在卸载或目录被删时，看门狗自行退出。
 - **`action.sh`**：`[执行]` 菜单。用音量键选动作（切网关 / 看地址 / 启停 / 重启 / 开面板 / 退出），也支持 `status`、`gateway`、`lan`、`local`、`start`、`stop`、`restart`、`panel` 子命令。读不到音量键时退回老式一键启停；每次动作后刷新模块描述。
 - **`scripts/magpie.service`**：真正的服务控制。启动前清理 v0.2 遗留的 dnsmasq、注入环境变量、拉起 `magpie serve --web=<addr>`、写 PID 与面板链接。
 
@@ -554,16 +574,22 @@ magpie-magisk/
 │   ├── status.sh                     生成状态描述、status.json、日志尾
 │   ├── install.sh                    检测 / 下载 / 校验 / 部署本体
 │   ├── doctor.sh                     九项自检
-│   ├── lib.sh                        局域网地址 + 进程识别 + 本体可用性，各脚本共用
+│   ├── lib.sh                        地址解析 + 局域网地址 + 进程识别 + DNS/IP 校验，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
 │   └── magpie.config                 配置（默认值）
+├── tests/
+│   ├── test-lib.sh                   lib.sh 纯函数：地址切分、端口边界、IP 校验、JSON 转义
+│   ├── test-install.sh / test-service.sh / test-action.sh / test-watchdog.sh
+│   └── make-fixtures.py             生成安装器夹具（--base 指定清单里的服务地址）
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
 ├── docs/
 │   ├── panel.png                     README 里的 P2 截图（webroot 面板）
 │   ├── panel-magpie.jpg              README 里的 P1 截图（magpie 本体界面）
 │   └── social-preview.png            仓库 Social preview 用图（1280×640）
-├── .github/workflows/release.yml     tag → 打包 → 发版 → 回写 update.json
+├── .github/workflows/
+│   ├── ci.yml                        每次 push：sh -n 语法检查 + 全部测试套件
+│   └── release.yml                   tag → 打包 → 发版 → 回写 update.json
 └── META-INF/com/google/android/      Magisk 刷机脚本
 ```
 
@@ -612,7 +638,10 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - 安装器**只支持 arm64**：发布页里没有 arm32 / x86_64 的 Android 构建，非 arm64 设备会直接拒绝，而不是装错架构。
 - 安装器只负责「首次安装」。**已装好的本体不会被它升级**，升级请用 `magpie update`（本体自带、跟着厂商走）。
 - 摘要来自 usemagpie.ai 的清单，未做 GPG 签名验证；见[安装本体](#安装本体让模块来做)。
-- webroot 面板的运行时长、内存、日志尾是**启停时的快照**，不随时间刷新。
+- webroot 面板**不是实时监控**。面板每 5 秒重读一次 `status.json`，而这份文件由
+  事件（启停、切网关、局域网地址变化）触发重写，另外看门狗每 5 轮（默认约 2.5 分钟）
+  刷一次。所以运行时长、内存最多滞后两三分钟；状态栏上的「数据 HH:MM:SS」就是上次
+  写入的时刻。要看当前这一刻的真实情况用 `doctor.sh`。
 - 不含 magpie 本体；本体更新由 magpie 自己负责，模块只管调度。
 - KernelSU / APatch 的路径都已经在脚本里覆盖（`ksud`、`/data/adb/ap/bin`、`/data/adb/ksud`），但**只在 Magisk 31.1 上实测过**，KernelSU / APatch 未实测。
 - 只在 arm64 + Android 14（HyperOS 2.0）实测；理论上 Android 10+ 的 arm64 设备都适用。
@@ -625,12 +654,23 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 39 条
-sh tests/test-watchdog.sh                                 # 看门狗 8 条
+sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
-sh tests/test-service.sh                                  # 进程与目录 13 条
+sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 20 条
+sh tests/test-lib.sh                                      # 地址/IP/JSON/tag/CA 纯函数 110 条
 ```
 
-四个套件共 100 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+五个套件共 222 条断言，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
+会出现一堆「下载失败」的假失败：
+
+```sh
+TEST_SRV=http://127.0.0.1:18999
+python3 tests/make-fixtures.py /tmp/fx --base "$TEST_SRV"
+(cd /tmp/fx && python3 -m http.server 18999) &
+TEST_SRV="$TEST_SRV" sh tests/test-install.sh
+```
+
 `.github/workflows/ci.yml` 在每次推 main 和 PR 时跑同一套；发版工作流打包前也会先跑。
 细节与已知缺口见 [tests/README.md](tests/README.md)。
 

@@ -1,16 +1,44 @@
 # 测试
 
-四个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程被桩替代。
-合计 100 条断言（39 + 8 + 40 + 13），在桌面 Linux 与 Android 上各跑一遍都是全通过。
+五个脚本，都不碰真实运行的 magpie：所有目录都在临时位置，服务进程被桩替代。
+合计 222 条断言（39 + 13 + 40 + 20 + 110）。
+
+- **桌面 Linux**：五套全过（`/bin/sh` 是 dash 或 bash 都试过）。
+- **真机 Android**：`test-lib` / `test-watchdog` / `test-service` 直接 `sh tests/xxx.sh` 就能跑，
+  会自动挑一个可写的临时目录（Android 上没有 `/tmp`）；
+  `test-install` 与 `test-action` 需要一个静态文件服务，设备上没有 `python3` 时跑不了。
+  这三套在 mksh + toybox 下实测：108 / 13 / 20 全过（lib 里有两条 JSON 校验需要 python3，自动 SKIP）。
 
 | 套件 | 断言数 | 测什么 |
 | --- | --- | --- |
 | `test-install.sh` | 39 | 安装器的 17 个用例 |
-| `test-watchdog.sh` | 8 | 看门狗的决定逻辑 |
+| `test-watchdog.sh` | 13 | 看门狗的决定逻辑（含循环体抽取自检） |
 | `test-action.sh` | 40 | `[执行]` 菜单：安装分支、退路一键启停、子命令、按键解析、两种界面模式、收尾关窗口 |
-| `test-service.sh` | 13 | 进程清理、开机目录、配置路径、DNS 生成 |
+| `test-service.sh` | 20 | 进程清理、开机目录、配置路径、DNS 生成、状态输出与配置来源、看门狗等开机、服务脱离调用者会话 |
+| `test-lib.sh` | 110 | `lib.sh` 纯函数：地址切分、端口边界、回环判定、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转 |
 
-需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service 不需要。
+需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service、lib 不需要。
+换端口跑时，夹具必须用同一地址生成，否则清单里的下载地址对不上，会看到一堆假失败：
+
+```sh
+TEST_SRV=http://127.0.0.1:18999
+python3 tests/make-fixtures.py /tmp/fx --base "$TEST_SRV"
+```
+
+## lib.sh 的纯函数
+
+```sh
+sh tests/test-lib.sh
+```
+
+表驱动，直接 source `scripts/lib.sh`，不碰进程和文件。覆盖四类曾经出错的地方：
+
+1. **地址切分**：`127.0.0.1`（漏端口）、`127.0.0.1:0`、`:65536`、`[::1]:3425`
+   分别该被切开还是判错 —— 这条正是「漏端口写出非法 status.json」的入口；
+2. **回环判定**：`127/8`、`localhost`、`::1`、`[::1]` 都算仅本机；
+3. **IP 格式**：`abc`、`999.999.999.999`、`8.8.8`、`01.2.3.4`、`1::2::3` 都要被拒，
+   合法的 IPv4/IPv6（含 `::ffff:1.2.3.4`）要放行；
+4. **JSON 转义**：引号、反斜杠、换行不能把 `status.json` 变成非法 JSON。
 
 ## 看门狗决定逻辑
 
@@ -25,6 +53,13 @@ sh tests/test-watchdog.sh
 3. 拉起成功时不报失败；
 4. `run/.user_stopped` 存在时不拉起。
 
+抽取按 `service.sh` 里的 `#<<< WATCHDOG-BODY` / `#>>> WATCHDOG-BODY` 两个标记走，
+不靠缩进猜。以前是「从 `sleep "$_wait"` 到第一个两空格缩进的 `done`」——
+给等待函数加个 `until…done` 之后，抽出来就变成空的了，而且失败信息会指向
+「没有记录」「没有拉起」，看不出根因。现在先自检抽到多少行、是否含关键行，
+再往下跑断言。（`sleep "$_wait"` 故意留在标记外面：测试里 `_wait` 会涨到几百秒，
+真睡下去会把测试拖成几分钟。）
+
 ## `[执行]` 按钮的分支
 
 ```sh
@@ -33,7 +68,8 @@ python3 tests/make-fixtures.py /tmp/fx
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
 ```
 
-4 个用例，只验分支选择，不验启停实现：
+这一节是整套 14 组里的 4 个「分支选择」用例，只看选了哪条路，不验启停实现
+（启停、子命令、按键解析、界面模式在后面的组里）：
 
 1. 本体缺失 → 进安装流程，**不调用启停**，也不提前下载；
 2. 本体损坏 → 同样进安装流程；
@@ -54,7 +90,7 @@ python3 tests/make-fixtures.py /tmp/fx
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 ```
 
-覆盖 16 个用例：
+覆盖 17 个用例（表格即清单）：
 
 | # | 用例 |
 | --- | --- |

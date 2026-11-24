@@ -12,10 +12,19 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC="$HERE/../scripts/install.sh"
 SRV=${TEST_SRV:-}
-BASE=${TEST_BASE:-/tmp/magpie-install-test}
+# 临时目录：Android 上没有 /tmp，退到 TMPDIR 或 /data/local/tmp
+if [ -d /tmp ] && [ -w /tmp ]; then
+  _TMPBASE=/tmp
+else
+  _TMPBASE=${TMPDIR:-/data/local/tmp}
+fi
+BASE=${TEST_BASE:-$_TMPBASE/magpie-install-test}
 PASS=0; FAIL=0
 
 [ -n "$SRV" ] || { echo "请设置 TEST_SRV，例如 TEST_SRV=http://127.0.0.1:8899"; exit 2; }
+# 清单里的下载地址是生成时写死的：换了端口就必须用 --base 重新生成，
+# 否则会出现一堆「下载失败」的假失败。
+echo "提示：夹具要与地址对应：python3 tests/make-fixtures.py <dir> --base $SRV"
 
 ok()   { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
