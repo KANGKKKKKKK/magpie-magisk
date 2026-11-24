@@ -117,31 +117,29 @@ magpie_norm_path() {
   echo "$_p"
 }
 
-# 这个路径是不是「绝不能删」的那一类。返回 0 表示可以删。
+# 这个路径是不是「可以整目录删掉」。返回 0 表示可以删。
 # 传进来的路径会先归一化，所以 "/data/" 与 "/data" 等价。
+#
+# 判定方式是**白名单**：只放行本模块自己的位置，其它一律拒绝。
+#
+# 为什么不用黑名单（枚举危险路径）：黑名单每加一条都得靠记性，而漏一条的
+# 代价是 rm -rf 掉整个系统。/data/adb 下面是 Root 方案的命脉（magisk / ksu /
+# ap / magisk.db / service.d），/data/misc/wifi 存着所有 WiFi 密码，
+# /data/user/0/* 与 /data/data/* 是同一 inode —— 这些都不在「危险清单」里时
+# 就会被当成普通目录删掉。
+#
+# 代价：用户把 magpie_path 自定义到别处时，卸载不再自动删除该目录
+# （uninstall.sh 会打印「跳过可疑路径，请手动确认」）。
+# 这比「配置写错一个词就删掉 magisk.db」划算得多。
 magpie_path_cleanable() {
   _c=$(magpie_norm_path "$1" 2>/dev/null) || return 1
 
-  # 精确拦：这些目录本身绝不能被整个删掉
   case "$_c" in
-    ''|/|/data|/data/adb|/data/adb/modules|/data/local|/data/app|/data/data|/data/system)
-      return 1 ;;
-    /sdcard|/storage|/storage/emulated|/storage/emulated/0)
-      return 1 ;;
-    /mnt|/system|/vendor|/product|/apex)
-      return 1 ;;
+    /data/adb/magpie|/data/adb/magpie/*) return 0 ;;
+    /data/adb/modules/magpie|/data/adb/modules/magpie/*) return 0 ;;
   esac
 
-  # 前缀拦：这些目录下面的任何东西也不删。
-  # /data/adb/modules/<某个模块> 不在此列 —— 那正是要删的目标。
-  case "$_c" in
-    /data/adb/modules/*/*) return 1 ;;
-    /sdcard/*|/storage/*|/mnt/*) return 1 ;;
-    /system/*|/vendor/*|/product/*|/apex/*) return 1 ;;
-    /data/local/*|/data/app/*|/data/data/*|/data/system/*) return 1 ;;
-  esac
-
-  return 0
+  return 1
 }
 
 # ---------- 局域网地址 ----------

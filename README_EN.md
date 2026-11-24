@@ -716,10 +716,10 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 46 assert
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
 sh tests/test-service.sh                                  # process, dirs, status, session, 26 assertions
-sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA, 177 assertions
+sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA, 192 assertions
 ```
 
-302 assertions total (46 + 13 + 40 + 26 + 177), plus 13 JVM cases in `tests/jvm/`. All run in temp
+317 assertions total (46 + 13 + 40 + 26 + 192), plus 13 JVM cases in `tests/jvm/`. All run in temp
 directories with stubbed process checks — a running service is
 never touched. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the

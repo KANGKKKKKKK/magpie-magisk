@@ -1,5 +1,39 @@
 # 变更记录
 
+## v1.2.3 — 2026-11-24
+
+第三轮复审的修复：一个能删到系统命脉的白名单、一个永远不匹配的判据，
+以及「在系统设置里隐藏」那一半没接上。
+
+### 修法
+
+| 位置 | 问题 | 做什么 |
+| --- | --- | --- |
+| `lib.sh` `magpie_path_cleanable()` | 白名单是**枚举危险路径**：`/data/adb/magisk`、`/data/adb/magisk.db`、`/data/adb/service.d`、`/data/misc/wifi`、`/data/user/0/*` 都不在清单里，配置写错一个词就 `rm -rf` | 改成**默认拒绝**，只放行 `/data/adb/magpie` 与 `/data/adb/modules/magpie` |
+| `tile-app.sh` `tile_reconcile_launcher()` | `pm dump` 的 `disabledComponents` 段以**空行**结束（不是 `}`）；段内写的是 `com.ruin.magpie.tile.Launcher`，不是 `包名/.Launcher` —— grep 永远不匹配，每次开机白跑一次 `pm disable` | 截到空行为止 → 去首尾空白 → 整行字面匹配完整类名 |
+| `LauncherIcon.reconcile()` | `!want && systemHidden` 这一支（用户在系统设置里停用）只改 prefs、没写标记文件，系统重置后开机找不到标记就不补隐藏 | 补 `writeFlag(true)` |
+| `LauncherIcon.writeFlag()` | 写入失败被静默吞掉 | 失败时 `Log.w` 留痕 |
+| `Shell.java` | 两段重复 javadoc | 合并成一段 |
+
+### 行为变化
+
+自定义 `magpie_path` 到本模块两个位置之外的用户，**卸载时不再自动删除该目录**，
+会打印「跳过可疑路径，请手动确认」。这是有意的取舍：白名单漏一条的代价是
+`rm -rf` 掉 `magisk.db` 或 `/data/misc/wifi`（WiFi 密码），不值得为省一次手动删除去冒险。
+
+### 验证
+
+- 真机核对 `pm dump` 真实格式：段落以空行结束、组件名是完整类名
+- 真机确认 `/data/adb/magpie/run` 实际是 `0777`；文档此前写「run 是 0700」是错的，
+  真正的屏障是父目录 `/data/adb` 的 `0700` —— 两处文档已更正
+- `test-lib.sh` 新增 15 条：`magisk` / `ksu` / `ap` / `magisk.db` / `service.d` /
+  `misc/wifi` / `user/0` 一律拒绝，本模块路径仍放行；`pm dump` 的 stub 改成真实格式
+- 合计 317 条（46 + 13 + 40 + 26 + 192），另有 13 条 JVM 用例
+
+### 已知降级
+
+自定义安装位置不再自动清理（见「行为变化」）。
+
 ## v1.2.2 — 2026-11-24
 
 修「隐藏过的桌面图标会自己冒出来」。
@@ -219,7 +253,7 @@ alias 要指向 MainActivity、MainActivity 自己不能带 LAUNCHER 类别、
 - **磁贴不主动弹 root 授权框**：`TileService` 在后台跑，弹不出系统对话框。
   所以 App 有一个极简界面，首次打开时请求授权——这是它存在界面的唯一理由。
   没授权就点磁贴，磁贴显示「需要 root」并置灰。
-- **状态缓存 5 秒**：`/data/adb/magpie/run` 是 0700 root，App 读不到，
+- **状态缓存 5 秒**：`/data/adb` 是 0700 root，App 读不到模块的 run 目录，
   状态也只能走 su。不缓存的话每次展开控制中心都要 fork 一次 su。
 - **点击先显示「处理中」**：启动 magpie 要几秒，没有即时反馈用户会以为没点上。
 - **su 路径不写死**：按 `su`、`/system/bin/su`、`/system/xbin/su`、`/sbin/su`、

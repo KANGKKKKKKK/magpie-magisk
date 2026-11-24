@@ -92,7 +92,13 @@ final class LauncherIcon {
             if (!want && systemHidden) {
                 // 用户想要显示，但系统是禁用 —— 多半是用户自己在系统设置里关的，
                 // 不擅自打开，只把记录对齐，避免下次又反过来改。
+                //
+                // 同时必须补写标记：否则这条链只覆盖了「在 App 里点隐藏」那一半。
+                // 用户在系统设置里停用图标后，记录变成「已隐藏」而标记文件不存在；
+                // 一旦系统重置（覆盖安装/清除数据/部分系统更新），开机时找不到标记
+                // 就不会补隐藏，图标又冒出来 —— 正是 v1.2.2 要解决的那个场景。
                 p.edit().putBoolean(KEY_HIDDEN, true).apply();
+                writeFlag(true);
                 return false;
             }
         } catch (Throwable ignored) {
@@ -130,7 +136,7 @@ final class LauncherIcon {
     }
 
     /**
-     * 把意图同步到模块目录（经 su）。失败不影响主流程 ——
+     * 把意图同步到模块目录（经 su）。失败不阻断主流程 ——
      * 只是开机时不会自动补隐藏，用户下次打开 App 仍会自己对账。
      */
     private static void writeFlag(boolean hidden) {
@@ -141,7 +147,12 @@ final class LauncherIcon {
         Shell.run(cmd, new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                // 忽略结果
+                if (!r.ok) {
+                    // 不能静默：写不进去时「开机自动恢复图标」不会生效，
+                    // 只能等用户下次打开 App 时对账。留日志便于 logcat 定位。
+                    android.util.Log.w("MagpieTile",
+                            "标记文件写入失败，开机不会自动恢复隐藏: " + r.err);
+                }
             }
         });
     }

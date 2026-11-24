@@ -64,25 +64,16 @@ final class Shell {
     /**
      * 执行 su 的线程池。
      *
-     * <p>必须是守护线程且允许空闲回收 —— 否则点过一次磁贴后，这个池的核心线程
-     * 会一直活着，Java 进程只要还有非守护线程就不会退出，表现为
-     * 「用了一次磁贴，App 就常驻内存」。磁贴本身是绑定服务，收起控制中心
-     * 就该被销毁，不该因为一个线程池把整个进程留住。
-     *
-     * <p>allowCoreThreadTimeOut(true) + 5 秒空闲回收：点击后线程很快消失，
-     * 进程没有其他组件时自然被系统回收，不占内存也不耗电。
-     */
-    /**
-     * 执行 su 的线程池。
-     *
      * <p>直接构造 ThreadPoolExecutor，不用 {@code Executors.newFixedThreadPool}：
      * 后者造出来的 keepAliveTime 是 0，而「核心线程可超时回收」要求它非 0，
      * 于是必须先 setKeepAliveTime 再 allowCoreThreadTimeOut —— 两句写反就抛
      * IllegalArgumentException，且发生在类初始化里，整个 App 起不来。
      * 一次给全参数就没有这个顺序依赖。
      *
-     * <p>守护线程 + 5 秒空闲回收：磁贴是绑定服务，收起控制中心后进程不该被
-     * 一个线程池留住。
+     * <p>必须是守护线程且允许空闲回收：否则点过一次磁贴后，这个池的核心线程
+     * 会一直活着，Java 进程只要还有非守护线程就不会退出，表现为
+     * 「用了一次磁贴，App 就常驻内存」。磁贴是绑定服务，收起控制中心后就该被
+     * 销毁 —— 5 秒空闲回收后线程消失，进程没有其他组件时自然被系统回收。
      */
     private static final ThreadPoolExecutor POOL = new ThreadPoolExecutor(
             2, 2,

@@ -304,12 +304,17 @@ else
 fi
 
 echo "== 15 路径白名单（卸载 / 安装共用）"
-# 这一组守的是一个数据毁灭风险：case 整串匹配时 "/data/" 匹配不上 "/data"，
-# 会落到「是绝对路径就放行」那一支，于是 rm -rf /data。
+# 判定是「白名单」：只放行本模块自己的位置，其它一律拒绝。
+# 守的是数据毁灭风险 —— 以前是枚举危险路径，漏一条就会 rm -rf 掉
+# magisk.db、/data/misc/wifi（WiFi 密码）或 /data/user/0/*（与 /data/data 同一 inode）。
 for bad in /data /data/ /data// /data/// /data/adb /data/adb/ /data/adb/modules \
            /data/adb/modules/ / /sdcard /sdcard/ /storage /storage/emulated/0 \
            /mnt /mnt/ /system /system/ /vendor /data/local /data/app /data/data /data/system \
-           /data/adb/modules/magpie/scripts relative ''; do
+           /data/adb/magisk /data/adb/ksu /data/adb/ap /data/adb/ksud \
+           /data/adb/magisk.db /data/adb/post-fs-data.d /data/adb/service.d \
+           /data/misc /data/misc/wifi /data/user/0/com.example /data/user_de/0/com.example \
+           /data/adb/modules/other /tmp/magpie-install-test \
+           /data/local/tmp/magpie relative ''; do
   if magpie_path_cleanable "$bad"; then
     bad "危险路径被放行：[$bad]"
   else
@@ -326,8 +331,9 @@ for bad in /data/../data /data/foo/../data /data/adb/magpie/../../.. /data//adb 
   fi
 done
 
-# 真正的目标必须仍然可删
-for good in /data/adb/magpie /data/adb/modules/magpie /tmp/magpie-install-test; do
+# 本模块自己的位置必须仍然可删
+for good in /data/adb/magpie /data/adb/magpie/run /data/adb/magpie/data \
+            /data/adb/modules/magpie /data/adb/modules/magpie/scripts; do
   if magpie_path_cleanable "$good"; then ok "允许删除 $good"
   else bad "把正常目标也拦了：$good"; fi
 done
@@ -393,7 +399,7 @@ echo "== 18 桌面图标的开机对账（tile_reconcile_launcher）"
 _tl="${TEST_BASE:-$_TMPBASE}/magpie-tl-test"
 rm -rf "$_tl"; mkdir -p "$_tl/bin" "$_tl/run"
 cp "$HERE/../scripts/tile-app.sh" "$_tl/"
-printf '#!/bin/sh\ncase "$1" in\n  dump)\n    if [ "${FAKE_DISABLED:-}" = "1" ]; then printf "  disabledComponents:\\n    com.ruin.magpie.tile/.Launcher\\n"; else printf "  disabledComponents:\\n"; fi ;;\n  disable) echo disabled; exit 0 ;;\n  uninstall) echo Success ;;\nesac\n' > "$_tl/bin/pm"
+printf '#!/bin/sh\ncase "$1" in\n  dump)\n    if [ "${FAKE_DISABLED:-}" = "1" ]; then printf "      disabledComponents:\\n        com.ruin.magpie.tile.Launcher\\n\\nQueries:\\n"; else printf "      disabledComponents:\\n\\nQueries:\\n"; fi ;;\n  disable) echo disabled; exit 0 ;;\n  uninstall) echo Success ;;\nesac\n' > "$_tl/bin/pm"
 chmod 755 "$_tl/bin/pm"
 
 # 1) 没有标记 → 不动

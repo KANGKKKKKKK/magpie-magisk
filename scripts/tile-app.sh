@@ -66,9 +66,24 @@ tile_reconcile_launcher() {
   _flag="$_run_dir/$TILE_LAUNCHER_FLAG"
   [ -f "$_flag" ] || return 0
   _comp="$TILE_PKG/.Launcher"
-  # 已经在禁用列表里就不动
-  pm dump "$TILE_PKG" 2>/dev/null \
-    | sed -n '/disabledComponents/,/}/p' | grep -q "$_comp" && return 0
+
+  # 判断 alias 是否已经在禁用列表里。两个坑都是实测出来的：
+  #
+  #   1. pm dump 的 disabledComponents 段以**空行**结束，不是 "}"。
+  #      用 "/disabledComponents/,/}/" 取范围会一路吃到后面某个 "}"，
+  #      交给 grep 的内容远超这一段。
+  #   2. 段里写的是完整类名 com.ruin.magpie.tile.Launcher，**不是**
+  #      "com.ruin.magpie.tile/.Launcher"。拿后者去 grep 永远不匹配，
+  #      于是每次开机都白跑一次 pm disable（幂等，所以症状看不出来）。
+  #
+  # 这里改成：截到空行为止 → 去首尾空白 → 整行字面匹配完整类名。
+  if pm dump "$TILE_PKG" 2>/dev/null \
+    | sed -n '/^[[:space:]]*disabledComponents:/,/^[[:space:]]*$/p' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -qxF "${TILE_PKG}.Launcher"; then
+    return 0
+  fi
+
   if pm disable --user 0 "$_comp" >/dev/null 2>&1; then
     echo "已按用户设置重新隐藏桌面图标"
     return 0

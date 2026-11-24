@@ -72,9 +72,12 @@ App 里有个「桌面图标」开关。隐藏之后桌面不再有图标，只�
 
 ## 状态怎么读
 
-`/data/adb/magpie/run/` 是 `0700 root`，普通 App 连目录都进不去，
-所以「读状态」也只能走 `su`。为了不让每次展开控制中心都 fork 一个 su，
-结果会缓存 5 秒。
+`/data/adb` 是 `0700 root`，普通 App 连这一级都进不去，所以读不到
+`/data/adb/magpie/run/` 下的任何东西 —— 「读状态」也只能走 `su`。
+为了不让每次展开控制中心都 fork 一个 su，结果会缓存 5 秒。
+
+（`run/` 目录自身的 mode 随模块创建时的 umask 而定，本机实测是 `0777`。
+但这一级之上是 `0700`，所以对普通 App 来说仍然不可达。）
 
 su 的路径不写死：按 `su`、`/system/bin/su`、`/system/xbin/su`、`/sbin/su`、
 `/debug_ramdisk/su`、`/data/adb/ksu/bin/su`、`/data/adb/ap/bin/su` 的顺序试，
