@@ -41,6 +41,28 @@ jobs:
           shellcheck -s sh -e SC1090,SC1091 \
             service.sh action.sh uninstall.sh customize.sh scripts/*.sh
 
+      - name: 磁贴 App 能编译
+        run: |
+          set -eu
+          # 不需要签名密钥，只验证源码与资源能过编译。
+          # 用了 android-34 的 android.jar：android-37.0 那种 preview 平台
+          # 没有完整属性表，会让 aapt 报一堆 No resource identifier。
+          JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          if [ ! -f "$JAR" ]; then
+            # runner 上没预装 android-34 时不要误报失败：这一步是加分项，
+            # 不是发布门槛（release.yml 里打包前也会真正构建一次）。
+            echo "::warning::runner 上没有 android-34，跳过编译检查"
+            exit 0
+          fi
+          W=$(mktemp -d)
+          aapt package -f -m -J "$W/gen" -M tile-app/AndroidManifest.xml \
+            -S tile-app/res -I "$JAR"
+          javac -source 8 -target 8 -bootclasspath "$JAR" -d "$W/classes" \
+            $(find tile-app/src "$W/gen" -name '*.java') 2>&1 \
+            | grep -vE 'bootstrap class path|source value 8|target value 8|obsolete|Xlint' || true
+          test -f "$W/classes/com/ruin/magpie/tile/MagpieTileService.class"
+          echo "磁贴 App 编译通过"
+
       - name: 测试
         run: |
           set -eu

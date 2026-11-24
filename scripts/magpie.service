@@ -434,5 +434,24 @@ case "$1" in
   stop)    stop;  sync_status ;;
   restart) stop; start; _rc=$?; sync_status; exit $_rc ;;
   status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
-  *)       echo "用法: $0 {start|stop|restart|status}"; exit 1 ;;
+
+  # 在跑就停，没跑就起。给磁贴 / 快捷方式用：一个动作，不用先判断状态。
+  # 停止走的是同一个 stop()，所以 .user_stopped 照样会写，看门狗不会又拉回来；
+  # start() 会清掉那个标记。
+  # 输出一行结果，方便调用方（磁贴、Tasker）直接展示。
+  toggle)
+    if pid=$(running); then
+      stop
+      sync_status
+      echo "stopped"
+      exit 0
+    fi
+    start
+    _rc=$?
+    sync_status
+    if [ "$_rc" = "0" ]; then echo "running"; else echo "failed"; fi
+    exit $_rc
+    ;;
+
+  *)       echo "用法: $0 {start|stop|restart|status|toggle}"; exit 1 ;;
 esac

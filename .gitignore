@@ -9,3 +9,12 @@ webroot/lastlog.txt
 data/
 run/
 dist/
+
+# 磁贴 App 的构建产物
+# magpie-tile.apk 不进仓库：它每次都该用同一把 key 重新签，
+# 把签好的二进制塞进 git 只会让人分不清哪份是新的。
+# 发版机没有密钥时 build.sh 会去找这个文件，所以它被忽略而不是删除。
+tile-app/build/
+tile-app/assets-src/
+magpie-tile.apk
+tile-version

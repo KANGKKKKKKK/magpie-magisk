@@ -63,11 +63,33 @@ wait_boot_completed() {
   return 0
 }
 
+# 刷机时没装成的磁贴 App，在这里补装。
+# 刷机脚本跑在独立的 mount namespace 里，pm 不一定能通；开机后系统完全起来了，
+# 这条路径可靠得多。只在有标记时才做，不打扰没选装的用户。
+install_pending_tile_app() {
+  _flag="$MP/run/.tile_pending"
+  [ -f "$_flag" ] || return 0
+  if [ ! -f "$MODDIR/scripts/tile-app.sh" ]; then
+    rm -f "$_flag" 2>/dev/null
+    return 0
+  fi
+  # shellcheck disable=SC1091
+  . "$MODDIR/scripts/tile-app.sh"
+  if tile_install "$MODDIR" >>"$WATCH_LOG" 2>&1; then
+    rm -f "$_flag" 2>/dev/null
+    echo "$(date +'%Y-%m-%d %H:%M:%S') 磁贴 App 已补装" >>"$WATCH_LOG" 2>/dev/null
+  else
+    # 装不上就留着标记，下一轮再试（比如用户刚开机还没解锁）
+    echo "$(date +'%Y-%m-%d %H:%M:%S') 磁贴 App 补装失败，稍后重试" >>"$WATCH_LOG" 2>/dev/null
+  fi
+}
+
 # 开机后拉起服务，不阻塞启动流程
 (
   wait_boot_completed
   # 等待期间模块可能被禁用（开机那几分钟足够点一下）
   [ -f "$MODDIR/disable" ] && exit 0
+  install_pending_tile_app
   rotate_log "$MP/run/magpie.log"
   # 启动日志留在看门狗日志里，否则开机时 stdout 直接丢弃
   sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1

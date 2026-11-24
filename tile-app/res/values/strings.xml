@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Magpie 磁贴</string>
+    <string name="tile_label">Magpie</string>
+
+    <!-- 磁贴副标题 -->
+    <string name="state_running">运行中</string>
+    <string name="state_stopped">已停止</string>
+    <string name="state_working">处理中…</string>
+    <string name="state_no_root">需要 root</string>
+    <string name="state_unavailable">模块未安装</string>
+
+    <!-- App 界面 -->
+    <string name="intro">这个 App 只做一件事：把 Magpie 的启动/停止放进控制中心。</string>
+    <string name="intro_detail">它不含 magpie 本体，也不代理任何流量。启停由模块脚本完成，App 通过 root 权限调用。</string>
+    <string name="label_status">当前状态</string>
+    <string name="btn_open_panel">打开面板</string>
+    <string name="btn_add_tile">添加到控制中心</string>
+    <string name="root_needed">磁贴需要 root 权限才能启停服务。点下面的按钮授权一次即可。</string>
+    <string name="btn_grant">授权 root</string>
+    <string name="root_ok">已获得 root 权限</string>
+    <string name="root_failed">没能获得 root 权限</string>
+    <string name="module_missing">没找到 magpie 模块（/data/adb/modules/magpie）。先刷入模块再来。</string>
+    <string name="tile_hint">装好后请在「控制中心 → 编辑」里把 Magpie 磁贴拖出来。</string>
+</resources>

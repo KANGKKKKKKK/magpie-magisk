@@ -279,6 +279,43 @@ else
   rm -f "$B/fake.pid" "$B/data/certs/ca-bundle.crt"* 2>/dev/null
 fi
 
+echo
+echo "== 9 toggle：在跑就停，没跑就起"
+# 磁贴与快捷方式只给一个动作，所以 toggle 必须自己判断方向，
+# 并且和 start/stop 走同一条路径（.user_stopped 语义不能丢）。
+build
+# 进程判定读 fake.pid：启动前文件不存在（=没在跑），起来后自然认得它。
+# 这样 toggle 的两个方向都能在沙箱里走完整路径。
+# 变量名必须避开脚本自己在用的 _p / _f / pid：那些是全局的，
+# 被 pin_oom、cleanup_legacy_dnsmasq 改过之后，stub 会读到别人的值。
+stub_lib "magpie_main_pid() { _stubf=\"$B/fake.pid\"; _stubp=\"\"; [ -s \"\$_stubf\" ] && _stubp=\$(cat \"\$_stubf\"); [ -n \"\$_stubp\" ] && [ -d \"/proc/\$_stubp\" ] && echo \"\$_stubp\"; }"
+stub_lib "magpie_all_pids() { return 0; }"
+mkdir -p "$B/bin"
+printf '#!/bin/sh\necho $$ > %s/fake.pid\nexec sleep 200\n' "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+
+# 情形一：没在跑 → 应该起来
+_out=$(sh "$B/scripts/magpie.service" toggle 2>&1)
+case "$_out" in
+  *running*) ok "没在跑时 toggle 返回 running" ;;
+  *) bad "没在跑时 toggle 输出不对：$_out" ;;
+esac
+_fp=$(cat "$B/fake.pid" 2>/dev/null)
+[ -n "$_fp" ] && ok "确实把进程起来了" || bad "toggle 没有启动进程"
+[ -f "$B/run/.user_stopped" ] && bad "启动后不该留 .user_stopped" || ok "启动清掉了停止标记"
+
+# 情形二：在跑 → 应该停，并写下停止标记（进程判定已经是读 fake.pid，无需再打桩）
+_out=$(sh "$B/scripts/magpie.service" toggle 2>&1)
+case "$_out" in
+  *stopped*) ok "在跑时 toggle 返回 stopped" ;;
+  *) bad "在跑时 toggle 输出不对：$_out" ;;
+esac
+sleep 0.5
+[ -d "/proc/$_fp" ] && bad "toggle 没停掉进程" || ok "进程已停"
+[ -f "$B/run/.user_stopped" ] && ok "停止写了 .user_stopped（看门狗不会拉回）" \
+  || bad "停止没写 .user_stopped，会被看门狗拉回来"
+kill -9 "$_fp" 2>/dev/null
+
 reap
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

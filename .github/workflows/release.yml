@@ -98,10 +98,25 @@ jobs:
           sh tests/test-lib.sh
 
       - name: 打包
+        env:
+          # 密钥以 base64 存在仓库 secret 里，用完即删。
+          # 没有这两个 secret 时也能打包，只是 zip 里不含磁贴 App。
+          KEYSTORE_B64: ${{ secrets.MAGPIE_KEYSTORE_B64 }}
+          MAGPIE_KS_PASS: ${{ secrets.MAGPIE_KS_PASS }}
         run: |
           set -eu
           mkdir -p dist
+          if [ -n "${KEYSTORE_B64:-}" ] && [ -n "${MAGPIE_KS_PASS:-}" ]; then
+            echo "有签名密钥，构建磁贴 App"
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/magpie-tile.jks"
+            export MAGPIE_KEYSTORE="$RUNNER_TEMP/magpie-tile.jks"
+            export MAGPIE_KS_PASS
+          else
+            echo "::warning::没有 MAGPIE_KEYSTORE_B64 / MAGPIE_KS_PASS，本次 zip 不含磁贴 App"
+          fi
           sh build.sh dist
+          # 用完立刻删掉，别留在 runner 上
+          rm -f "$RUNNER_TEMP/magpie-tile.jks"
           ls -l dist/
 
       - name: 校验 zip 结构
@@ -126,6 +141,16 @@ jobs:
               exit 1
             fi
           done
+          # 磁贴 App 是可选的：有就必须成对出现（apk + 版本号）
+          if unzip -l "$ZIP" | grep -qE " magpie-tile\.apk$"; then
+            if ! unzip -l "$ZIP" | grep -qE " tile-version$"; then
+              echo "::error::有 magpie-tile.apk 但缺 tile-version，安装器无法判断版本"
+              exit 1
+            fi
+            echo "含磁贴 App"
+          else
+            echo "::warning::本次 zip 不含磁贴 App"
+          fi
           echo "结构检查通过"
 
       - name: 发布 Release

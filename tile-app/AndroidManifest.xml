@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  磁贴伴侣 App：com.ruin.magpie.tile
+
+  它不是 magpie 本体，也不做代理：只负责把「启动/停止 magpie 服务」这件事
+  放进控制中心。真正的启停由模块里的 scripts/magpie.service toggle 完成，
+  App 只通过 su 调它。
+
+  minSdk 29：Tile.setSubtitle 需要 Q；再往下要写一堆兼容分支，
+  而这个模块本身就只支持 arm64 + 现代系统，没必要。
+  targetSdk 37：跟着最新版走，Android 17 上也不会因为「应用过旧」被限制。
+  注意 37 只是 manifest 里的一个数字，编译仍用 android-34 的 jar ——
+  本 App 没用到 35+ 的新接口，不需要更高的 compileSdk。
+  targetSdk 35+ 会强制 edge-to-edge，界面那边已经做了 insets 适配。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ruin.magpie.tile"
+    android:versionCode="3"
+    android:versionName="1.1.2">
+
+    <uses-sdk
+        android:minSdkVersion="29"
+        android:targetSdkVersion="37" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          磁贴服务。
+          BIND_QUICK_SETTINGS_TILE 是系统要求：只有 SystemUI 能绑定它。
+          exported=true 是必须的，否则 SystemUI 绑不上。
+          这里不声明 TOGGLEABLE_TILE / ACTIVE_TILE：
+          magpie 启停要几秒，做成「下拉栏直接点」会让用户误以为没反应。
+        -->
+        <service
+            android:name=".MagpieTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

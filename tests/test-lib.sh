@@ -229,6 +229,35 @@ if [ -f "$_rl/a.log.1" ] && [ ! -s "$_rl/a.log" ]; then ok "超阈值时归档�
 else bad "轮转结果不对（.1 存在=$( [ -f "$_rl/a.log.1" ] && echo y || echo n) 大小=$(stat -c %s "$_rl/a.log" 2>/dev/null)）"; fi
 rm -rf "$_rl" 2>/dev/null
 
+echo "== 13 磁贴 App 的版本比较"
+# tile-app.sh 决定「要不要装/更新」。判错的方向只有两种：
+# 该更新时不动（用户永远拿不到新版），或不该动时重装（每次开机都装一遍）。
+_ta=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/ta-$$")
+mkdir -p "$_ta/bin"
+cp "$HERE/../scripts/tile-app.sh" "$_ta/"
+printf '#!/bin/sh\ncase "$1" in\n  dump) [ -n "${FAKE_CODE:-}" ] && echo "    versionCode=${FAKE_CODE}" ;;\n  install) echo Success ;;\n  uninstall) echo Success ;;\nesac\n' > "$_ta/bin/pm"
+chmod 755 "$_ta/bin/pm"
+echo 2 > "$_ta/tile-version"
+: > "$_ta/magpie-tile.apk"
+
+# 没装 → 装
+_r=$(PATH="$_ta/bin:$PATH" FAKE_CODE= sh -c ". '$_ta/tile-app.sh'; tile_install '$_ta'" 2>&1)
+case "$_r" in *已安装*) ok "没装过时执行安装" ;; *) bad "没装过时没装：$_r" ;; esac
+
+# 同版本 → 跳过
+_r=$(PATH="$_ta/bin:$PATH" FAKE_CODE=2 sh -c ". '$_ta/tile-app.sh'; tile_install '$_ta'" 2>&1)
+case "$_r" in *已是最新*) ok "同版本时跳过" ;; *) bad "同版本时重装了：$_r" ;; esac
+
+# 旧版本 → 更新
+_r=$(PATH="$_ta/bin:$PATH" FAKE_CODE=1 sh -c ". '$_ta/tile-app.sh'; tile_install '$_ta'" 2>&1)
+case "$_r" in *已安装*) ok "旧版本时更新" ;; *) bad "旧版本时没更新：$_r" ;; esac
+
+# 比模块新 → 不动（用户可能手动装过更新的）
+_r=$(PATH="$_ta/bin:$PATH" FAKE_CODE=5 sh -c ". '$_ta/tile-app.sh'; tile_install '$_ta'" 2>&1)
+case "$_r" in *已是最新*) ok "已装版本更新时不动" ;; *) bad "把更新的版本降级了：$_r" ;; esac
+
+rm -rf "$_ta" 2>/dev/null
+
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"
 

@@ -76,3 +76,77 @@ else
 fi
 
 ui_print "- 开机后自动启动；管理器里点 [执行] 可启停"
+
+# ---------- 磁贴 App（可选）----------
+#
+# 用音量键选择装不装。刷机流程里没有可靠 stdin，只能读按键设备。
+# 读不到按键设备（getevent 不可用）时按「不装」处理：
+# 用户没主动选过的东西，默认不该装。
+install_tile_app() {
+  _apk="$MODPATH/magpie-tile.apk"
+  if [ ! -f "$_apk" ]; then
+    return 0
+  fi
+
+  ui_print ""
+  ui_print "*******************************"
+  ui_print "  可选的配套 App"
+  ui_print "*******************************"
+  ui_print "- Magpie 磁贴：把「启动/停止」放进下拉控制中心"
+  ui_print "  它不是 magpie 本体，也不代理流量；只是一个开关，"
+  ui_print "  通过 root 调用本模块的启停脚本。不装也不影响网关运行。"
+  ui_print ""
+
+  # 找按键设备：有 KEY_VOLUMEUP/KEY_VOLUMEDOWN 的 input 设备
+  _ev=""
+  for _d in /dev/input/event*; do
+    [ -e "$_d" ] || continue
+    if getevent -lp "$_d" 2>/dev/null | grep -q 'KEY_VOLUMEUP'; then
+      _ev="$_d"
+      break
+    fi
+  done
+
+  if [ -z "$_ev" ]; then
+    ui_print "! 读不到音量键，跳过（默认不装）"
+    ui_print "  想装的话：刷完后打开模块目录里的 magpie-tile.apk 手动安装"
+    return 0
+  fi
+
+  ui_print "  音量键上 = 安装，音量键下 = 跳过（15 秒不按则跳过）"
+  _choice=""
+  # 超时用 timeout 包住 getevent。
+  # 不能写「后台 sleep 到点 kill $$」——子 shell 里的 $$ 是父 shell 的 pid，
+  # 那样会把整个刷机脚本杀掉。
+  _line=""
+  if command -v timeout >/dev/null 2>&1; then
+    _line=$(timeout 15 getevent -qlc 1 "$_ev" 2>/dev/null | head -1)
+  else
+    # 没有 timeout 就不读键：宁可默认跳过，也不要在刷机流程里无限等待
+    ui_print "! 没有 timeout 命令，跳过按键选择"
+  fi
+  case "$_line" in
+    *KEY_VOLUMEUP*DOWN*)   _choice=install ;;
+    *KEY_VOLUMEDOWN*DOWN*) _choice=skip ;;
+  esac
+
+  if [ "$_choice" != "install" ]; then
+    ui_print "- 已跳过。之后想装：打开模块目录里的 magpie-tile.apk"
+    return 0
+  fi
+
+  # 刷机时的 mount namespace 里 pm 不一定能用，失败就交给开机后的 service.sh
+  . "$MODPATH/scripts/tile-app.sh" 2>/dev/null
+  if command -v tile_install >/dev/null 2>&1 && tile_install "$MODPATH" >/dev/null 2>&1; then
+    ui_print "- 磁贴 App 已安装"
+    ui_print "  打开它授权一次 root，然后到「控制中心 → 编辑」把 Magpie 拖出来"
+  else
+    ui_print "- 现在装不上，已记为「开机后再装」"
+    ui_print "  重启后会自动装好；也可以手动打开模块目录里的 magpie-tile.apk"
+    mkdir -p "$magpie_path/run" 2>/dev/null
+    : > "$magpie_path/run/.tile_pending" 2>/dev/null
+    chmod 600 "$magpie_path/run/.tile_pending" 2>/dev/null
+  fi
+}
+
+install_tile_app

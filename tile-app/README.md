@@ -1,0 +1,95 @@
+# 磁贴 App（com.ruin.magpie.tile）
+
+把 Magpie 的启动/停止放进下拉控制中心。
+
+它不是 magpie 本体，也不代理任何流量——只做一件事：通过 root 调用
+`/data/adb/modules/magpie/scripts/magpie.service toggle`。
+
+## 为什么需要一个 App
+
+Magisk 模块本身**不能**注册快捷设置磁贴。`TileService` 必须由一个已安装的
+App 声明，模块只能往系统里放文件。所以磁贴只能做成一个独立的小 APK，
+由模块负责把它装上去。
+
+## 它做什么 / 不做什么
+
+| 做 | 不做 |
+| --- | --- |
+| 磁贴点击 → 启动或停止 magpie 服务 | 不含 magpie 二进制 |
+| 显示当前状态（运行中 / 已停止） | 不代理、不转发流量 |
+| 首次打开时请求 root 授权 | 不做任何配置（配置都在 `magpie.config`） |
+| 「打开面板」跳转到 Web UI | 不联网 |
+
+## 安装方式
+
+**推荐**：刷模块时选装。`customize.sh` 会用音量键问一次：
+
+```
+  可选的配套 App
+- Magpie 磁贴：把「启动/停止」放进下拉控制中心
+  ...
+  音量键上 = 安装，音量键下 = 跳过（15 秒不按则跳过）
+```
+
+选了安装但刷机环境下 `pm` 装不上时，会落一个标记，开机后由 `service.sh` 补装。
+
+**手动**：模块目录下就有 `magpie-tile.apk`，直接用文件管理器打开安装。
+
+装完后还有两步：
+
+1. 打开 App，点「授权 root」，在 Magisk 弹窗里允许。
+2. 下拉控制中心 → 编辑 → 把 **Magpie** 拖出来。
+
+磁贴不会自己出现在下拉栏里，这是 Android 的规则，绕不过去。
+
+## 为什么磁贴自己弹不出 root 授权框
+
+`TileService` 在后台运行，没有界面，弹不出系统授权对话框。
+所以必须先打开一次 App 完成授权——这也是这个 App 有界面的唯一理由。
+
+如果没授权就点磁贴，磁贴会显示「需要 root」并置灰。
+
+## 状态怎么读
+
+`/data/adb/magpie/run/` 是 `0700 root`，普通 App 连目录都进不去，
+所以「读状态」也只能走 `su`。为了不让每次展开控制中心都 fork 一个 su，
+结果会缓存 5 秒。
+
+su 的路径不写死：按 `su`、`/system/bin/su`、`/system/xbin/su`、`/sbin/su`、
+`/debug_ramdisk/su`、`/data/adb/ksu/bin/su`、`/data/adb/ap/bin/su` 的顺序试，
+哪个能跑通就用哪个。
+
+## 构建
+
+```sh
+export MAGPIE_KEYSTORE=/path/to/magpie-tile.jks
+export MAGPIE_KS_PASS='...'
+sh tile-app/build.sh
+```
+
+依赖：`aapt`、`zipalign`（apt 的 aarch64 版即可）、`javac`、`d8`、`apksigner`
+（后两个来自 Android build-tools，是 Java 程序，跨架构可用）、`android.jar`。
+
+**注意**：`aapt` 必须用正式平台（android-34），不能用 SDK 里那种
+`android-37.0` 的 preview jar——它没有完整属性表，连 `android:exported`
+都会报 "No resource identifier found"。
+
+## 签名密钥
+
+**每个版本必须用同一把 key 签名**，否则用户更新时会因为签名不一致装不上，
+只能先卸载（卸载会丢数据）。
+
+密钥不进仓库。需要放在两个地方互为备份：
+
+1. 本机 `/workspace/magpie-keys/magpie-tile.jks`（口令另存）
+2. GitHub 私有仓库
+
+丢了这把 key，后续版本的 APK 就没法和已装的兼容。
+
+## 与 BoxProxy 磁贴的差别
+
+BoxProxy 是 VPN App，磁贴和业务在同一进程，读状态是读内存，几乎零成本，
+所以它敢在磁贴里直接启停。
+
+magpie 是独立的 Go 进程，状态在 root 私有目录里，磁贴每次都要过一趟 su
+（约 100–300ms）。所以这里多了 5 秒缓存，点击后也先显示「处理中」再执行。

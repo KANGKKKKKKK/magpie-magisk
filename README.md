@@ -35,6 +35,7 @@
 - [卸载](#卸载)
 - [更新](#更新)
 - [已知限制](#已知限制)
+- [控制中心磁贴（可选）](#控制中心磁贴可选)
 - [开发与测试](#开发与测试)
 - [贡献者与致谢](#贡献者与致谢)
 - [许可证](#许可证)
@@ -60,6 +61,7 @@
 | 音量键菜单 | 点 `[执行]` 开菜单：切网关、看接入信息、启停、重启、开面板，音量键选、不用打字 |
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
 | 自检 | `scripts/doctor.sh` 九项检查，直接告诉你哪里不对、下一步做什么 |
+| 控制中心磁贴 | 可选装一个 40 KB 的 App，把启动/停止放进下拉栏；不装也不影响任何功能 |
 | 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
 | DNS 上游 | 模块自带 `system/etc/resolv.conf`，按 `MAGPIE_DNS` 重写；不启 dnsmasq，不占 53 端口 |
 | CA 证书 | 合并系统根证书供 Go 静态 PIE 使用，系统 CA 变化时自动重建 |
@@ -570,13 +572,20 @@ magpie-magisk/
 ├── update.json                       在线更新用的清单
 ├── build.sh                          打包成可刷入的 zip
 ├── scripts/
-│   ├── magpie.service                start / stop / restart / status
+│   ├── magpie.service                start / stop / restart / status / toggle
 │   ├── status.sh                     生成状态描述、status.json、日志尾
 │   ├── install.sh                    检测 / 下载 / 校验 / 部署本体
 │   ├── doctor.sh                     九项自检
 │   ├── lib.sh                        地址解析 + 局域网地址 + 进程识别 + DNS/IP 校验，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
+│   ├── tile-app.sh                   磁贴 App 的安装/版本比较（刷机与开机共用）
 │   └── magpie.config                 配置（默认值）
+├── tile-app/                         磁贴 App 源码（可选组件，构建时打进 zip）
+│   ├── AndroidManifest.xml           包名 com.ruin.magpie.tile
+│   ├── src/                          MainActivity + MagpieTileService + Shell
+│   ├── res/                          图标与文案
+│   ├── build.sh                      产出已签名的 magpie-tile.apk
+│   └── README.md                     为什么需要它、怎么构建、密钥怎么管
 ├── tests/
 │   ├── test-lib.sh                   lib.sh 纯函数：地址切分、端口边界、IP 校验、JSON 转义
 │   ├── test-install.sh / test-service.sh / test-action.sh / test-watchdog.sh
@@ -632,6 +641,29 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - 管理器会根据 `versionCode` 判断有没有新版本，需要时提示并一键更新。
 - 发新版时改三处：`module.prop` 的 `version` / `versionCode`，以及 `update.json` 的 `version` / `versionCode` / `zipUrl`。
 - 更新模块**不会**动 `/data/adb/magpie`，所以你配的 provider、密钥、日志都保留。
+
+## 控制中心磁贴（可选）
+
+刷模块时可以用音量键选装一个配套 App，把 Magpie 的启动/停止放进下拉控制中心。
+
+```
+  可选的配套 App
+- Magpie 磁贴：把「启动/停止」放进下拉控制中心
+  它不是 magpie 本体，也不代理流量；只是一个开关，
+  通过 root 调用本模块的启停脚本。不装也不影响网关运行。
+
+  音量键上 = 安装，音量键下 = 跳过（15 秒不按则跳过）
+```
+
+装完还有两步：
+
+1. 打开 App 点「授权 root」（磁贴在后台跑，弹不出授权框，必须先在前台授权一次）
+2. 下拉控制中心 → 编辑 → 把 **Magpie** 拖出来（Android 不允许 App 自动添加磁贴）
+
+磁贴显示「运行中 / 已停止」，点击切换。停止走的是同一条 `stop` 路径，
+会写 `.user_stopped` 标记，看门狗不会把用户主动停掉的服务又拉回来。
+
+细节见 [tile-app/README.md](tile-app/README.md)。
 
 ## 已知限制
 
