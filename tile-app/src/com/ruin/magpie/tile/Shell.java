@@ -28,19 +28,27 @@ final class Shell {
     static final String MODULE_DIR = "/data/adb/modules/magpie";
 
     /**
-     * 模块在不在。
+     * 模块在不在 —— **只能通过 su 判断**。
      *
-     * <p>这个判断不需要 root：{@code /data/adb/modules} 是 0755，App 能 stat 到子目录。
-     * 有了它才能在跑 su 之前就把「模块没装」和「没拿到 root」分开 ——
-     * 否则模块被删后用户看到的是「需要 root」，去 root 管理器里翻半天，
-     * 而真正原因（模块没了）一个字的提示都没有。
+     * <p>{@code /data/adb} 是 {@code drwx------}（0700 root），普通 App 连这个目录
+     * 都进不去，所以 {@code new File(MODULE_DIR).isDirectory()} 永远返回 false。
+     * （{@code /data/adb/modules} 自己虽然是 0755，但父目录不给穿越权限，一样没用。）
+     *
+     * <p>因此把「模块在不在」和「服务状态」合成一条 su 命令，用哨兵字符串区分：
+     * 只跑一次 su，既拿到结果也拿到模块是否存在的答案。
      */
-    static boolean moduleExists() {
-        try {
-            return new java.io.File(MODULE_DIR).isDirectory();
-        } catch (Throwable e) {
-            return false;
-        }
+    static final String NO_MODULE = "__magpie_nomodule__";
+
+    /** 一条命令同时回答「模块在不在」与「服务状态」。 */
+    static String statusCommand() {
+        return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
+                + " status; else echo " + NO_MODULE + "; fi";
+    }
+
+    /** 一条命令同时回答「模块在不在」与「切换结果」。 */
+    static String toggleCommand() {
+        return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
+                + " toggle; else echo " + NO_MODULE + "; fi";
     }
 
     private static final String[] SU_CANDIDATES = {

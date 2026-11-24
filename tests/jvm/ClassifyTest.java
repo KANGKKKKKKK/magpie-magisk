@@ -9,8 +9,11 @@
  * 退出码非 0 表示有用例失败。
  */
 public class ClassifyTest {
+    static final String NO_MODULE = "__magpie_nomodule__";
+
     static String classify(boolean ok, String raw, String fallback) {
         String out = raw == null ? "" : raw.trim();
+        if (out.contains(NO_MODULE)) return "nomodule";
         String last = out;
         int nl = out.lastIndexOf('\n');
         if (nl >= 0) last = out.substring(nl + 1).trim();
@@ -41,6 +44,11 @@ public class ClassifyTest {
         t(true,  "",                   "stopped");
         t(true,  "2026-11-24 12:00:00 [Warn] 正在停止\nrunning", "running");
         t(true,  "running\r\n",        "running");
+        // 模块被删：su 跑得通，但脚本不存在 → 命令打印哨兵
+        t(true,  NO_MODULE,            "nomodule");
+        t(false, NO_MODULE,            "nomodule");
+        // 哨兵混在其它输出里也要认出来
+        t(true,  "something\n" + NO_MODULE, "nomodule");
         System.out.println();
         System.out.println("结果： FAIL " + failed);
         if (failed > 0) System.exit(1);

@@ -168,15 +168,7 @@ public class MainActivity extends Activity {
         status.setText("…");
         hint.setText(R.string.tile_hint);
 
-        // 模块没了就不必去跑 su：直接说清楚，别让用户去 root 管理器里翻
-        if (!Shell.moduleExists()) {
-            status.setText(R.string.state_unavailable);
-            hint.setText(R.string.module_missing);
-            grant.setVisibility(View.GONE);
-            return;
-        }
-
-        Shell.run("sh " + Shell.SERVICE + " status", new Shell.Callback<Shell.Result>() {
+        Shell.run(Shell.statusCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
                 // 与磁贴共用同一套判定，避免「磁贴说启动失败、界面说需要 root」

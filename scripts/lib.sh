@@ -71,23 +71,34 @@ magpie_norm_path() {
   # 会做一次 POSIX 路径解析。"/data/../data" 在白名单里匹配不上，于是被放行，
   # 但 rm -rf 实际删的是 /data。
   #
-  # readlink -m：解析符号链接与 . / ..，且不要求路径存在（toybox 与 coreutils
-  # 都支持 -m）。拿不到时退回 cd + pwd -P；再不行就保守地返回失败
-  # （调用方 magpie_path_cleanable 会据此拒绝删除）。
+  # 用纯 shell 逐段解析，不依赖 readlink -m：
+  # Android 上的 readlink 来自 busybox，只支持 -f（要求路径存在），
+  # 没有 -m。用 -f 对不存在的路径会失败，退回 cd+pwd 又会被 .. 带偏。
   case "$_p" in
     */.|*/..|*/./*|*/../*|.|..)
-      _r=$(readlink -m "$_p" 2>/dev/null)
-      if [ -n "$_r" ]; then
-        _p=$_r
-      else
-        _d=$(dirname "$_p" 2>/dev/null)
-        _b=$(basename "$_p" 2>/dev/null)
-        _r=$(cd "$_d" 2>/dev/null && pwd -P) || return 1
-        [ -n "$_r" ] || return 1
-        _p="$_r/$_b"
-        _r2=$(readlink -m "$_p" 2>/dev/null)
-        [ -n "$_r2" ] && _p=$_r2
-      fi
+      _rest=$_p
+      _out=""
+      while [ -n "$_rest" ]; do
+        # 跳过开头的斜杠，取第一段
+        _rest=${_rest#/}
+        [ -n "$_rest" ] || break
+        case "$_rest" in
+          */*) _seg=${_rest%%/*}; _rest=${_rest#*/} ;;
+          *)   _seg=$_rest; _rest="" ;;
+        esac
+        case "$_seg" in
+          ''|.) continue ;;
+          ..)
+            # 退一级；已经在根就停在根
+            _out=${_out%/*}
+            ;;
+          *)
+            _out="$_out/$_seg"
+            ;;
+        esac
+      done
+      [ -n "$_out" ] || _out="/"
+      _p=$_out
       ;;
   esac
 

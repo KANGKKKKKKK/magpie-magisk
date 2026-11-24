@@ -16,6 +16,14 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 LIB=${TEST_LIB:-$HERE/../scripts/lib.sh}
+# 临时目录：Android 上没有 /tmp，退到 TMPDIR 或 /data/local/tmp。
+# 后面生成用户配置那组要用（别处几套测试各自定义了同名变量，
+# 但这个文件是独立的，得自己有一份）。
+if [ -d /tmp ] && [ -w /tmp ]; then
+  _TMPBASE=/tmp
+else
+  _TMPBASE=${TMPDIR:-/data/local/tmp}
+fi
 PASS=0; FAIL=0
 
 ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }

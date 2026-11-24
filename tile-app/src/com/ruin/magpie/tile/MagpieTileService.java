@@ -38,15 +38,10 @@ public class MagpieTileService extends TileService {
             render(cachedState);
             return;
         }
-        // 先做不需要 root 的检查：模块没了就直接说，别去跑 su
-        if (!Shell.moduleExists()) {
-            cachedState = "nomodule";
-            cachedAt = System.currentTimeMillis();
-            render("nomodule");
-            return;
-        }
         render("working");
-        Shell.run("sh " + Shell.SERVICE + " status", new Shell.Callback<Shell.Result>() {
+        // 一条命令同时问「模块在不在」与「服务状态」：/data/adb 是 0700 root，
+        // App 自己 stat 不到，只能让 su 去看。
+        Shell.run(Shell.statusCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
                 String state = classify(r, "stopped");
@@ -84,16 +79,10 @@ public class MagpieTileService extends TileService {
     }
 
     private void doToggle() {
-        if (!Shell.moduleExists()) {
-            cachedState = "nomodule";
-            cachedAt = System.currentTimeMillis();
-            render("nomodule");
-            return;
-        }
         render("working");
         // 走 toggle：在跑就停、没跑就起。停止会写 .user_stopped，
         // 看门狗不会把用户主动停掉的服务又拉回来。
-        Shell.run("sh " + Shell.SERVICE + " toggle", new Shell.Callback<Shell.Result>() {
+        Shell.run(Shell.toggleCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
                 String state = classify(r, "stopped");
@@ -116,6 +105,11 @@ public class MagpieTileService extends TileService {
      */
     static String classify(Shell.Result r, String wantPrefix) {
         String out = r.trimmed();
+        // 模块不存在时命令会打印哨兵 —— 这条要在最前面判，
+        // 否则会被后面「输出非空但认不出来」兜到 stopped。
+        if (out.contains(Shell.NO_MODULE)) {
+            return "nomodule";
+        }
         // status 打印的是 "running (PID 123)"，toggle 打印的是裸 "running"，
         // 所以不能只用 endsWith。取最后一行再双向匹配。
         String last = out;
