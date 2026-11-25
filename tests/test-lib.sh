@@ -351,6 +351,44 @@ if [ -f "$_un" ]; then
   if cleanable "/data/adb/magpie"; then ok "uninstall.sh 的 cleanable 放行正常目标"; else bad "uninstall.sh 拦了正常目标"; fi
 fi
 
+# 同一份危险/正常路径表同时检验安装与清理；不可只测沙箱改过的 helper。
+for _path in /data/adb/magisk /data/adb/magisk/bin /data/adb/ksu /data/adb/ap \
+             /data/adb/ksud /data/adb/magisk.db /data/adb/post-fs-data.d /data/adb/service.d \
+             /data/misc/wifi /data/user/0/com.example /data/user_de/0/com.example \
+             /data/data/com.example /data/system /data/app /opt/magpie \
+             /data/adb/magpie-custom /data/adb/modules/magpie2 \
+             /data/adb/magpie/../../magisk /data/adb/modules/magpie/../other; do
+  if magpie_path_installable "$_path" || magpie_path_cleanable "$_path"; then
+    bad "安装/清理策略误放行 $_path"
+  else
+    ok "安装/清理策略均拒绝 $_path"
+  fi
+done
+for _path in /data/adb/magpie /data/adb/magpie/data /data/adb/modules/magpie \
+             /data/adb/modules/magpie/files; do
+  if magpie_path_installable "$_path" && magpie_path_cleanable "$_path"; then
+    ok "安装/清理策略均放行 $_path"
+  else
+    bad "安装/清理策略误拒绝 $_path"
+  fi
+done
+
+# 抽取生产入口的同一函数，仅做校验，不调用下载、mkdir、锁或部署。
+_ct=$(sed -n '/^check_target()/,/^}/p' "$HERE/../scripts/install.sh")
+if [ -n "$_ct" ]; then
+  for _path in /data/adb/magisk /data/adb/ksu /data/adb/service.d /data/misc/wifi \
+               /data/user/0/com.example /opt/magpie /data/adb/magpie-custom \
+               /data/adb/magpie/../magisk /data/adb/magpie/; do
+    if ( eval "$_ct"; die() { exit 1; }; magpie_path="$_path"; check_target ) >/dev/null 2>&1; then
+      bad "生产 check_target 误放行 $_path"
+    else
+      ok "生产 check_target 拒绝 $_path（未触碰目标）"
+    fi
+  done
+else
+  bad "未能从生产安装器抽取 check_target"
+fi
+
 echo "== 16 IPv6 回环的大小写"
 # IPv6 十六进制位大小写不敏感。以前只匹配小写，::FFFF:127.0.0.1 会被判成
 # 「已开放局域网」—— 安全边界的结论说反了。
@@ -392,29 +430,155 @@ else
   bad "service.sh 里没有 seed_user_config"
 fi
 
-echo "== 18 桌面图标的开机对账（tile_reconcile_launcher）"
-# 组件启用状态是系统侧的，会被覆盖安装 / 清除数据 / 部分系统更新重置回 default，
-# 隐藏过的图标就自己冒出来。用户隐藏后不会再开 App，所以开机要补一次。
-# 意图记在模块的 run 目录（App 数据在 CE 存储，Magisk namespace 看不到）。
+echo "== 18 桌面图标对账：限定包、User 0 与 disabled 小节"
 _tl="${TEST_BASE:-$_TMPBASE}/magpie-tl-test"
 rm -rf "$_tl"; mkdir -p "$_tl/bin" "$_tl/run"
 cp "$HERE/../scripts/tile-app.sh" "$_tl/"
-printf '#!/bin/sh\ncase "$1" in\n  dump)\n    if [ "${FAKE_DISABLED:-}" = "1" ]; then printf "      disabledComponents:\\n        com.ruin.magpie.tile.Launcher\\n\\nQueries:\\n"; else printf "      disabledComponents:\\n\\nQueries:\\n"; fi ;;\n  disable) echo disabled; exit 0 ;;\n  uninstall) echo Success ;;\nesac\n' > "$_tl/bin/pm"
+cat > "$_tl/bin/pm" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_CALLS"
+case "$1" in
+  dump) cat "$FAKE_DUMP"; exit "${FAKE_DUMP_RC:-0}" ;;
+  disable) exit "${FAKE_DISABLE_RC:-0}" ;;
+  *) exit 2 ;;
+esac
+EOF
 chmod 755 "$_tl/bin/pm"
-
-# 1) 没有标记 → 不动
-_r=$(PATH="$_tl/bin:$PATH" sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
-[ -z "$_r" ] && ok "没有标记时不动作" || bad "没标记却动了：$_r"
-
-# 2) 有标记 + 未禁用 → 重新隐藏
+: > "$_tl/dump"; : > "$_tl/calls"
+_r=$(PATH="$_tl/bin:$PATH" FAKE_DUMP="$_tl/dump" FAKE_CALLS="$_tl/calls" \
+  sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
+if [ -z "$_r" ] && [ ! -s "$_tl/calls" ]; then ok "没有标记时不调用任何 pm"
+else bad "没有标记却调用 pm：$_r"; fi
 : > "$_tl/run/.tile_launcher_hidden"
-_r=$(PATH="$_tl/bin:$PATH" sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
-case "$_r" in *重新隐藏*) ok "有标记且未禁用时重新隐藏" ;; *) bad "没重新隐藏：$_r" ;; esac
 
-# 3) 有标记 + 已禁用 → 不动（幂等）
-_r=$(PATH="$_tl/bin:$PATH" FAKE_DISABLED=1 sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
-[ -z "$_r" ] && ok "已禁用时不重复操作" || bad "重复操作了：$_r"
-
+# 每个 case 从 stdin 取得完整层级 fixture；同时核对返回码、调用参数和次数。
+check_tile_case() {
+  _name=$1; _disable=$2; _dump_rc=${3:-0}; _disable_rc=${4:-0}
+  cat > "$_tl/dump"; : > "$_tl/calls"
+  _r=$(PATH="$_tl/bin:$PATH" FAKE_DUMP="$_tl/dump" FAKE_CALLS="$_tl/calls" \
+    FAKE_DUMP_RC="$_dump_rc" FAKE_DISABLE_RC="$_disable_rc" \
+    sh -c ". '$_tl/tile-app.sh'; tile_reconcile_launcher '$_tl/run'" 2>&1)
+  _rc=$?
+  _want='dump com.ruin.magpie.tile'
+  if [ "$_disable" = 1 ]; then
+    _want="$_want
+disable --user 0 com.ruin.magpie.tile/.Launcher"
+  fi
+  _calls=$(cat "$_tl/calls")
+  _expected_rc=0
+  [ "$_disable" != 1 ] || _expected_rc=$_disable_rc
+  if [ "$_calls" = "$_want" ] && [ "$_rc" = "$_expected_rc" ]; then
+    if [ "$_disable" = 1 ] && [ "$_disable_rc" = 0 ]; then
+      case "$_r" in *重新隐藏*) ok "$_name" ;; *) bad "$_name 未报告隐藏结果" ;; esac
+    elif [ -z "$_r" ]; then ok "$_name"
+    else bad "$_name 不应报告成功：$_r"; fi
+  else
+    bad "$_name（rc=$_rc；calls=$_calls）"
+  fi
+}
+check_tile_case '空集合不打印 disabled 标题，补隐藏' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+Queries:
+EOF
+check_tile_case 'User 0 disabled 精确类名，不重复操作' 0 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case 'enabled 小节不能冒充 disabled（无空行）' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.MagpieTileService
+      enabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case 'User 10 禁用不能代替 User 0' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      enabledComponents:
+        com.ruin.magpie.tile.Launcher
+    User 10: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case 'User 10 在前，User 0 已禁用仍正确识别' 0 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 10: installed=true
+      enabledComponents:
+        com.ruin.magpie.tile.Launcher
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case '其他包的同名条目不能命中' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.MagpieTileService
+  Package [com.example.other] (def):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case '同级未知小节不能穿透' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.MagpieTileService
+      otherSection:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case 'Queries 内的同名条目不能命中' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.MagpieTileService
+Queries:
+    User 0:
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case '类名必须整行字面相等' 1 <<'EOF'
+Packages:
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.LauncherExtra
+        comXruinXmagpieXtileXLauncher
+        com.ruin.magpie.tile/.Launcher
+        com.ruin.magpie.tile.Launcher$Inner
+EOF
+printf '  Package [com.ruin.magpie.tile] (abc):\n    User 0: installed=true\n      disabledComponents:\n        com.ruin.magpie.tile.Launcher  \n' > "$_tl/whitespace"
+check_tile_case '条目前后空白和 EOF 可识别' 0 < "$_tl/whitespace"
+check_tile_case '只有 User 10 则补 User 0 隐藏' 1 <<'EOF'
+  Package [com.ruin.magpie.tile] (abc):
+    User 10: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case '缺少包/用户上下文不得误报已隐藏' 1 <<'EOF'
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case 'dump 失败即使带匹配输出也应尝试隐藏' 1 1 <<'EOF'
+  Package [com.ruin.magpie.tile] (abc):
+    User 0: installed=true
+      disabledComponents:
+        com.ruin.magpie.tile.Launcher
+EOF
+check_tile_case '空 dump 输出安全退回补隐藏' 1 </dev/null
+check_tile_case 'disable 失败返回非零且不谎报成功' 1 0 1 </dev/null
 rm -rf "$_tl"
 
 echo

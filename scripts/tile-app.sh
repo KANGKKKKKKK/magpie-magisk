@@ -67,20 +67,46 @@ tile_reconcile_launcher() {
   [ -f "$_flag" ] || return 0
   _comp="$TILE_PKG/.Launcher"
 
-  # 判断 alias 是否已经在禁用列表里。两个坑都是实测出来的：
-  #
-  #   1. pm dump 的 disabledComponents 段以**空行**结束，不是 "}"。
-  #      用 "/disabledComponents/,/}/" 取范围会一路吃到后面某个 "}"，
-  #      交给 grep 的内容远超这一段。
-  #   2. 段里写的是完整类名 com.ruin.magpie.tile.Launcher，**不是**
-  #      "com.ruin.magpie.tile/.Launcher"。拿后者去 grep 永远不匹配，
-  #      于是每次开机都白跑一次 pm disable（幂等，所以症状看不出来）。
-  #
-  # 这里改成：截到空行为止 → 去首尾空白 → 整行字面匹配完整类名。
-  if pm dump "$TILE_PKG" 2>/dev/null \
-    | sed -n '/^[[:space:]]*disabledComponents:/,/^[[:space:]]*$/p' \
-    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -qxF "${TILE_PKG}.Launcher"; then
+  # AOSP 只有非空列表才打印 disabledComponents，段尾不保证有空行。
+  # 仅认目标 Package / User 0 / disabledComponents 内更深缩进的完整类名；
+  # 下一个包、用户或同级小节必须先关闭状态，不能把 enabled 或其它用户算进来。
+  # 先保存 pm 的退出码：失败或未知格式时宁可幂等补一次 disable，也不误报已隐藏。
+  if _tile_dump=$(pm dump "$TILE_PKG" 2>/dev/null) &&
+     printf '%s\n' "$_tile_dump" | awk -v pkg="$TILE_PKG" -v want="${TILE_PKG}.Launcher" '
+      {
+        indent = match($0, /[^[:space:]]/) - 1
+        if ($0 ~ /^[[:space:]]*Package \[/) {
+          name = $0
+          sub(/^[[:space:]]*Package \[/, "", name)
+          sub(/\].*$/, "", name)
+          in_pkg = (name == pkg)
+          pkg_indent = indent
+          in0 = 0; disabled = 0
+          next
+        }
+        if (!in_pkg) next
+        if (indent < 0) { disabled = 0; next }
+        if (indent <= pkg_indent) { in_pkg = 0; in0 = 0; disabled = 0; next }
+        if ($0 ~ /^[[:space:]]*User [0-9]+:/) {
+          in0 = ($2 == "0:")
+          user_indent = indent
+          disabled = 0
+          next
+        }
+        if (!in0) next
+        if (indent <= user_indent) { in0 = 0; disabled = 0; next }
+        if ($0 ~ /^[[:space:]]*disabledComponents:[[:space:]]*$/) {
+          disabled = 1; list_indent = indent; next
+        }
+        if (disabled && indent <= list_indent) disabled = 0
+        if (disabled) {
+          line = $0
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+          if (line == want) found = 1
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    '; then
     return 0
   fi
 

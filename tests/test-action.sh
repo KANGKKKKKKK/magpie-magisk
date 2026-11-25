@@ -54,6 +54,9 @@ build() {
     *)     printf 'MAGPIE_ADDR="127.0.0.1:3425"\nMAGPIE_WEB_ADDR="127.0.0.1:3430"\n' >> "$B/cfg" ;;
   esac
   cp "$SRC/scripts/lib.sh" "$B/scripts/lib.sh"
+  # 只在临时副本放行本沙箱，不给生产代码添加路径绕过环境变量。
+  printf '\nmagpie_path_installable() { case "$1" in "%s"|"%s"/*) return 0 ;; esac; return 1; }\n' \
+    "$B" "$B" >> "$B/scripts/lib.sh"
 
   # 进程判定改桩：真实 magpie 还在跑，别让它影响结果
   if [ "$2" = "running" ]; then

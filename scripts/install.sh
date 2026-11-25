@@ -160,7 +160,7 @@ pick_downloader() {
 #   DL_STALL  多久没有任何数据就放弃（连接超时 / 传输停滞）。默认 60 秒。
 #   DL_TOTAL  整次下载的总上限。默认 30 分钟。
 # 以前 wget 只给了 -T 60（那是停滞超时，不是总时限），curl 只给了 --max-time 600
-# （那是总时限）：慢网下 87 MB 走 curl 需要 >145 KB/s，反而更容易被掐；
+# （那是总时限）：大文件在慢网下可能正常传输十几分钟，不能拿读超时误充总时限；
 # 而 wget 那侧一旦服务器长期不响应，也没有总上限兜底。
 DL_STALL=${MAGPIE_DL_STALL:-60}
 DL_TOTAL=${MAGPIE_DL_TIMEOUT:-1800}
@@ -174,7 +174,7 @@ dl_fetch() {
   _url="$1"; _out="$2"
   pick_downloader || return 127
   # 放到后台再 wait：shell 要等前台命令结束才会执行 trap，
-  # 87 MB 下到一半按 Ctrl-C / 管理器被杀时就会干等好几分钟。
+  # 大文件下到一半按 Ctrl-C / 管理器被杀时就会干等好几分钟。
   # wait 是可中断的，信号一到马上就能跑 on_signal。
   case "$DL_KIND" in
     wget|busybox)
@@ -304,7 +304,8 @@ check_target() {
   # 判断逻辑在 lib.sh，与 uninstall.sh 共用同一份。
   # lib.sh 缺失时不能「跳过检查就当通过」—— 那等于回到修之前的状态，
   # 而且用户完全看不出来。这种情况直接拒绝，并说明原因。
-  if ! command -v magpie_norm_path >/dev/null 2>&1; then
+  if ! command -v magpie_norm_path >/dev/null 2>&1 ||
+     ! command -v magpie_path_installable >/dev/null 2>&1; then
     die "缺少 scripts/lib.sh，无法校验 magpie_path（重装模块可恢复）"
   fi
   _norm=$(magpie_norm_path "$magpie_path" 2>/dev/null) || \
@@ -314,14 +315,8 @@ check_target() {
     # 报错时直接把解析结果给出来，别让用户猜。
     die "magpie_path 不是规范路径：$magpie_path（解析后是 $_norm，请直接写这个）"
   fi
-  case "$magpie_path" in
-    /|/data|/data/adb|/data/adb/modules|/sdcard|/sdcard/*|/storage|/storage/*|/mnt|/mnt/*|/system|/system/*)
-      die "拒绝把本体安装到 $magpie_path" ;;
-  esac
-  case "$magpie_path" in
-    /*) ;;
-    *) die "magpie_path 必须是绝对路径：$magpie_path" ;;
-  esac
+  magpie_path_installable "$magpie_path" ||
+    die "拒绝把本体安装到 $magpie_path（只允许 /data/adb/magpie 或 /data/adb/modules/magpie 及其子目录）"
   # 逐级上溯，不允许路径里有符号链接指向别处
   _d="$magpie_path"
   while [ "$_d" != "/" ] && [ -n "$_d" ]; do
@@ -329,6 +324,12 @@ check_target() {
       die "$_d 是符号链接，出于安全考虑不接受"
     fi
     _d=$(dirname "$_d")
+  done
+  # 已有的子路径也不能是链接：否则 bin 指到别处仍会越过目录白名单，
+  # 清单临时文件、备份或记录文件的重定向也可能跟随链接写到外面。
+  for _target in "$BIN_DIR" "$BIN" "$BAK" "$INFO" "$LOCK" "$PENDING" \
+                 "$magpie_path/.manifest.tmp"; do
+    [ ! -L "$_target" ] || die "$_target 是符号链接，出于安全考虑不接受"
   done
   return 0
 }
@@ -604,7 +605,6 @@ cmd_install() {
   for a in "$@"; do [ "$a" = "--yes" ] && _yes=1; done
 
   check_arch || die "本模块只支持 arm64 设备（当前 $(uname -m)）"
-  check_target
 
   _st=$(bin_state)
   if [ "$_st" = "ready" ] && [ "$_yes" = "0" ]; then
@@ -711,7 +711,14 @@ cmd_rollback() {
 
 # ---------- 入口 ----------
 
-case "$1" in
+# 统一放在分派之前：check / plan 也会创建目录和清单临时文件，rollback 会
+# 加锁并覆盖本体；status 会执行本体 --version。它们都不能绕过路径校验。
+# help / 未知命令不触碰目标，仍可在配置损坏时查看用法。
+case "${1:-}" in
+  status|check|plan|install|rollback) check_target ;;
+esac
+
+case "${1:-}" in
   status)   cmd_status ;;
   check)    cmd_check ;;
   plan)     cmd_plan ;;
