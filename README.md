@@ -15,7 +15,7 @@
 </div>
 
 > [!NOTE]
-> 本仓库只含模块脚本，**不含 magpie 本体**（arm64 二进制约 87 MB）。本体没装也没关系：装上模块后点 `[执行]` 就能下载安装——首次点按只显示方案，再点一次才下载。
+> 本仓库只含模块脚本，**不含 magpie 本体**（arm64 二进制）。本体没装也没关系：装上模块后点 `[执行]` 就能下载安装——首次点按只显示方案，再点一次才下载。当前下载大小以 `install.sh plan` 从清单读取的 `size` 为准。
 >
 > 模块只负责让 magpie 在这台手机上稳定运行；provider、模型、额度、账号这些属于 magpie 本体，不在本模块范围内。
 
@@ -206,8 +206,7 @@ su -c magpie update         # 下载、校验、重启进新版本
 </details>
 
 > [!NOTE]
-> 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，87 MB 的下载也太大，
-> 所以 `customize.sh` 只做检测并告诉你怎么装，真正下载由你确认后触发。
+> 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，因此 `customize.sh` 只做检测并告诉你怎么装，真正下载由你确认后触发。
 
 > [!NOTE]
 > 安装器不依赖 `wget` 在 `PATH` 上。模块脚本被管理器拉起时，`PATH` 往往只有系统目录，
@@ -534,9 +533,9 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 不存在才从模块里复制一份、权限 600，已存在绝不动。所以照本文档直接去改就行，
 不用先手动创建。
 
-服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本都会按 `magpie_path` 工作，
-但**修改路径不会自动迁移已有本体和数据**。已有安装要换目录时，应先备份并停止服务，再迁移文件、修改配置并启动；
-配置文件本身仍从上面的固定位置读取。仅为更改地址或 DNS 时，不需要修改 `magpie_path`。
+服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本按 `magpie_path` 工作；配置文件本身仍从上面的固定位置读取。仅为更改地址或 DNS 时，不需要修改 `magpie_path`。
+
+安装器与卸载器共用默认拒绝的路径白名单：只允许 `/data/adb/magpie`、`/data/adb/modules/magpie` 及其子目录。安装器另行拒绝目标路径或相关子路径中的符号链接；其 `status`、`check`、`plan`、`install`、`rollback` 都先做校验。旧版若把 `magpie_path` 配在这两个根目录之外，安装器会拒绝操作；升级不会自动迁移或删除旧目录，服务也不会替你搬动或清理它。服务启停仍由模块目录中的 `magpie.service` 读取配置处理，不应把安装器拒绝误解成自动迁移或删除。
 
 改完重启服务生效：
 
@@ -742,20 +741,21 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - 只在 arm64 + Android 14（HyperOS 2.0）实测；理论上 Android 10+ 的 arm64 设备都适用。
 - 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
 - **DNS 覆盖要重启一次手机才生效**：`system/etc/resolv.conf` 由 Magisk 在开机时挂载，装或更新模块后得重启；之后改 `MAGPIE_DNS` 重启服务即可重写覆盖文件，若 doctor 里上游还是旧的，再重启一次手机。
+- **可选磁贴 App 对自定义数据目录支持不完整**：面板 URL 固定从 `/data/adb/magpie/run/web.url` 读取，桌面图标隐藏标记固定使用 `/data/adb/magpie/run/.tile_launcher_hidden`；自定义 `magpie_path` 时这两项不会跟随迁移。磁贴启停经模块 `magpie.service` 执行，服务仍按配置中的数据目录工作。App 内的 `SERVICE` 指模块脚本目录，不是数据目录。
 
 ## 开发与测试
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 46 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 53 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
 sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 26 条
-sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA 纯函数 192 条
+sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/磁贴入口 237 条
 ```
 
-五个套件共 317 条断言（46 + 13 + 40 + 26 + 192），另有 13 条 JVM 用例，全部跑在临时目录里、用桩替代进程判定，**不碰正在运行的服务**。
+五个套件共 369 条断言（53 + 13 + 40 + 26 + 237），另有 13 条 JVM 用例。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 

@@ -60,15 +60,24 @@ App 里有个「桌面图标」开关。隐藏之后桌面不再有图标，只�
 **为什么不用别的方式**：如果直接关掉 `MainActivity`，用户就再也进不来这个
 设置页，也就没法把图标恢复回去——等于自己把自己锁死。
 
-**恢复入口**（三选一）：
+**恢复入口**：长按控制中心里的 Magpie 磁贴可打开设置页
+（SystemUI 发 `ACTION_QS_TILE_PREFERENCES`，`MainActivity` 接住）；也可由快捷方式 App、Tasker 等显式启动该 Activity。
 
-1. 长按控制中心里的 Magpie 磁贴 → 打开设置页
-   （SystemUI 发 `ACTION_QS_TILE_PREFERENCES`，`MainActivity` 接住）
-2. `adb shell am start -n com.ruin.magpie.tile/.MainActivity`
-3. 任何能显式启动该 Activity 的方式（快捷方式 App、Tasker 等）
+隐藏 alias 后，可用下面的**隐式、限包、User 0** 查询确认桌面入口不可解析；这里用 `-p` 限定包，不用显式组件 `-n` 来判断 launcher filter：
 
-已验证：禁用 alias 后 `resolve-activity -c LAUNCHER` 返回 *No activity found*，
-同时 `am start -n .../.MainActivity` 仍返回 `Status: ok`。
+```sh
+adb shell pm resolve-activity --brief --user 0 \
+  -a android.intent.action.MAIN \
+  -c android.intent.category.LAUNCHER \
+  -p com.ruin.magpie.tile
+# 预期：No activity found
+```
+
+如需打开设置页，可执行下面的显式启动命令。它会**实际打开页面**，不是只读查询：
+
+```sh
+adb shell am start -W --user 0 -n com.ruin.magpie.tile/.MainActivity
+```
 
 ## 状态怎么读
 
@@ -100,6 +109,8 @@ App 侧能做的只有「不把已经知道的状态丢掉」：拿不到 `Tile`
 su 的路径不写死：按 `su`、`/system/bin/su`、`/system/xbin/su`、`/sbin/su`、
 `/debug_ramdisk/su`、`/data/adb/ksu/bin/su`、`/data/adb/ap/bin/su` 的顺序试，
 哪个能跑通就用哪个。
+
+**自定义数据目录的支持范围**：`SERVICE` 指向模块脚本目录中的 `magpie.service`，不是 magpie 数据目录；磁贴通过该服务启停，服务仍会按 `magpie.config` 中的 `magpie_path` 工作。磁贴 App 的面板 URL 读取固定使用 `/data/adb/magpie/run/web.url`，桌面图标隐藏标记固定使用 `/data/adb/magpie/run/.tile_launcher_hidden`，因此这两项对自定义 `magpie_path` 支持不完整。这属于数据目录支持范围，不是 `SERVICE` 路径错误。
 
 ## 构建
 

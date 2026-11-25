@@ -14,9 +14,10 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 </div>
 
 > [!NOTE]
-> This repository contains **only the module scripts**, not magpie itself (the arm64 binary is ~87 MB).
+> This repository contains **only the module scripts**, not magpie itself (the arm64 binary).
 > Not having it is fine: tap `[Action]` after flashing and the module downloads and installs it —
-> the first tap only shows the plan, a second tap starts the download.
+> the first tap only shows the plan, a second tap starts the download. The current download size
+> is the manifest `size` reported by `install.sh plan`.
 >
 > The module only keeps magpie running on this phone. Providers, models, quotas and accounts are
 > magpie's own business, not this module's.
@@ -226,8 +227,7 @@ su -c magpie update         # download, verify, restart into it
 
 > [!NOTE]
 > Flashing the module does **not** download anything. The flash flow has no dependable interactive
-> terminal and 87 MB is a lot, so `customize.sh` only detects and tells you how; the download
-> happens when you confirm it.
+> terminal, so `customize.sh` only detects and tells you how; the download happens when you confirm it.
 
 > [!NOTE]
 > The installer does not assume `wget` is on `PATH`. Module scripts started by the manager often
@@ -565,10 +565,18 @@ the valid ones still take effect; only when nothing valid remains is the existin
 The check is format-only: a router address such as `192.168.1.1` — or even `127.0.0.1` when the device
 runs its own resolver — is allowed, and `doctor.sh` does a real lookup at runtime.
 
-The scripts follow `magpie_path`, but **changing the path does not migrate an existing binary
-or data**. Back up and stop the service before moving an existing installation, then update the
-configuration and start it again. The configuration is still read from the fixed locations above.
-Leave `magpie_path` alone if you only need to change listeners or DNS.
+The service, `status.sh`, `doctor.sh`, `[Action]`, `magpie`, and uninstall scripts use `magpie_path`;
+the config file itself is still read from the fixed locations above. Leave `magpie_path` alone if
+you only need to change listeners or DNS.
+
+The installer and uninstaller use a default-deny path allowlist: only `/data/adb/magpie`,
+`/data/adb/modules/magpie`, and their descendants are allowed. The installer additionally rejects
+symlinks in the target path or relevant descendants.
+The installer's `status`, `check`, `plan`, `install`, and `rollback` entry points all validate first.
+If an older custom `magpie_path` is outside those roots, the installer will refuse it; an upgrade
+will not migrate or delete that legacy directory, and the service will not move or clean it for you.
+Start/stop still goes through `magpie.service` in the module directory, which reads the config; an
+installer refusal does not imply automatic migration or deletion.
 
 Restart to apply:
 
@@ -760,22 +768,27 @@ cache) and finally verifies nothing is left.
 - **The DNS overlay needs one reboot**: `system/etc/resolv.conf` is mounted by Magisk at boot, so
   installing or updating the module needs a reboot. Afterwards a service restart rewrites the
   overlay; if doctor still shows the old upstream, reboot once more.
+- **The optional tile app only partially supports custom data paths**: it reads the panel URL from
+  `/data/adb/magpie/run/web.url`, and the launcher-hidden marker is fixed at
+  `/data/adb/magpie/run/.tile_launcher_hidden`; neither follows a custom `magpie_path`. Tile
+  start/stop goes through the module's `magpie.service`, which continues to use its configured data
+  path. The app's `SERVICE` points to the module scripts, not the data directory.
 
 ## Development and tests
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 46 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 53 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
 sh tests/test-service.sh                                  # process, dirs, status, session, 26 assertions
-sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA, 192 assertions
+sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA/tile, 237 assertions
 ```
 
-317 assertions total (46 + 13 + 40 + 26 + 192), plus 13 JVM cases in `tests/jvm/`. All run in temp
-directories with stubbed process checks — a running service is
-never touched. When using a different port, generate the fixtures with the same base
+369 assertions total (53 + 13 + 40 + 26 + 237), plus 13 JVM cases in `tests/jvm/`. Tests use temp
+directories and stubbed process checks — a running service is never touched. These counts describe
+the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
 wrong port and you get a pile of fake failures. Details and known gaps in
 [tests/README.md](tests/README.md).

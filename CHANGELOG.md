@@ -1,5 +1,22 @@
 # 变更记录
 
+## 未发布
+
+### 安装与卸载路径安全
+
+- 安装器与卸载器共用默认拒绝白名单：仅允许 `/data/adb/magpie`、`/data/adb/modules/magpie` 及各自子目录；`status`、`check`、`plan`、`install`、`rollback` 入口先校验；安装器还会拒绝目标路径和相关子路径中的符号链接。
+- 旧版自定义数据目录不会自动迁移或删除。若目录不在允许范围内，安装器会拒绝对它执行上述入口；服务不会自动搬动或清除该目录。
+
+### 磁贴桌面入口对账
+
+- `pm dump` 仅按目标包、User 0 的 `disabledComponents` 小节及完整组件类名判定；不会把其他包、用户或相邻小节中的同名内容当作已隐藏。
+- `pm dump` 失败、输出为空或无法确认时，幂等补做 `pm disable --user 0`，不误报已隐藏。
+- **更正 v1.2.3 的旧描述**：旧文把 `disabledComponents` 段描述成“以空行结束”不准确。空集合时 AOSP 不打印该标题；非空列表的段尾也不保证有空行。此处是对历史表述的纠正，不是本版新发现的行为；当前对账按包／用户／缩进小节上下文和完整类名识别，不要求段尾必须有空行。
+
+### 验证
+
+- 五套脚本测试：369 条断言（53 + 13 + 40 + 26 + 237）；另有 13 条 JVM 用例。测试结果以实际运行记录为准。
+
 ## 磁贴 App 1.2.4 — 2026-11-25
 
 控制中心磁贴显示的状态和实际运行状态偶尔不一致。查下来不是「读错了」，
@@ -23,6 +40,7 @@ App 侧同时修掉三处「会把已知状态丢掉」的地方，使症状不�
 
 `MainActivity` 同步改用 `resolve()` 的判定语义，`unknown` 时不写成「已停止」。
 
+
 ## v1.2.3 — 2026-11-24
 
 第三轮复审的修复：一个能删到系统命脉的白名单、一个永远不匹配的判据，
@@ -33,7 +51,7 @@ App 侧同时修掉三处「会把已知状态丢掉」的地方，使症状不�
 | 位置 | 问题 | 做什么 |
 | --- | --- | --- |
 | `lib.sh` `magpie_path_cleanable()` | 白名单是**枚举危险路径**：`/data/adb/magisk`、`/data/adb/magisk.db`、`/data/adb/service.d`、`/data/misc/wifi`、`/data/user/0/*` 都不在清单里，配置写错一个词就 `rm -rf` | 改成**默认拒绝**，只放行 `/data/adb/magpie` 与 `/data/adb/modules/magpie` |
-| `tile-app.sh` `tile_reconcile_launcher()` | `pm dump` 的 `disabledComponents` 段以**空行**结束（不是 `}`）；段内写的是 `com.ruin.magpie.tile.Launcher`，不是 `包名/.Launcher` —— grep 永远不匹配，每次开机白跑一次 `pm disable` | 截到空行为止 → 去首尾空白 → 整行字面匹配完整类名 |
+| `tile-app.sh` `tile_reconcile_launcher()` | 旧记录把 `pm dump` 的 `disabledComponents` 边界写成以**空行**结束（该边界描述不准确，见本文件「未发布」更正）；段内写的是 `com.ruin.magpie.tile.Launcher`，不是 `包名/.Launcher` —— grep 永远不匹配，每次开机白跑一次 `pm disable` | 当时改为匹配完整类名；当前对账按包、User 0 与缩进小节上下文识别，不要求空行作为段尾 |
 | `LauncherIcon.reconcile()` | `!want && systemHidden` 这一支（用户在系统设置里停用）只改 prefs、没写标记文件，系统重置后开机找不到标记就不补隐藏 | 补 `writeFlag(true)` |
 | `LauncherIcon.writeFlag()` | 写入失败被静默吞掉 | 失败时 `Log.w` 留痕 |
 | `Shell.java` | 两段重复 javadoc | 合并成一段 |
@@ -46,7 +64,7 @@ App 侧同时修掉三处「会把已知状态丢掉」的地方，使症状不�
 
 ### 验证
 
-- 真机核对 `pm dump` 真实格式：段落以空行结束、组件名是完整类名
+- 真机核对 `pm dump` 真实格式并确认组件名是完整类名。旧记录称段落以空行结束，此边界描述现已更正：空集合时不打印标题，非空列表段尾也不保证有空行（见「未发布」说明）。
 - 真机确认 `/data/adb/magpie/run` 实际是 `0777`；文档此前写「run 是 0700」是错的，
   真正的屏障是父目录 `/data/adb` 的 `0700` —— 两处文档已更正
 - `test-lib.sh` 新增 15 条：`magisk` / `ksu` / `ap` / `magisk.db` / `service.d` /
