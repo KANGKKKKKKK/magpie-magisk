@@ -565,18 +565,26 @@ the valid ones still take effect; only when nothing valid remains is the existin
 The check is format-only: a router address such as `192.168.1.1` — or even `127.0.0.1` when the device
 runs its own resolver — is allowed, and `doctor.sh` does a real lookup at runtime.
 
-The service, `status.sh`, `doctor.sh`, `[Action]`, `magpie`, and uninstall scripts use `magpie_path`;
+The service script, `status.sh`, `doctor.sh`, `magpie`, and the uninstaller use `magpie_path`;
 the config file itself is still read from the fixed locations above. Leave `magpie_path` alone if
 you only need to change listeners or DNS.
 
 The installer and uninstaller use a default-deny path allowlist: only `/data/adb/magpie`,
 `/data/adb/modules/magpie`, and their descendants are allowed. The installer additionally rejects
-symlinks in the target path or relevant descendants.
-The installer's `status`, `check`, `plan`, `install`, and `rollback` entry points all validate first.
-If an older custom `magpie_path` is outside those roots, the installer will refuse it; an upgrade
-will not migrate or delete that legacy directory, and the service will not move or clean it for you.
-Start/stop still goes through `magpie.service` in the module directory, which reads the config; an
-installer refusal does not imply automatic migration or deletion.
+symlinks in the target path or relevant descendants, and its `status`, `check`, `plan`, `install`,
+and `rollback` entry points all validate first.
+
+If an older custom `magpie_path` lies outside those roots, an upgrade **will not** migrate or delete
+it, and the service will not move or clean it. In that state:
+
+- running the module's `scripts/magpie.service start|stop|restart|status` directly still works from
+  the existing configuration;
+- the `[Action]` menu and `action.sh start|stop|restart` first call `install.sh status` to decide
+  whether the binary is ready, so the path check blocks them; `action.sh status|gateway|lan|local|panel`
+  do not take that step.
+
+To restore the full feature set, move the data directory back inside the allowed roots: back up,
+stop the service, move the files, update the configuration, then start it again.
 
 Restart to apply:
 
@@ -781,12 +789,12 @@ python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manife
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 53 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 40 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 43 assertions
 sh tests/test-service.sh                                  # process, dirs, status, session, 26 assertions
 sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA/tile, 237 assertions
 ```
 
-369 assertions total (53 + 13 + 40 + 26 + 237), plus 13 JVM cases in `tests/jvm/`. Tests use temp
+372 assertions total (53 + 13 + 43 + 26 + 237), plus 13 JVM cases in `tests/jvm/`. Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the

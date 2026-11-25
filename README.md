@@ -533,9 +533,16 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 不存在才从模块里复制一份、权限 600，已存在绝不动。所以照本文档直接去改就行，
 不用先手动创建。
 
-服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本按 `magpie_path` 工作；配置文件本身仍从上面的固定位置读取。仅为更改地址或 DNS 时，不需要修改 `magpie_path`。
+服务脚本、`status.sh`、`doctor.sh`、`magpie` 命令和卸载脚本按 `magpie_path` 工作；配置文件本身仍从上面的固定位置读取。仅为更改地址或 DNS 时，不需要修改 `magpie_path`。
 
-安装器与卸载器共用默认拒绝的路径白名单：只允许 `/data/adb/magpie`、`/data/adb/modules/magpie` 及其子目录。安装器另行拒绝目标路径或相关子路径中的符号链接；其 `status`、`check`、`plan`、`install`、`rollback` 都先做校验。旧版若把 `magpie_path` 配在这两个根目录之外，安装器会拒绝操作；升级不会自动迁移或删除旧目录，服务也不会替你搬动或清理它。服务启停仍由模块目录中的 `magpie.service` 读取配置处理，不应把安装器拒绝误解成自动迁移或删除。
+安装器与卸载器共用默认拒绝的路径白名单：只允许 `/data/adb/magpie`、`/data/adb/modules/magpie` 及其子目录。安装器另行拒绝目标路径或相关子路径中的符号链接；其 `status`、`check`、`plan`、`install`、`rollback` 都先做校验。
+
+旧版若把 `magpie_path` 配在这两个根目录之外，升级**不会**自动迁移或删除该目录，服务也不会替你搬动或清理。此时：
+
+- 直接执行模块里的 `scripts/magpie.service start|stop|restart|status` 仍按原配置工作；
+- `[执行]` 菜单和 `action.sh start|stop|restart` 会先调用 `install.sh status` 判断本体是否就绪，因此会被路径校验拦下；`action.sh status|gateway|lan|local|panel` 不走这一步。
+
+要恢复完整功能，请把数据目录迁回允许范围：先备份、停服务，再移动文件、修改配置并启动。
 
 改完重启服务生效：
 
@@ -750,12 +757,12 @@ python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 53 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 43 条
 sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 26 条
 sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/磁贴入口 237 条
 ```
 
-五个套件共 369 条断言（53 + 13 + 40 + 26 + 237），另有 13 条 JVM 用例。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+五个套件共 372 条断言（53 + 13 + 43 + 26 + 237），另有 13 条 JVM 用例。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 
