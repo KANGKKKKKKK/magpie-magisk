@@ -60,7 +60,7 @@
 | 进程守护 | 30 秒巡检，被杀或回收后自动拉回；用户主动停止时不强行恢复 |
 | 音量键菜单 | 点 `[执行]` 开菜单：切网关、看接入信息、启停、重启、开面板，音量键选、不用打字 |
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
-| 自检 | `scripts/doctor.sh` 九项检查，直接告诉你哪里不对、下一步做什么 |
+| 自检 | `scripts/doctor.sh` 十项检查，直接告诉你哪里不对、下一步做什么 |
 | 控制中心磁贴 | 可选装一个 40 KB 的 App，把启动/停止放进下拉栏；不装也不影响任何功能 |
 | 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
 | DNS 上游 | 模块自带 `system/etc/resolv.conf`，按 `MAGPIE_DNS` 重写；不启 dnsmasq，不占 53 端口 |
@@ -117,7 +117,7 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 
 模块会等 `sys.boot_completed` 再拉起服务，不需要解锁屏幕。
 
-这次重启也负责把 DNS 覆盖挂上（`system/etc/resolv.conf` → `/etc/resolv.conf`，Magisk 在开机时挂载）。跳过重启的话原生通道会一直解析失败，`doctor.sh` 的 `[8/9]` 会直接指出来。
+这次重启也负责把 DNS 覆盖挂上（`system/etc/resolv.conf` → `/etc/resolv.conf`，Magisk 在开机时挂载）。跳过重启的话原生通道会一直解析失败，`doctor.sh` 的 `[8/10]` 会直接指出来。
 
 **4. 验证**
 
@@ -125,7 +125,7 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 # running (PID <pid>)
 
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # 九项自检，出问题会告诉你怎么修
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # 十项自检，出问题会告诉你怎么修
 ```
 
 管理器里那行描述会从刷入时的静态文字变成「🟢 运行中 v… | 仅本机」；开过局域网之后则是「🟢 运行中 v… | 192.168.x.x:3425」。
@@ -313,7 +313,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service start
 su -c sh /data/adb/modules/magpie/scripts/magpie.service stop
 su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # 九项自检
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # 十项自检
 ```
 
 `start` 失败返回非 0，日志在 `/data/adb/magpie/run/magpie.log`。
@@ -340,7 +340,7 @@ su -c sh /data/adb/modules/magpie/action.sh panel     # 打开面板
 
 ### 接入前检查
 
-- [ ] 服务在跑；不确定就执行下面的九项自检。
+- [ ] 服务在跑；不确定就执行下面的十项自检。
 - [ ] 已在 **magpie 本体面板（P1）** 配好至少一个供应商，并启用要使用的模型。
 - [ ] 选择下方的本机或局域网方案。局域网访问另需一把**已启用**的网关 key。
 
@@ -552,19 +552,26 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ## 自检与排障
 
-`scripts/doctor.sh` 一次跑九项检查（只读，不改任何配置）：
+`scripts/doctor.sh` 一次跑十项检查（只读，不改任何配置）：
 
 ```
-[1/9] 本体与进程      本体装了没 / 能不能跑 / 版本 / PID / oom_score_adj
-[2/9] 端口监听        网关 / 面板端口有没有人听
-[3/9] 本机可用性      网关是否返回 200
-[4/9] 面板与访问密码  data/web.key 在不在？带密码能不能进
-[5/9] 网关密钥        有几把已启用的 key
-[6/9] CA 证书包       证书张数与权限
-[7/9] 局域网暴露      是否已对局域网开放、对外广播的地址是什么
-[8/9] DNS 解析        /etc/resolv.conf 在不在、上游能不能解析域名
-[9/9] 日志与磁盘      日志大小、数据目录可写、剩余空间
+[1/10] 本体与进程      本体装了没 / 能不能跑 / 版本 / PID / oom_score_adj
+[2/10] 端口监听        网关 / 面板端口有没有人听
+[3/10] 本机可用性      网关是否返回 200
+[4/10] 面板与访问密码  data/web.key 在不在？带密码能不能进
+[5/10] 网关密钥        有几把已启用的 key
+[6/10] CA 证书包       证书张数与权限
+[7/10] 局域网暴露      是否已对局域网开放、对外广播的地址是什么
+[8/10] DNS 解析        /etc/resolv.conf 在不在、上游能不能解析域名
+[9/10] 磁贴            装了没、root 授权、画的什么、和实际状态是否一致、有没有被冻结
+[10/10] 日志与磁盘     日志大小、数据目录可写、剩余空间
 ```
+
+磁贴那项对**没装磁贴**、**没加进控制中心**的情况都按通过处理——它是可选组件。
+「显示和实际不一致」也只报一句提示而不是失败：磁贴只在展开面板时才重读状态，
+从命令行或看门狗启停服务后显示旧值是预期行为。真正值得注意的是「进程被冻结」，
+脚本会顺带说出疑似是哪个模块在冻（NoActive / CZero / 系统 `cached_apps_freezer` /
+厂商 greezer），并提示把 UID 加进那个模块的白名单——App 自己躲不掉。
 
 | 现象 | 处理 |
 | --- | --- |
@@ -578,7 +585,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | 管理器显示「配置有误 / 端口不可用」 | `MAGPIE_ADDR` / `MAGPIE_WEB_ADDR` 写成了 `127.0.0.1` 这种没有端口的地址。改成 `主机:端口`（IPv6 用 `[::1]:3425`）再重启 |
 | 面板整份打不开，JSON 解析失败 | 旧版本在端口写错时会写出非法 `status.json`；升到 v1.0 后 `cat` 一下确认 `configError` 字段，按提示改配置 |
 | HTTPS 报证书错误 | 删掉 `/data/adb/magpie/data/certs/ca-bundle.crt*` 再重启，会自动重建 |
-| 原生通道报 `lookup ... on [::1]:53: connection refused` | Go 没有可用上游。`cat /etc/resolv.conf` 看覆盖在不在；不在就重启一次手机，再跑 doctor 的 `[8/9] DNS 解析` |
+| 原生通道报 `lookup ... on [::1]:53: connection refused` | Go 没有可用上游。`cat /etc/resolv.conf` 看覆盖在不在；不在就重启一次手机，再跑 doctor 的 `[8/10] DNS 解析` |
 | 杀掉进程后又自己起来 | 意外退出会被看门狗拉回；要主动停止，请用菜单、磁贴或 `magpie.service stop`，它们会写 `.user_stopped` 标记，本次开机期间不会被看门狗拉回 |
 | 改了 `magpie.config` 没生效 | 确认改的是 `/data/adb/magpie/scripts/magpie.config`，然后 `restart` |
 | 开机没自启 | 确认模块已启用，再看 `run/watchdog.log` 的启动错误及 `doctor.sh` 输出。主动停止标记不阻止下次开机启动；显式 `start` 也会清除它 |
@@ -638,7 +645,7 @@ magpie-magisk/
 │   ├── magpie.service                start / stop / restart / status / toggle
 │   ├── status.sh                     生成状态描述、status.json、日志尾
 │   ├── install.sh                    检测 / 下载 / 校验 / 部署本体
-│   ├── doctor.sh                     九项自检
+│   ├── doctor.sh                     十项自检
 │   ├── lib.sh                        地址解析 + 局域网地址 + 进程识别 + DNS/IP 校验，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
 │   ├── tile-app.sh                   磁贴 App 的安装/版本比较（刷机与开机共用）

@@ -68,7 +68,7 @@ to see the state and clean up after itself.
 | Watchdog | Checks every 30 s, restarts the process if killed; respects a manual stop |
 | Volume-key menu | Tapping `[Action]` opens a menu: switch gateway, see addresses, start/stop/restart, open the panel — pick with the volume keys, no typing |
 | Live status | The module row shows state and the address to use ([example](#the-action-button)) without tapping anything |
-| Self-check | `scripts/doctor.sh` runs nine checks and tells you what to fix |
+| Self-check | `scripts/doctor.sh` runs ten checks and tells you what to fix |
 | CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE` and `MAGPIE_BUN` filled in, and says so when DNS is not set up |
 | Upstream DNS | Ships `system/etc/resolv.conf`, rewritten from `MAGPIE_DNS`; no dnsmasq, no port 53 |
 | CA bundle | Merges system roots for the Go static PIE, rebuilds when system CAs change |
@@ -131,7 +131,7 @@ The module waits for `sys.boot_completed` before starting. No need to unlock the
 
 This reboot is also what puts the DNS overlay in place (`system/etc/resolv.conf` →
 `/etc/resolv.conf`, mounted by Magisk at boot). Skip it and native channels keep failing to
-resolve — `[8/9]` in `doctor.sh` says so outright.
+resolve — `[8/10]` in `doctor.sh` says so outright.
 
 **4. Verify**
 
@@ -139,7 +139,7 @@ resolve — `[8/9]` in `doctor.sh` says so outright.
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 # running (PID <pid>)
 
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # nine checks, says what to fix
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # ten checks, says what to fix
 ```
 
 The module row should now read `🟢 运行中 v0.1.4260 | 仅本机` (`| 192.168.1.5:3425` once LAN is on)
@@ -343,7 +343,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service start
 su -c sh /data/adb/modules/magpie/scripts/magpie.service stop
 su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 su -c sh /data/adb/modules/magpie/scripts/magpie.service status
-su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # nine self-checks
+su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # ten self-checks
 ```
 
 `start` returns non-zero on failure. Logs are in `/data/adb/magpie/run/magpie.log`.
@@ -352,7 +352,7 @@ su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # nine self-checks
 
 ### Before you start
 
-- [ ] The service is running; use the nine-check command below if unsure.
+- [ ] The service is running; use the ten-check command below if unsure.
 - [ ] At least one provider is configured in **magpie's own panel (P1)** and the intended models are enabled.
 - [ ] Choose the same-phone or LAN setup below. LAN calls additionally require an **enabled** gateway key.
 
@@ -594,19 +594,27 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ## Self-check and troubleshooting
 
-`scripts/doctor.sh` runs nine read-only checks:
+`scripts/doctor.sh` runs ten read-only checks:
 
 ```
-[1/9] binary and process    installed? runs? version? PID? oom_score_adj?
-[2/9] listeners             is anything on the gateway / panel ports
-[3/9] local reachability    does the gateway answer 200
-[4/9] panel and password    is data/web.key there, does it work
-[5/9] gateway keys          how many are enabled
-[6/9] CA bundle             certificate count and permissions
-[7/9] LAN exposure          open to the subnet? what address is advertised?
-[8/9] DNS                   is /etc/resolv.conf there, can the upstream resolve
-[9/9] logs and storage      log sizes, data dir writable, free space
+[1/10] binary and process    installed? runs? version? PID? oom_score_adj?
+[2/10] listeners             is anything on the gateway / panel ports
+[3/10] local reachability    does the gateway answer 200
+[4/10] panel and password    is data/web.key there, does it work
+[5/10] gateway keys          how many are enabled
+[6/10] CA bundle             certificate count and permissions
+[7/10] LAN exposure          open to the subnet? what address is advertised?
+[8/10] DNS                   is /etc/resolv.conf there, can the upstream resolve
+[9/10] quick tile            installed? root grant? what it paints, matches reality? frozen?
+[10/10] logs and storage     log sizes, data dir writable, free space
 ```
+
+The tile check passes when the app is not installed or not added to Quick Settings — it
+is optional. "Paints something different from reality" is only a hint, not a failure:
+the tile re-reads state when the panel opens, so a service restarted from the CLI or
+by the watchdog legitimately leaves a stale label. What matters is "process is frozen";
+the script then names the likely freezer (NoActive / CZero / system
+`cached_apps_freezer` / vendor greezer) and tells you to whitelist the app's UID there.
 
 | Symptom | Fix |
 | --- | --- |
@@ -618,7 +626,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | Start fails, log says port in use | Identify the listener with `doctor.sh` or `ss -ltnp`; use `restart` if it is this service. Do not kill all `pidof magpie` results: MCP children may share that name |
 | Panel data never changes | Check "数据 HH:MM:SS": normal polling refreshes about every 2.5 min by default; custom intervals or failed-start backoff can delay it. If stale for a long time, check the watchdog process and startup/error entries in `run/watchdog.log`; it does not log every round |
 | HTTPS fails with certificate errors | Delete `/data/adb/magpie/data/certs/ca-bundle.crt*` and restart; it rebuilds |
-| Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/9]` in doctor |
+| Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/10]` in doctor |
 | Process returns after being killed | The watchdog revives unexpected exits. Stop through the menu, tile or `magpie.service stop` instead; `.user_stopped` prevents watchdog restarts during this boot |
 | Edited `magpie.config` but nothing changed | Make sure you edited `/data/adb/magpie/scripts/magpie.config`, then `restart` |
 | No start on boot | Confirm the module is enabled; read startup errors in `run/watchdog.log` and run `doctor.sh`. A manual-stop marker does not prevent the next boot from starting the service; explicit `start` clears it too |
@@ -697,7 +705,7 @@ magpie-magisk/
 │   ├── status.sh                     manager description, status.json, log tail
 │   ├── install.sh                    detect / download / verify / deploy the body
 │   ├── lib.sh                        LAN address, process and body helpers, shared
-│   ├── doctor.sh                     nine self-checks
+│   ├── doctor.sh                     ten self-checks
 │   ├── magpie-cli.sh                 environment wrapper around the binary
 │   └── magpie.config                 configuration defaults
 ├── webroot/
