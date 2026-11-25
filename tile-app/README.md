@@ -79,6 +79,24 @@ App 里有个「桌面图标」开关。隐藏之后桌面不再有图标，只�
 （`run/` 目录自身的 mode 随模块创建时的 umask 而定，本机实测是 `0777`。
 但这一级之上是 `0700`，所以对普通 App 来说仍然不可达。）
 
+## 已知限制：进程被冻结时磁贴不会刷新
+
+MIUI / HyperOS 上的冻结类模块（本机是 NoActive）会在本 App 空闲几十秒后
+把整个进程冻住（`cgroup.freeze=1`）。冻结期间：
+
+- SystemUI 展开控制中心时发的 `onStartListening` 到不了 App；
+- `su` 根本不会执行（不是「查到了旧状态」，是压根没查）；
+- 磁贴停在最后一次画出的画面上，于是看起来「和实际运行状态不符」。
+
+实测：冻结状态下 `cmd statusbar expand-settings` 后，App 侧一行日志都没有；
+手动 `echo 0 > /sys/fs/cgroup/uid_XXXX/pid_YYYY/cgroup.freeze` 解冻后立刻正常。
+**这个问题在 App 里修不了**，必须在冻结白名单里放行
+（NoActive：`whiteUidSet` 加本 App 的 UID，改完重启生效）。
+
+App 侧能做的只有「不把已经知道的状态丢掉」：拿不到 `Tile` 对象时按
+60/150/400/900 ms 重试；`su` 输出认不出来时沿用上次状态，而不是画成「已停止」。
+
+
 su 的路径不写死：按 `su`、`/system/bin/su`、`/system/xbin/su`、`/sbin/su`、
 `/debug_ramdisk/su`、`/data/adb/ksu/bin/su`、`/data/adb/ap/bin/su` 的顺序试，
 哪个能跑通就用哪个。

@@ -1,5 +1,28 @@
 # 变更记录
 
+## 磁贴 App 1.2.4 — 2026-11-25
+
+控制中心磁贴显示的状态和实际运行状态偶尔不一致。查下来不是「读错了」，
+而是**它根本没被叫醒**：MIUI / HyperOS 上的冻结类模块（本机是 NoActive）
+会在磁贴进程空闲几十秒后把整个进程冻住（`cgroup.freeze=1`）。冻结期间
+SystemUI 展开控制中心时发的 `onStartListening` 到不了 App，`su` 一次都不执行，
+磁贴就停在最后一次画出的画面上。
+
+实测：冻结状态下 `cmd statusbar expand-settings`，SystemUI 侧有
+`set listening to true`，App 侧一行日志都没有；手动 `echo 0 > .../cgroup.freeze`
+解冻后立刻恢复。所以根治只能靠白名单（本机已把磁贴 UID 加进 NoActive
+`whiteUidSet`，重启生效）。
+
+App 侧同时修掉三处「会把已知状态丢掉」的地方，使症状不至于被放大：
+
+| 位置 | 问题 | 做什么 |
+| --- | --- | --- |
+| `render()` | `getQsTile()` 返回 null 时直接 return —— 那次刷新永久丢失 | 按 60/150/400/900 ms 重试，带序号防止慢的旧结果盖掉新状态 |
+| `classify()` | 输出认不出来时兜底成「已停止」，把「不知道」画成「服务挂了」 | 拆出 `resolve()`：认不出来沿用上次已知状态；`classify()` 独立返回 `unknown` |
+| `onStartListening()` | 缓存过期时无条件先画灰的「处理中」，su 慢一点就整块变灰 | 有已知状态先用它顶上，完全没头绪才画「处理中」 |
+
+`MainActivity` 同步改用 `resolve()` 的判定语义，`unknown` 时不写成「已停止」。
+
 ## v1.2.3 — 2026-11-24
 
 第三轮复审的修复：一个能删到系统命脉的白名单、一个永远不匹配的判据，

@@ -3,6 +3,8 @@ package com.ruin.magpie.tile;
 import android.content.ComponentName;
 import android.graphics.drawable.Icon;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
 
@@ -20,6 +22,12 @@ import android.service.quicksettings.TileService;
  *
  * <p>磁贴不会主动弹 root 授权框（TileService 在后台跑，弹不出来）。
  * 所以用户必须先打开一次 App 完成授权，这里才有 root 可用。
+ *
+ * <p>还有一项不在本类能力范围内的坑：MIUI / HyperOS 的冻结类模块会把本 App
+ * 的进程冻住（cgroup.freeze=1）。冻结期间 SystemUI 的 onStartListening
+ * 根本到不了这里 —— 连 su 都不会执行，磁贴就停在最后一次画出的状态上，
+ * 表现为「磁贴和运行状态不符」。本类只能做到「不把已经知道的状态丢掉」
+ * （见 render 的重试、resolve 的兜底），根治要把本 App 加进冻结白名单。
  */
 public class MagpieTileService extends TileService {
 
@@ -28,6 +36,21 @@ public class MagpieTileService extends TileService {
 
     private static long cachedAt = 0L;
     private static String cachedState = null;
+
+    /**
+     * 拿不到 Tile 对象时的重试间隔。
+     *
+     * <p>onStartListening 刚进来时，SystemUI 那边的 CustomTile 偶尔还没挂好，
+     * getQsTile() 返回 null。以前这里直接 return：那次刷新就永久丢了，
+     * 磁贴停在旧状态上，用户看到的就是「显示和实际不一致」。
+     * 改成短间隔重试几次，正常情况下第一次就成功，不会有额外开销。
+     */
+    private static final long[] RETRY_MS = {60L, 150L, 400L, 900L};
+
+    /** 最新一次 render 的序号：延迟重试只在序号仍是最新时生效，免得旧状态盖掉新状态。 */
+    private static long renderSeq = 0L;
+
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     @Override
     public void onStartListening() {
@@ -38,13 +61,16 @@ public class MagpieTileService extends TileService {
             render(cachedState);
             return;
         }
-        render("working");
+        // 已知状态先顶上，完全没头绪才画「处理中」。
+        // 以前是无条件画灰：su 慢一点（比如刚开机、root 授权还没下来），
+        // 整块磁贴就会灰在那里显示「处理中」，看起来同样是状态不对。
+        render(cachedState != null ? cachedState : "working");
         // 一条命令同时问「模块在不在」与「服务状态」：/data/adb 是 0700 root，
         // App 自己 stat 不到，只能让 su 去看。
         Shell.run(Shell.statusCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state = classify(r, "stopped");
+                String state = resolve(r);
                 cachedState = state;
                 cachedAt = System.currentTimeMillis();
                 render(state);
@@ -85,12 +111,26 @@ public class MagpieTileService extends TileService {
         Shell.run(Shell.toggleCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state = classify(r, "stopped");
+                String state = resolve(r);
                 cachedState = state;
                 cachedAt = System.currentTimeMillis();
                 render(state);
             }
         });
+    }
+
+    /**
+     * 把 su 的返回结果翻成磁贴状态，认不出来时沿用上次已知状态。
+     *
+     * <p>宁可显示「上一次的结果」，也不能把「不知道」画成「已停止」：
+     * 后者会让用户以为服务挂了，或者以为点了启动其实没起来，两头都是误导。
+     */
+    static String resolve(Shell.Result r) {
+        String state = classify(r);
+        if ("unknown".equals(state)) {
+            return cachedState != null ? cachedState : "stopped";
+        }
+        return state;
     }
 
     /**
@@ -102,11 +142,13 @@ public class MagpieTileService extends TileService {
      *
      * <p>失败必须如实显示成「失败」。以前 toggle 失败会落到 else 分支被画成
      * 「已停止」—— 用户点了启动、其实没起来，界面上却是「已停止」，看不出出过事。
+     *
+     * <p>返回 "unknown" 表示「有输出但认不出来」，由调用方决定怎么兜底。
      */
-    static String classify(Shell.Result r, String wantPrefix) {
+    static String classify(Shell.Result r) {
         String out = r.trimmed();
         // 模块不存在时命令会打印哨兵 —— 这条要在最前面判，
-        // 否则会被后面「输出非空但认不出来」兜到 stopped。
+        // 否则会被后面「输出非空但认不出来」兜到旧状态。
         if (out.contains(Shell.NO_MODULE)) {
             return "nomodule";
         }
@@ -130,14 +172,36 @@ public class MagpieTileService extends TileService {
         if (out.isEmpty() && !r.ok) {
             return "noroot";
         }
-        // 有输出但认不出来（例如 status 打印了别的），沿用上次已知状态
-        return wantPrefix;
+        return "unknown";
     }
 
     /** 把状态画到磁贴上。 */
     private void render(String state) {
+        render(state, 0, ++renderSeq);
+    }
+
+    /**
+     * 真正的绘制，拿不到 Tile 时按 RETRY_MS 重试。
+     *
+     * @param seq 发起这次绘制的序号；重试期间若已有更新的状态，本次直接放弃，
+     *            否则慢的那次会把新的盖回去。
+     */
+    private void render(final String state, final int attempt, final long seq) {
+        if (seq != renderSeq) {
+            return;
+        }
         Tile tile = getQsTile();
         if (tile == null) {
+            // SystemUI 那边还没挂好 / 已经解绑：重试，但不要无限重试，
+            // 面板真的关掉了就让它走完这几档结束。
+            if (attempt < RETRY_MS.length) {
+                MAIN.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        render(state, attempt + 1, seq);
+                    }
+                }, RETRY_MS[attempt]);
+            }
             return;
         }
         String label;
@@ -186,7 +250,10 @@ public class MagpieTileService extends TileService {
 
     /**
      * 让 SystemUI 重新回调 onStartListening。
-     * 服务在别处（App 里、命令行、看门狗）被启停后调用，磁贴才不会显示旧状态。
+     *
+     * <p>服务在别处（App 里、命令行、看门狗）被启停后调用，磁贴才不会显示旧状态。
+     * 注意：如果本进程被系统冻结，这个调用同样跑不到 —— 这是冻结模块的问题，
+     * 不是这里的逻辑问题。
      */
     static void refresh(android.content.Context ctx) {
         cachedState = null;

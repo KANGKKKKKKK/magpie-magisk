@@ -176,7 +176,7 @@ public class MainActivity extends Activity {
             @Override
             public void onResult(Shell.Result r) {
                 // 与磁贴共用同一套判定，避免「磁贴说启动失败、界面说需要 root」
-                String state = MagpieTileService.classify(r, "stopped");
+                String state = MagpieTileService.classify(r);
                 if ("noroot".equals(state)) {
                     status.setText(R.string.state_no_root);
                     hint.setText(R.string.root_needed);
@@ -191,6 +191,10 @@ public class MainActivity extends Activity {
                 } else if ("nomodule".equals(state)) {
                     status.setText(R.string.state_unavailable);
                     hint.setText(R.string.module_missing);
+                } else if ("unknown".equals(state)) {
+                    // 有输出但认不出来：不要写成「已停止」，否则和磁贴一样会误导
+                    status.setText("…");
+                    hint.setText(R.string.tile_hint);
                 } else {
                     status.setText(R.string.state_stopped);
                 }
