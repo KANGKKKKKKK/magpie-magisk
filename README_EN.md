@@ -104,25 +104,25 @@ then Manager → Modules → Install from storage.
 This step **does not need magpie's binary to be there yet**: if it is missing, the module says so
 and finishes installing anyway.
 
-**2. Get the binary there (either way)**
+**2. Prepare the binary**
 
-`/data/adb/modules/magpie/` only exists once the module is flashed, so both routes live here.
+If the binary is missing, tap `[Action]` in the manager to review the installation plan,
+then tap it again to confirm the download. If a usable binary is already installed, go to step 3.
 
-Already have it — just check:
+<details>
+<summary>CLI alternative: check or install the binary</summary>
 
 ```sh
 su -c sh /data/adb/modules/magpie/scripts/install.sh status
-# state=ready version=0.1.4302 path=/data/adb/magpie/bin/magpie
-```
+# Example: state=ready version=0.1.4302 path=/data/adb/magpie/bin/magpie
 
-Don't have it — let the module fetch and install it:
-
-```sh
+# Use only when installing or deliberately redeploying; --yes also permits replacing an existing binary
 su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 ```
 
-Rather not type commands: tap `[Action]` in the manager — it runs the same flow.
-Details and the security notes are in [Installing the body](#installing-the-body).
+</details>
+
+Details and security notes: [Installing the body](#installing-the-body).
 
 **3. Reboot**
 
@@ -162,13 +162,27 @@ Paste that into the phone's browser. That is magpie's own panel — see
 > [Configuration](#configuration)), restart the service, and use the LAN address reported by
 > `doctor.sh`. **Read [the two keys](#the-two-different-keys) first.**
 
-Manual install (without the zip):
+**6. Configure a provider and get a model reply**
+
+In **magpie's own panel (P1)**, add or sign in to at least one provider and enable the models
+you want to use. Skip this if already configured. The module does not supply accounts, models or quota.
+
+Follow [Connecting a client](#connecting-a-client), choose the same-phone or LAN setup, copy an
+actual model ID from the catalog, and send a message. **A model reply completes the setup**;
+a running process or an open panel alone does not verify the upstream request.
+
+<details>
+<summary>Advanced: manually extract the module instead of installing through the manager</summary>
 
 ```sh
 unzip magpie-v*.zip -d /data/adb/modules/magpie   # use the file you actually downloaded
 chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
+
+Prepare the binary and reboot as above. Installing through the manager is recommended.
+
+</details>
 
 ## Installing the body
 
@@ -254,7 +268,7 @@ The `[Action]` button in the manager opens a **volume-key menu** — no typing, 
 
 | Item | Does |
 | --- | --- |
-| 1 Switch gateway | Toggles between `127.0.0.1` (this device only) and `0.0.0.0` (LAN); restarts the service so it takes effect |
+| 1 Switch gateway | Toggles both API and panel listeners between `127.0.0.1` (this device only) and `0.0.0.0` (LAN); restarts a running service to apply |
 | 2 Connection info | Lists the local and LAN addresses, plus what to paste into another device |
 | 3 / 4 / 5 | Restart / stop / start |
 | 6 Open panel | Opens the WebUI in a browser, with your key |
@@ -266,6 +280,12 @@ version, size and source first, and only a second tap downloads.
 > [!TIP]
 > **Sharing with a tablet over a hotspot**: `[Action]` → 1 to switch to LAN → 2 to read the
 > address → paste it into magpie on the tablet. Switch back to "this device only" afterwards.
+
+> [!WARNING]
+> Switching to LAN mode changes **both the API and panel listeners** to `0.0.0.0`
+> (ports 3425 / 3430 by default). Both use unencrypted HTTP by default: use trusted networks only,
+> never expose them directly to the public internet. To share only the API, set
+> `MAGPIE_ADDR=0.0.0.0:3425` and keep `MAGPIE_WEB_ADDR=127.0.0.1:3430`, then restart.
 
 The volume keys do change the media volume on the way; the menu restores the value it found on
 exit. Run from a terminal the menu redraws in place (only the `▸` moves); the manager's text box
@@ -332,56 +352,77 @@ su -c sh /data/adb/modules/magpie/scripts/doctor.sh          # nine self-checks
 
 ### Before you start
 
-- [ ] The service is running: `su -c sh /data/adb/modules/magpie/scripts/magpie.service status`
-- [ ] At least one **provider configured and enabled** in magpie (a gateway key alone does not conjure models)
-- [ ] An **enabled** gateway key
-- [ ] Same phone → use `127.0.0.1`; another device → open the LAN listener and make sure both are on the same subnet
+- [ ] The service is running; use the nine-check command below if unsure.
+- [ ] At least one provider is configured in **magpie's own panel (P1)** and the intended models are enabled.
+- [ ] Choose the same-phone or LAN setup below. LAN calls additionally require an **enabled** gateway key.
 
 ```sh
-# One command checks all of it: binary, process, ports, keys, exposure
 su -c sh /data/adb/modules/magpie/scripts/doctor.sh
 ```
 
-### Step 1: get the URL and key
+### Step 1: choose the address and key for your setup
 
-```sh
-su -c magpie gateway-key add phone
-# sk-...      ← printed once, save it now
-```
+#### On the same phone
 
-The panel home page shows the same two values. What you need:
+Leave the default loopback listener enabled; no LAN sharing is needed.
 
-| Field | Value |
+| Client field | Value |
 | --- | --- |
 | Base URL | `http://127.0.0.1:3425/v1` |
-| API key | the key printed above |
+| API key | `magpie-myapp` as a local client identifier, or your own gateway key |
+| Model ID | Copy an actual `id` from `GET /v1/models`; see the next step |
+
+Loopback does not authenticate the key. **This does not apply to LAN calls**; see
+[the two keys](#the-two-different-keys).
+
+#### From a tablet or computer on the LAN
+
+1. Prepare an enabled gateway key in magpie, or create one with the CLI:
+
+   ```sh
+   su -c magpie gateway-key add tablet
+   # Save the full key returned now; do not post it in screenshots or logs
+   ```
+
+2. Connect both devices to a Wi-Fi network that allows them to reach each other, or connect the
+   other device to the phone's hotspot.
+3. `[Action]` → 1 switches to LAN mode; option 2 displays the connection details.
+4. Enter `http://<phone-LAN-IP>:3425/v1`, the full enabled key, and an ID from the model catalog.
+   For example: `http://192.168.1.100:3425/v1`. Do not enter `127.0.0.1` or `0.0.0.0` on the other device.
 
 > [!WARNING]
-> `gateway-key list` does **not** show full keys, only IDs and masks. Keys are printed only by
-> `add` and `rotate`. Lost it? `magpie gateway-key rotate <id>` issues a new one.
+> LAN mode opens both the API and the management panel, over HTTP by default. Use trusted networks
+> only. To share only the API, configure its listener separately as described above.
+> The API key is not the panel password from `?k=`.
 
-### Step 2: put it in your client
+> [!NOTE]
+> CLI `gateway-key list` does not provide a full plaintext key for client configuration.
+> Save the full key when creating or rotating it, not its mask. If lost, run
+> `magpie gateway-key rotate <id>` and update clients that use the old key.
+> Values displayed by the module's status panel (P2) depend on the binary version and status
+> collection; do not rely on that panel as your only backup of a full key.
 
-Any client that accepts a custom OpenAI endpoint will work. Three fields, typically:
+### Step 2: configure the client and select an actual model ID
+
+This example assumes standard OpenAI Base URL joining; it is not a universal client import file.
 
 ```jsonc
 {
-  "base_url": "http://127.0.0.1:3425/v1",   // required; the trailing /v1 matters
-  "api_key":  "sk-...",                     // required; from step 1
-  "model":    "<provider>/<model>"          // required; provider prefix included
+  "base_url": "http://127.0.0.1:3425/v1",  // replace the host for LAN use
+  "api_key":  "magpie-myapp",             // loopback only; LAN requires an enabled gateway key
+  "model":    "<id copied from /v1/models>"
 }
 ```
 
-- Models are named `<provider>/<model>`: the provider name you set up in magpie, then its model id.
-  A provider called `deepseek` with model id `deepseek-chat` is `deepseek/deepseek-chat`
-  (illustrative; use what your own device reports).
-- To see what exists, run `magpie providers`, or ask the gateway: `GET /v1/models` — add
-  `?format=text` for one id per line.
-- On another device, replace `127.0.0.1` with the phone's LAN address (`doctor.sh` reports it),
-  e.g. `http://192.168.1.100:3425/v1`.
+- Use the client's fetch/refresh-models control, or query `GET /v1/models` as shown below.
+- Ordinary IDs usually look like `deepseek/deepseek-chat`; **routing groups use their group name**.
+  Copy the returned `id` exactly: do not add a provider prefix to a group or use a display name instead.
+- Clients differ in URL handling. A Base URL normally includes `/v1`; if the client adds `/v1`
+  itself, use the gateway root. If it asks for a full endpoint, supply the complete request URL.
+  The final path must be `/v1/chat/completions` or `/v1/responses`, not a missing or doubled `/v1`.
 
 <details>
-<summary>Base URLs for other protocols (Anthropic / Gemini)</summary>
+<summary>Common Base URLs for other protocols (Anthropic / Gemini)</summary>
 
 ```text
 OpenAI     http://127.0.0.1:3425/v1        # /v1/chat/completions, /v1/responses
@@ -389,61 +430,65 @@ Anthropic  http://127.0.0.1:3425           # /v1/messages
 Gemini     http://127.0.0.1:3425           # /v1beta/models/{model}:generateContent
 ```
 
-magpie translates between protocols. Details in
-[magpie's integration docs](https://github.com/yetone/magpie/blob/main/docs/integrating.md).
+Replace the host for LAN use, and account for the client's URL-joining behavior.
+See [magpie's integration docs](https://github.com/yetone/magpie/blob/main/docs/integrating.md)
+for protocols and the model catalog.
 
 </details>
 
-### Step 3: verify the connection
+### Step 3: verify the connection and get a reply
 
-**On the phone** (no `curl` there; use busybox `wget`):
+Fetch the model list in your client, then select a model and send `hi`. **Listing models does not
+prove an upstream call works**; a real reply also checks provider access, quota and the request path.
 
-```sh
-wget -q -O - http://127.0.0.1:3425/ | head -c 200
-```
-
-**On a computer** (LAN listener must be open):
-
-```sh
-curl -s http://192.168.1.100:3425/ | head -c 200
-curl -s -H "Authorization: Bearer sk-..." http://192.168.1.100:3425/v1/models | head -c 200
-```
-
-A successful response looks like this (values vary by version and by what you configured):
-
-```jsonc
-// GET /
-{"apis":["/v1/chat/completions","/v1/responses","/v1/messages", …],
- "models":20,"name":"magpie","pid":28622,"serves":"serve","version":"0.1.4260"}
-
-// GET /v1/models
-{"data":[{"id":"<provider>/<model>","object":"model","owned_by":"<provider>", …}],"object":"list"}
-```
-
-Seeing `"name":"magpie"` means the gateway answers. Then send a real request:
+In a terminal with `curl` 7.76+ (for example, a computer or Termux), use the POSIX Shell example below.
+`BASE_URL` **includes `/v1`** and is reused for every request, so the computer never accidentally
+switches back to its own loopback address.
 
 ```sh
-curl http://127.0.0.1:3425/v1/chat/completions \
-  -H "Authorization: Bearer sk-..." \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<provider>/<model>","messages":[{"role":"user","content":"hi"}]}'
+# On the same phone:
+BASE_URL='http://127.0.0.1:3425/v1'
+API_KEY='magpie-myapp'
+
+# On a tablet / computer, replace the two values instead; substitute your phone IP and full key:
+# BASE_URL='http://192.168.1.100:3425/v1'
+# API_KEY='<full-enabled-gateway-key>'
+
+# 1. List actual model IDs, one per line
+curl --fail-with-body -sS --connect-timeout 5 --max-time 30 \
+  -H "Authorization: Bearer $API_KEY" "$BASE_URL/models?format=text"
 ```
+
+Copy an ID from that result into `<model-id>` below, and continue in the same terminal.
+This next request calls the upstream model and may consume quota.
+
+```sh
+# 2. Send a real message; a routing group uses its group name
+curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
+  "$BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<model-id>","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Without `curl` on the phone, use `doctor.sh` above to check the module, then fetch models and test
+a message in the client. No extra command-line tools are required. The self-check does not replace
+a real model call.
 
 <details>
 <summary>Connection troubleshooting (FAQ)</summary>
 
-| Symptom | Likely cause |
+| Symptom | What to check |
 | --- | --- |
-| `Connection refused` | Service not running, or wrong port. `magpie.service status`; `doctor.sh` reports listeners directly |
-| Works on the phone, not from a computer | Still bound to `127.0.0.1`. Set `MAGPIE_ADDR=0.0.0.0:3425`, restart, confirm with `ss -ltnp` |
-| Timeout without refusal | Different subnets, or the router isolates clients. Also: the address the module reports may be carrier-grade NAT (`100.64–100.127.x`), which nothing outside can reach |
-| 404 | Base URL is missing `/v1` |
-| 401 | From another device the key must be an **enabled** gateway key. Loopback does not validate, so "works here, 401 there" is expected |
-| `model not found` | Model not enabled in magpie, or the key's model restriction excludes it |
-| Panel shows 401 | URL lost its `?k=`. Use the full URL from `run/web.url`, or `[Action]` → 6 |
-| API key shows "click to reveal" | Intentional |
-
-The single command that answers most of these: `su -c sh /data/adb/modules/magpie/scripts/doctor.sh`
+| `Connection refused` | Process, port and binding address; run `doctor.sh` |
+| Works on the phone, not from a computer | Confirm the API listens on the LAN and use the phone's LAN IP, not `127.0.0.1` |
+| Timeout without refusal | Wi-Fi / hotspot reachability, AP isolation, firewall or a changed phone IP |
+| 404 | Inspect the final request path: missing `/v1`, doubled `/v1`, or the wrong protocol / endpoint |
+| API returns 401 | LAN calls need a full enabled gateway key, not a panel password, placeholder or mask |
+| `model not found` | Copy the `id` again from `/v1/models`; check enabled models and key permissions |
+| Model list works, messages fail | Read the error and logs; check provider sign-in, quota, upstream network and model capabilities |
+| Panel returns 401 | Use the complete `run/web.url` URL or `[Action]` → 6; do not use its password as an API key |
+| Module panel shows "click to reveal" | Hidden by default; if the value is only a mask, use the full key saved at creation or rotation |
 
 </details>
 
@@ -452,7 +497,7 @@ The single command that answers most of these: `su -c sh /data/adb/modules/magpi
 | | Gateway API key | Panel access password |
 | --- | --- | --- |
 | Looks like | `sk-...` by default; any format if you supplied `--key` | 32 hex characters |
-| Stored in | `data/.config/magpie/caller-keys.json` (masked; plaintext printed once) | `/data/adb/magpie/data/web.key` |
+| Stored in | `/data/adb/magpie/data/.config/magpie/caller-keys.json` (managed by the binary; do not edit or use as a key backup) | `/data/adb/magpie/data/web.key` |
 | Used by | clients calling `/v1` | browsers opening the panel (`?k=` in the URL) |
 | Shown in the panel as | API key | access password |
 | How to get one | `magpie gateway-key add <name>`, or `add <name> --key <value>` | generated on first start, stable afterwards |
@@ -466,16 +511,19 @@ after that the browser uses the cookie. So `?k=` is needed only once per browser
 > takes any key", and a request without an `Authorization` header to `/v1/models` succeeds here.
 > "Has a key" is not a local security boundary — do not treat it as one.
 
-The panel displays the gateway API key in plain text, so leaking the access password is worse than
-it sounds: it means **whoever has it can read that key and call models with its permissions** —
-which models, accounts and quotas still depend on how that key is configured.
+Magpie's own panel (P1) manages providers, accounts and gateway keys, not just status. The module
+panel's status file (P2) may also contain sensitive values. **Do not share a full `?k=` URL,
+key screenshots or `status.json`**. A collapsed value in the interface is not redaction.
 
 Exposure once you open the LAN listener:
 
 - `MAGPIE_ADDR=0.0.0.0:3425` → the gateway is reachable on the subnet. Remote callers **must present
   an enabled gateway key**; random strings are rejected. The port itself is still discoverable.
 - `MAGPIE_WEB_ADDR=0.0.0.0:3430` → the panel is exposed; without `?k=` you get 401. If the password
-  leaks, the panel opens and the API key on it is readable.
+  leaks, someone may enter the management interface and change provider or key settings.
+
+The LAN menu changes both listeners. They use HTTP without TLS by default: use trusted networks
+only and never forward them directly to the public internet.
 
 Suggested order: **create a gateway key first, then open the LAN listener**. If you only use the
 phone itself, leave the defaults at `127.0.0.1`. When unsure, run `doctor.sh` — it prints the
@@ -494,8 +542,8 @@ current exposure plainly.
 | `MAGPIE_DL_TIMEOUT` | `1800` | Total time limit for the binary download, in seconds |
 | `MAGPIE_DL_STALL` | `60` | Stall timeout: give up after this many seconds without any data |
 
-The scripts look for the config file in order: `/data/adb/magpie/scripts/magpie.config` first, then
-the module's `scripts/magpie.config`. **Edit the one in the data directory** — the module copy is
+The scripts look for the config file in order: explicit `MAGPIE_CONF` (diagnostics / tests),
+`/data/adb/magpie/scripts/magpie.config`, then the module's `scripts/magpie.config`. **Edit the one in the data directory** — the module copy is
 replaced on update. If neither exists, built-in defaults apply and everything listens on
 `127.0.0.1`.
 
@@ -516,6 +564,11 @@ Invalid entries in `MAGPIE_DNS` are skipped and named in the log (`8.8.8` would 
 the valid ones still take effect; only when nothing valid remains is the existing DNS left untouched.
 The check is format-only: a router address such as `192.168.1.1` — or even `127.0.0.1` when the device
 runs its own resolver — is allowed, and `doctor.sh` does a real lookup at runtime.
+
+The scripts follow `magpie_path`, but **changing the path does not migrate an existing binary
+or data**. Back up and stop the service before moving an existing installation, then update the
+configuration and start it again. The configuration is still read from the fixed locations above.
+Leave `magpie_path` alone if you only need to change listeners or DNS.
 
 Restart to apply:
 
@@ -546,13 +599,13 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | Install: sha256 mismatch | Something rewrote or truncated the download. Retry on another network; if it persists, do not install — check the release page |
 | Install: runs, then fails the self-check | First install leaves the sample at `bin/magpie.rejected` with its digest; an existing body is rolled back from `bin/magpie.bak` |
 | Want the previous body back | `install.sh rollback` |
-| Start fails, log says port in use | Previous process still alive: `pidof magpie`, kill it, `start` again |
-| Panel data never changes | Check the "数据 HH:MM:SS" in the status bar: a refresh every ~2.5 min is normal. If it has been stuck for over 5 min, the watchdog is probably not running (see `run/watchdog.log`) |
+| Start fails, log says port in use | Identify the listener with `doctor.sh` or `ss -ltnp`; use `restart` if it is this service. Do not kill all `pidof magpie` results: MCP children may share that name |
+| Panel data never changes | Check "数据 HH:MM:SS": normal polling refreshes about every 2.5 min by default; custom intervals or failed-start backoff can delay it. If stale for a long time, check the watchdog process and startup/error entries in `run/watchdog.log`; it does not log every round |
 | HTTPS fails with certificate errors | Delete `/data/adb/magpie/data/certs/ca-bundle.crt*` and restart; it rebuilds |
 | Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/9]` in doctor |
-| Service comes back after stopping | Expected: the watchdog revives unexpected exits. Disable the module to stop that |
+| Process returns after being killed | The watchdog revives unexpected exits. Stop through the menu, tile or `magpie.service stop` instead; `.user_stopped` prevents watchdog restarts during this boot |
 | Edited `magpie.config` but nothing changed | Make sure you edited `/data/adb/magpie/scripts/magpie.config`, then `restart` |
-| No start on boot | Check `run/watchdog.log`; a manual stop leaves `.user_stopped`, but `start` clears it |
+| No start on boot | Confirm the module is enabled; read startup errors in `run/watchdog.log` and run `doctor.sh`. A manual-stop marker does not prevent the next boot from starting the service; explicit `start` clears it too |
 
 More detail in [CHANGELOG.md](CHANGELOG.md).
 
@@ -689,8 +742,9 @@ cache) and finally verifies nothing is left.
 
 - The installer supports **arm64 only**: the release page has no arm32 / x86_64 Android build, so
   other architectures are refused outright instead of getting a wrong binary.
-- The installer handles **first install only**. It will not upgrade a body that is already there —
-  use `magpie update` for that (it ships with the binary and follows the vendor).
+- The installer defaults to first installation. Without `--yes`, it will not replace a usable
+  existing binary. Explicit `install --yes` redeploys from the current manifest; use `magpie update`
+  for routine upgrades.
 - Digests come from usemagpie.ai's manifest; no GPG verification is done. See
   [Installing the body](#installing-the-body).
 - The webroot panel is **not live monitoring**. It re-reads `status.json` every 5 s, but that file is

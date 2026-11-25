@@ -34,8 +34,8 @@
 - [文件结构](#文件结构)
 - [卸载](#卸载)
 - [更新](#更新)
-- [已知限制](#已知限制)
 - [控制中心磁贴（可选）](#控制中心磁贴可选)
+- [已知限制](#已知限制)
 - [开发与测试](#开发与测试)
 - [贡献者与致谢](#贡献者与致谢)
 - [许可证](#许可证)
@@ -93,24 +93,24 @@
 
 这一步**不需要先有 magpie 本体**：检测不到只提示一句，照样装完。
 
-**2. 准备本体（两条路，任选）**
+**2. 准备本体**
 
-`/data/adb/modules/magpie/` 要等模块刷好才存在，所以两条路都放在这一步。
+没有本体时，在管理器里点 `[执行]` 查看安装方案，确认后再点一次开始下载安装。
+已经有可用本体则直接进入第 3 步。
 
-已经有本体，确认一下就行：
+<details>
+<summary>命令行备选：检测或安装本体</summary>
 
 ```sh
 su -c sh /data/adb/modules/magpie/scripts/install.sh status
-# state=ready version=0.1.4302 path=/data/adb/magpie/bin/magpie
-```
+# 示例：state=ready version=0.1.4302 path=/data/adb/magpie/bin/magpie
 
-没有本体，让模块去装（推荐，省掉自己找文件）：
-
-```sh
+# 仅在需要安装或明确要重新部署时执行；--yes 会跳过确认，也允许覆盖已有本体
 su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes
 ```
 
-不想敲命令就在管理器里点 `[执行]`——走的是同一个安装流程。
+</details>
+
 细节与安全说明见[安装本体](#安装本体让模块来做)。
 
 **3. 重启**
@@ -144,13 +144,26 @@ su -c cat /data/adb/magpie/run/web.url
 > [!TIP]
 > 想从电脑上打开面板，先把 [配置](#配置) 里的 `MAGPIE_WEB_ADDR` 改成 `0.0.0.0:3430` 并重启服务，再用面板/自检里给出的局域网地址访问。**开之前先看一眼下面的[两把密钥](#两把密钥的区别)那一节。**
 
-不想刷 zip 的，手动放置：
+**6. 配好供应商，收到第一条回复**
+
+在刚打开的 **magpie 本体面板（P1）** 中添加或登录至少一个供应商（provider），
+启用要使用的模型；已有配置可以跳过。模块只负责运行服务，不会附送账号、模型或额度。
+
+接着按[客户端怎么接入](#客户端怎么接入)选择本机或局域网方案，从模型目录复制实际模型 ID，
+在客户端发一条消息。**收到模型回复才算完成接入**；只看到进程运行或面板打开，还没有验证上游调用。
+
+<details>
+<summary>进阶：不通过管理器刷入，手动解压模块</summary>
 
 ```sh
 unzip magpie-v*.zip -d /data/adb/modules/magpie   # 换成实际下载到的文件名
 chmod 755 /data/adb/modules/magpie/*.sh /data/adb/modules/magpie/scripts/*.sh
 chmod 600 /data/adb/modules/magpie/scripts/magpie.config
 ```
+
+仍需按上面的步骤准备本体并重启手机；普通用户优先使用管理器安装。
+
+</details>
 
 ## 安装本体（让模块来做）
 
@@ -164,6 +177,9 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh install   # 先给方案，
 su -c sh /data/adb/modules/magpie/scripts/install.sh install --yes   # 直接装
 su -c sh /data/adb/modules/magpie/scripts/install.sh rollback  # 用备份退回
 ```
+
+<details>
+<summary>下载来源、校验与回退机制</summary>
 
 **从哪来。** 清单是 `https://usemagpie.ai/api/latest` —— magpie 自己的更新端点，
 `magpie update` 用的也是它；资产名 `magpie-cli-android-arm64`（实测这是发布页里唯一的 Android 构建，
@@ -186,6 +202,8 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh rollback  # 用备份退回
 su -c magpie update check   # 只看有没有新版
 su -c magpie update         # 下载、校验、重启进新版本
 ```
+
+</details>
 
 > [!NOTE]
 > 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，87 MB 的下载也太大，
@@ -229,7 +247,7 @@ su -c magpie update         # 下载、校验、重启进新版本
 
 | 选项 | 作用 |
 | --- | --- |
-| 1 切换网关 | 在「仅本机 `127.0.0.1`」和「局域网 `0.0.0.0`」之间切换，服务在跑就自动重启生效 |
+| 1 切换网关 | 同时切换 API 和管理面板的监听地址：仅本机 `127.0.0.1` / 局域网 `0.0.0.0`；服务在跑就自动重启生效 |
 | 2 查看接入信息 | 本机与局域网两套地址分行列出，并给出别的设备该填什么 |
 | 3 / 4 / 5 | 重启 / 停止 / 启动 |
 | 6 打开面板 | 用浏览器打开 WebUI（带你自己的密钥） |
@@ -241,6 +259,11 @@ su -c magpie update         # 下载、校验、重启进新版本
 > [!TIP]
 > **开热点给平板用时**：先点 `[执行]` → 选 1 切到「局域网」→ 选 2 看给出的地址，
 > 把它填进平板上 Eta 的 magpie 接口；用完再切回「仅本机」，外部就进不来。
+
+> [!WARNING]
+> 菜单切到局域网会**同时开放 API 网关和管理面板**（默认 3425 / 3430）。两者默认使用 HTTP，
+> 不加密传输，只在可信网络使用，不要直接暴露到公网。只想共享 API、不想开放面板，
+> 请按[配置](#配置)单独设置 `MAGPIE_ADDR=0.0.0.0:3425`，保持 `MAGPIE_WEB_ADDR=127.0.0.1:3430`，再重启服务。
 
 音量键本身会系统性地调一下媒体音量，菜单退出时会还原成进来时的值。
 在终端里跑同一个菜单（见 [命令行](#命令行)）时会原地重画、只有 `▸` 移动；
@@ -306,7 +329,9 @@ su -c sh /data/adb/modules/magpie/action.sh status    # 接入信息（本机 + 
 su -c sh /data/adb/modules/magpie/action.sh gateway   # 当前网关 + 配置里那两行
 su -c sh /data/adb/modules/magpie/action.sh lan       # 切到局域网（别的设备可连）
 su -c sh /data/adb/modules/magpie/action.sh local     # 切回仅本机
-su -c sh /data/adb/modules/magpie/action.sh start | stop | restart
+su -c sh /data/adb/modules/magpie/action.sh start     # 启动
+su -c sh /data/adb/modules/magpie/action.sh stop      # 主动停止，看门狗不会拉回
+su -c sh /data/adb/modules/magpie/action.sh restart   # 重启
 su -c sh /data/adb/modules/magpie/action.sh panel     # 打开面板
 ```
 
@@ -316,51 +341,72 @@ su -c sh /data/adb/modules/magpie/action.sh panel     # 打开面板
 
 ### 接入前检查
 
-- [ ] 服务在跑：`su -c sh /data/adb/modules/magpie/scripts/magpie.service status`
-- [ ] magpie 里**至少配好一个 provider 并且是启用状态**（只建网关 key 不会凭空变出模型）
-- [ ] 有一把**已启用**的网关 key
-- [ ] 同一台手机上用 `127.0.0.1`；别的设备要连，先开放局域网（`[执行]` → 选 1，或 `action.sh lan`）并确认两边同一网段
+- [ ] 服务在跑；不确定就执行下面的九项自检。
+- [ ] 已在 **magpie 本体面板（P1）** 配好至少一个供应商，并启用要使用的模型。
+- [ ] 选择下方的本机或局域网方案。局域网访问另需一把**已启用**的网关 key。
 
 ```sh
-# 一条命令看全：本体、进程、端口、密钥、暴露面
 su -c sh /data/adb/modules/magpie/scripts/doctor.sh
 ```
 
-### 第一步：拿到地址和密钥
+### 第一步：按使用场景拿到地址和密钥
 
-```sh
-su -c magpie gateway-key add phone
-# sk-magpie-key-…      ← 只打印这一次，当场存好
-```
+#### 同一台手机使用
 
-面板首页也会显示同样的两项（这对接口地址与 API Key）。要填的是：
+保持默认的「仅本机」即可，不必开放局域网。
 
-| 要填的 | 值 |
+| 客户端字段 | 填写内容 |
 | --- | --- |
 | 接口地址（Base URL） | `http://127.0.0.1:3425/v1` |
-| API Key | 上面打印出来的密钥 |
+| API Key | 可填 `magpie-myapp` 作为本机客户端标识，也可用自己的网关 key |
+| 模型 ID | 从 `GET /v1/models` 返回的 `id` 原样复制，见下一步 |
+
+本机回环访问不校验 key，**这不代表局域网也能随便填**；详见[两把密钥的区别](#两把密钥的区别)。
+
+#### 平板 / 电脑通过局域网使用
+
+1. 先在 magpie 中准备一把已启用的网关 key。也可以用命令行创建：
+
+   ```sh
+   su -c magpie gateway-key add tablet
+   # 保存本次返回的完整密钥，不要把它发到公开截图或日志里
+   ```
+
+2. 让两台设备连接同一个可互通的 Wi-Fi，或让平板 / 电脑连上手机热点。
+3. `[执行]` → 选 1 切到「局域网」，再选 2 查看接入信息。
+4. 客户端填写 `http://<手机局域网IP>:3425/v1`、刚才的完整 key，以及模型目录中的实际 ID。
+   例如 `http://192.168.1.100:3425/v1`；不要在另一台设备上填写 `127.0.0.1` 或 `0.0.0.0`。
 
 > [!WARNING]
-> `gateway-key list` **不会**显示完整密钥，只给 ID 和掩码。密钥只在 `add` / `rotate` 时打印一次，丢了就用 `magpie gateway-key rotate <id>` 换一把。
+> 局域网开关会同时开放 API 和管理面板，默认是 HTTP。只在可信网络使用；
+> 仅共享 API 的配置方法见[执行按钮](#执行按钮)。API key 与面板链接中的 `?k=` 不是一回事。
 
-### 第二步：填进客户端
+> [!NOTE]
+> CLI 的 `gateway-key list` 不提供可用于接入的完整明文；创建或 `rotate` 后立即保存完整 key，
+> 不要把掩码复制进客户端。丢失时可用 `magpie gateway-key rotate <id>` 换一把，随后更新使用旧 key 的客户端。
+> 模块状态面板（P2）中的显示值取决于本体版本和状态采集结果，不应作为完整密钥的唯一备份。
 
-支持自定义 OpenAI 接口的客户端都能接，通常只有三个字段。以常见的 OpenAI 兼容客户端为例：
+### 第二步：填入客户端并选择实际模型 ID
+
+下面是按标准 OpenAI Base URL 拼接路径的配置示例，不是所有客户端通用的导入文件。
 
 ```jsonc
 {
-  "base_url": "http://127.0.0.1:3425/v1",   // 必填；末尾的 /v1 不能省
-  "api_key":  "sk-magpie-key-…",            // 必填；第一步拿到的那把
-  "model":    "<provider>/<model>"          // 必填；模型名要带供应商前缀
+  "base_url": "http://127.0.0.1:3425/v1",  // 其他设备换成手机局域网 IP
+  "api_key":  "magpie-myapp",             // 仅本机示例；局域网必须换成已启用的网关 key
+  "model":    "<从 /v1/models 复制的 id>"
 }
 ```
 
-- 模型名写 `<provider>/<model>`：前半是你在 magpie 里配的供应商名，后半是它的模型 ID。比如供应商叫 `deepseek`、模型 ID 是 `deepseek-chat`，就填 `deepseek/deepseek-chat`（示意，实际以你机器上的为准）。
-- 到底有哪些：`su -c magpie providers`，或直接问网关 `GET /v1/models`；只想扫一眼 ID 就加 `?format=text`，一行一个。
-- 别的设备上把 `127.0.0.1` 换成手机的局域网地址（自检里会给出），例如 `http://192.168.1.100:3425/v1`。
+- 在客户端点击「获取模型」或「刷新模型」；也可用下一步的 `GET /v1/models` 查询。
+- 普通模型 ID 通常形如 `deepseek/deepseek-chat`；**路由组则直接使用组名**。一律以返回的 `id` 为准，
+  不要给路由组擅自加供应商前缀，也不要把显示名称当成模型 ID。
+- 不同客户端对地址的补全规则不同：填 Base URL 时通常包含 `/v1`；如果客户端会自动补 `/v1`，
+  则填网关根地址。若要求完整端点，填完整请求路径。最终请求应到达
+  `/v1/chat/completions` 或 `/v1/responses`，不能漏掉 `/v1`，也不能重复成 `/v1/v1/...`。
 
 <details>
-<summary>其它协议的 base URL（Anthropic / Gemini）</summary>
+<summary>其他协议的常用 Base URL（Anthropic / Gemini）</summary>
 
 ```text
 OpenAI     http://127.0.0.1:3425/v1        # /v1/chat/completions、/v1/responses
@@ -368,60 +414,62 @@ Anthropic  http://127.0.0.1:3425           # /v1/messages
 Gemini     http://127.0.0.1:3425           # /v1beta/models/{model}:generateContent
 ```
 
-magpie 会自动翻译多协议请求，细节见 [magpie 的接入文档](https://github.com/yetone/magpie/blob/main/docs/integrating.md)。
+其他设备同样替换主机地址，具体仍以客户端的路径拼接方式为准。
+协议与模型目录说明见 [magpie 的接入文档](https://github.com/yetone/magpie/blob/main/docs/integrating.md)。
 
 </details>
 
-### 第三步：验证连接
+### 第三步：验证连接并收到回复
 
-**在手机上**（没有 `curl`，用 busybox 的 `wget`）：
+最简单的方法是在客户端获取模型列表，再选一个模型发送 `hi`。**能列出模型不等于上游调用成功**：
+还要收到真实回复，才验证了供应商登录、额度和调用链路。
 
-```sh
-wget -q -O - http://127.0.0.1:3425/ | head -c 200
-```
-
-**在电脑上**（需要先开放局域网）：
+有 `curl` 7.76+ 的终端（例如电脑或 Termux）也可以分两步检查。以下是 POSIX Shell 示例，
+`BASE_URL` **包含 `/v1`**，后面的请求始终使用同一个地址，不会在电脑上误连自己的回环端口。
 
 ```sh
-curl -s http://192.168.1.100:3425/ | head -c 200
-curl -s -H "Authorization: Bearer sk-magpie-key-…" http://192.168.1.100:3425/v1/models | head -c 200
+# 同一台手机：
+BASE_URL='http://127.0.0.1:3425/v1'
+API_KEY='magpie-myapp'
+
+# 如果是在平板 / 电脑上执行，改用下面两项，并替换示例 IP 与 key：
+# BASE_URL='http://192.168.1.100:3425/v1'
+# API_KEY='<已启用的完整网关key>'
+
+# 1. 查询模型 ID；每行一个
+curl --fail-with-body -sS --connect-timeout 5 --max-time 30 \
+  -H "Authorization: Bearer $API_KEY" "$BASE_URL/models?format=text"
 ```
 
-连上时长这样（字段值随版本和你配的 provider 变化）：
-
-```jsonc
-// GET /
-{"apis":["/v1/chat/completions","/v1/responses","/v1/messages", …],
- "models":20,"name":"magpie","pid":28622,"serves":"serve","version":"0.1.4260"}
-
-// GET /v1/models
-{"data":[{"id":"<provider>/<model>","object":"model","owned_by":"<provider>", …}],"object":"list"}
-```
-
-看到 `"name":"magpie"` 就说明网关是通的。再发一条真正的请求：
+从结果中复制一个实际 ID，替换下面的 `<模型ID>`，在同一个终端继续执行。
+这一步会调用上游模型，可能消耗额度。
 
 ```sh
-curl http://127.0.0.1:3425/v1/chat/completions \
-  -H "Authorization: Bearer sk-magpie-key-…" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<provider>/<model>","messages":[{"role":"user","content":"hi"}]}'
+# 2. 发一条真实消息；路由组直接填组名
+curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
+  "$BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<模型ID>","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+手机上没有 `curl` 时，用开头的 `doctor.sh` 检查模块状态，再直接在客户端完成模型列表和消息测试，
+不必为了接入额外安装命令行工具。自检通过只说明它检查的项目正常，不代替真实模型调用。
 
 <details>
 <summary>连接失败排查（FAQ）</summary>
 
-| 现象 | 多半是 |
+| 现象 | 检查方向 |
 | --- | --- |
-| `Connection refused` / 连接被拒绝 | 服务没跑，或端口不对。`magpie.service status` 看一眼；自检里「端口监听」那项会直接告诉你 |
-| 电脑上连不上，手机上正常 | 还在只监听 `127.0.0.1`。把 `MAGPIE_ADDR` 改成 `0.0.0.0:3425` 重启服务，再用 `ss -ltnp` 确认 3425 真的在监听 |
-| 超时，不报拒绝 | 两边不在同一网段，或路由器开了 AP 隔离；也可能是自检里那个「局域网地址」其实是运营商级 NAT（100.64–100.127.x），那种地址外部设备根本到不了 |
-| 404 | Base URL 少了 `/v1` |
-| 401 | 从别的设备访问时，key 必须是一把**已启用**的网关 key；本机回环访问不校验，所以「本机能用、电脑 401」是正常的 |
-| `model not found` | 该模型没在 magpie 里启用，或那把 key 的 models 限制不含它 |
-| 面板打开是 401 | 链接少了 `?k=`。用 `run/web.url` 里的完整地址，或 `[执行]` → 选 6「打开面板」（会带上密码） |
-| 面板能开，但里面的 API Key 显示「点击「显示」查看」 | 这是刻意的，点一下即可 |
-
-一条命令查完这些：`su -c sh /data/adb/modules/magpie/scripts/doctor.sh`
+| `Connection refused` / 连接被拒绝 | 服务没跑、端口不对或只监听本机；运行 `doctor.sh` 检查进程与端口 |
+| 电脑连不上，手机正常 | 确认已开放 API 的局域网监听；电脑使用的是手机的局域网地址，不是 `127.0.0.1` |
+| 超时，不报拒绝 | 检查 Wi-Fi / 热点互通、路由器 AP 隔离、防火墙和手机 IP 是否变化 |
+| 404 | 检查客户端最终请求路径；可能缺少 `/v1`、重复 `/v1`，或选错 API 协议 / 端点 |
+| API 返回 401 | 局域网必须使用已启用的完整网关 key，不能填面板访问密码、占位符或掩码 |
+| `model not found` | 从 `/v1/models` 重新复制 `id`，检查模型启用状态及该 key 的模型权限 |
+| 列表有模型，发消息失败 | 查看返回的错误和日志，检查供应商登录、额度、上游网络及模型能力 |
+| 面板打开是 401 | 使用 `run/web.url` 的完整地址，或 `[执行]` → 选 6；不要把面板密码填进 API Key |
+| 模块面板的 API Key 显示「点击「显示」查看」 | 这是默认折叠显示；若只有掩码，仍需使用创建或轮换时保存的完整 key |
 
 </details>
 
@@ -430,7 +478,7 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 |  | 网关 API Key | 面板访问密码 |
 | --- | --- | --- |
 | 长什么样 | 默认生成的形如 `sk-magpie-key-…`；用 `--key` 自填的格式随意 | 32 位十六进制 |
-| 存哪 | `data/.config/magpie/caller-keys.json`（只存掩码，明文仅创建时打印一次） | `/data/adb/magpie/data/web.key` |
+| 存哪 | `/data/adb/magpie/data/.config/magpie/caller-keys.json`（由本体管理；不要手改或当作密钥备份） | `/data/adb/magpie/data/web.key` |
 | 谁用 | 客户端调 `/v1` | 浏览器开面板（URL 里的 `?k=`） |
 | 怎么来 | `magpie gateway-key add <名>`，或 `add <名> --key <值>` 用自己的 | 首次启动自动生成，重启不变 |
 | 作用 | 决定**谁能调用**、能用哪些模型与账号、多少额度 | 决定**谁能看见面板** |
@@ -440,12 +488,15 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 > [!IMPORTANT]
 > **本机回环访问不校验密钥。** magpie 文档的原话是「On this machine the gateway takes any key」，实测不带 `Authorization` 头也能调通 `/v1/models`。所以「有没有 key」不是本机的安全边界，别拿它当。
 
-面板会明文显示网关 API Key，因此访问密码泄露的后果不只是「看到运行状态」，而是「**可能拿到那把 API Key，并按它的权限调用模型**」——能调哪些模型、账号、额度仍由那把 key 的配置决定。
+本体面板（P1）能管理供应商、账号和网关密钥，不只是查看运行状态；模块面板（P2）的状态文件也可能含敏感值。
+**不要分享带 `?k=` 的完整链接、密钥截图或 `status.json`**，也不要因为界面默认折叠就把它当作脱敏。
 
 开放局域网后的暴露面：
 
 - `MAGPIE_ADDR=0.0.0.0:3425` → 网关对同网段可见。**从别的设备访问必须带一把已启用的网关 key**，随便填字符串会被拒；但网关本身可被探测。
-- `MAGPIE_WEB_ADDR=0.0.0.0:3430` → 面板暴露，不知道 `?k=` 会 401；密码一旦泄露，对方能打开面板并读到上面显示的 API Key。
+- `MAGPIE_WEB_ADDR=0.0.0.0:3430` → 面板暴露，不知道 `?k=` 会 401；密码一旦泄露，对方可能进入管理界面，影响供应商和密钥配置。
+
+局域网菜单会同时修改上面两项，默认使用 HTTP、没有 TLS；仅在可信网络使用，不要直接转发到公网。
 
 顺序建议：**先建好网关 key，再开局域网**；只在本机用就保持默认的 `127.0.0.1`。不确定的时候跑一次自检，它会把当前暴露面直接列出来。
 
@@ -483,7 +534,9 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 不存在才从模块里复制一份、权限 600，已存在绝不动。所以照本文档直接去改就行，
 不用先手动创建。
 
-改了 `magpie_path` 也无需额外搬文件：服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本都会按配置里的路径工作（配置本身始终从上面几个位置读，不依赖新目录）。
+服务脚本、`status.sh`、`doctor.sh`、`[执行]`、`magpie` 命令和卸载脚本都会按 `magpie_path` 工作，
+但**修改路径不会自动迁移已有本体和数据**。已有安装要换目录时，应先备份并停止服务，再迁移文件、修改配置并启动；
+配置文件本身仍从上面的固定位置读取。仅为更改地址或 DNS 时，不需要修改 `magpie_path`。
 
 改完重启服务生效：
 
@@ -514,15 +567,15 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | 本体装不上：sha256 不匹配 | 下载被中间设备改过或截断。换网络重试；持续如此别装，去发布页核对 |
 | 本体装完跑不起来 | 首次安装会把样本留在 `bin/magpie.rejected` 并报出摘要；已装过则自动回退到 `bin/magpie.bak` |
 | 想退回上一版本体 | `install.sh rollback` |
-| 启动失败，日志说端口占用 | 上次进程没退干净，`pidof magpie` 确认后 kill，再 `start` |
-| 面板数据一动不动 | 先看状态栏的「数据 HH:MM:SS」：默认约 2.5 分钟刷一次，属正常。若超过 5 分钟没变，多半是看门狗没在跑（`run/watchdog.log` 里应有每轮的记录） |
+| 启动失败，日志说端口占用 | 用 `doctor.sh` 或 `ss -ltnp` 确认占用者。若是本模块服务，优先用 `restart`；不要直接按 `pidof magpie` 批量杀进程，MCP 子进程也可能同名 |
+| 面板数据一动不动 | 看状态栏的「数据 HH:MM:SS」：正常巡检时默认约 2.5 分钟刷新；自定义间隔、启动失败退避会延长。长时间不更新时检查守护进程及 `run/watchdog.log` 的启动或异常记录；日志不会每轮都写 |
 | 管理器显示「配置有误 / 端口不可用」 | `MAGPIE_ADDR` / `MAGPIE_WEB_ADDR` 写成了 `127.0.0.1` 这种没有端口的地址。改成 `主机:端口`（IPv6 用 `[::1]:3425`）再重启 |
 | 面板整份打不开，JSON 解析失败 | 旧版本在端口写错时会写出非法 `status.json`；升到 v1.0 后 `cat` 一下确认 `configError` 字段，按提示改配置 |
 | HTTPS 报证书错误 | 删掉 `/data/adb/magpie/data/certs/ca-bundle.crt*` 再重启，会自动重建 |
 | 原生通道报 `lookup ... on [::1]:53: connection refused` | Go 没有可用上游。`cat /etc/resolv.conf` 看覆盖在不在；不在就重启一次手机，再跑 doctor 的 `[8/9] DNS 解析` |
-| 停止后又自己起来 | 属预期：看门狗会把意外退出的进程拉回。要彻底关掉自愈，停用整个模块 |
+| 杀掉进程后又自己起来 | 意外退出会被看门狗拉回；要主动停止，请用菜单、磁贴或 `magpie.service stop`，它们会写 `.user_stopped` 标记，本次开机期间不会被看门狗拉回 |
 | 改了 `magpie.config` 没生效 | 确认改的是 `/data/adb/magpie/scripts/magpie.config`，然后 `restart` |
-| 开机没自启 | 看 `run/watchdog.log`；手动停过服务会留 `.user_stopped` 标记，`start` 会清掉它 |
+| 开机没自启 | 确认模块已启用，再看 `run/watchdog.log` 的启动错误及 `doctor.sh` 输出。主动停止标记不阻止下次开机启动；显式 `start` 也会清除它 |
 
 更多细节见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -645,7 +698,8 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 模块内置在线更新：`module.prop` 里的 `updateJson` 指向本仓库的 [`update.json`](update.json)。
 
 - 管理器会根据 `versionCode` 判断有没有新版本，需要时提示并一键更新。
-- 发新版时改三处：`module.prop` 的 `version` / `versionCode`，以及 `update.json` 的 `version` / `versionCode` / `zipUrl`。
+- 本体更新与模块更新独立：常规更新本体用 `su -c magpie update`；不需要为此重刷模块。
+- 维护者的发版步骤见[开发与测试](#开发与测试)，`update.json` 由工作流自动回写，不需要手工同步。
 - 更新模块**不会**动 `/data/adb/magpie`，所以你配的 provider、密钥、日志都保留。
 
 ## 控制中心磁贴（可选）
@@ -669,22 +723,15 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 磁贴显示「运行中 / 已停止」，点击切换。停止走的是同一条 `stop` 路径，
 会写 `.user_stopped` 标记，看门狗不会把用户主动停掉的服务又拉回来。
 
-**长按磁贴**可以打开 App 的设置页 —— 这也是隐藏桌面图标之后的恢复入口
-（`TileService` 没有 `onLongClick`，长按是 SystemUI 发
-`ACTION_QS_TILE_PREFERENCES`，由 `MainActivity` 接住）。
+**长按磁贴**可以打开 App 设置页。App 内的「桌面图标」开关可以隐藏入口，
+隐藏后仍可通过长按 Magpie 磁贴回到设置页并恢复图标。
 
-App 里有个「桌面图标」开关，可以隐藏桌面图标（只留控制中心磁贴）。
-实现上桌面入口挂在一个 `activity-alias` 上，隐藏只是关掉这个 alias，
-`MainActivity` 本身仍然可以被显式启动，所以不会把自己锁死。
-图标隐藏后要再打开设置页：**长按控制中心里的 Magpie 磁贴**，
-或用 `am start -n com.ruin.magpie.tile/.MainActivity`。
-
-细节见 [tile-app/README.md](tile-app/README.md)。
+组件实现、备用打开命令与构建说明见 [tile-app/README.md](tile-app/README.md)。
 
 ## 已知限制
 
 - 安装器**只支持 arm64**：发布页里没有 arm32 / x86_64 的 Android 构建，非 arm64 设备会直接拒绝，而不是装错架构。
-- 安装器只负责「首次安装」。**已装好的本体不会被它升级**，升级请用 `magpie update`（本体自带、跟着厂商走）。
+- 安装器默认用于首次安装；已有可用本体时，不带 `--yes` 不会覆盖。显式 `install --yes` 会按当前清单重新部署，常规升级仍建议用 `magpie update`。
 - 摘要来自 usemagpie.ai 的清单，未做 GPG 签名验证；见[安装本体](#安装本体让模块来做)。
 - webroot 面板**不是实时监控**。面板每 5 秒重读一次 `status.json`，而这份文件由
   事件（启停、切网关、局域网地址变化）触发重写，另外看门狗每 5 轮（默认约 2.5 分钟）
@@ -704,7 +751,7 @@ python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 46 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 40 条
-sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 20 条
+sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 26 条
 sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA 纯函数 192 条
 ```
 
