@@ -379,7 +379,13 @@ if [ -n "$_ct" ]; then
   for _path in /data/adb/magisk /data/adb/ksu /data/adb/service.d /data/misc/wifi \
                /data/user/0/com.example /opt/magpie /data/adb/magpie-custom \
                /data/adb/magpie/../magisk /data/adb/magpie/; do
-    if ( eval "$_ct"; die() { exit 1; }; magpie_path="$_path"; check_target ) >/dev/null 2>&1; then
+    # 派生变量按真实安装时的取值补齐；否则未定义变量会让函数提前报错，
+    # 任何路径都会被误当成「已拒绝」，测试就变成了假绿。
+    if ( eval "$_ct"; die() { exit 1; }
+         BIN_DIR="$_path/bin"; BIN="$_path/bin/magpie"; BAK="$_path/bin/magpie.bak"
+         INFO="$_path/install-info.txt"; LOCK="$_path/.install.lock"
+         PENDING="$_path/.install.pending"
+         magpie_path="$_path"; check_target ) >/dev/null 2>&1; then
       bad "生产 check_target 误放行 $_path"
     else
       ok "生产 check_target 拒绝 $_path（未触碰目标）"

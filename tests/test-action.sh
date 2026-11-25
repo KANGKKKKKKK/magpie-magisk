@@ -220,6 +220,17 @@ out=$(PATH="$B:$PATH" sh -c "MAGPIE_ACTION_LIB=1 . '$B/action.sh' 2>/dev/null; i
 has "$out" "M1" && has "$out" "M2" && has "$out" "M3" && ok "Magisk / KernelSU / MMRL 都算" || bad "漏了管理器：$out"
 has "$out" "N1" && ok "普通 App 不算" || bad "误判成管理器：$out"
 
+echo
+echo "== 15 白名单外路径：status 可用，启停被就绪检查拦下"
+build ready stopped
+# build 给沙箱副本加了放行；再定义拒绝版本，模拟配置指向白名单外的旧目录。
+printf '\nmagpie_path_installable() { return 1; }\n' >> "$B/scripts/lib.sh"
+out=$(run status 2>&1)
+has "$out" "http://127.0.0.1:3425/v1" && ok "status 仍给出接入信息" || bad "status 被误拦：$out"
+out=$(run start 2>&1); rc=$?
+has "$out" "本体还没装好" && ok "start 被就绪检查拦下" || bad "start 没有被拦：$out"
+[ "$rc" -ne 0 ] && ok "start 返回非零" || bad "start 返回 0"
+
 rm -rf "$B"
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

@@ -132,16 +132,35 @@ for pair in "test-lib.sh:$LIB" "test-watchdog.sh:$WD" "test-service.sh:$SV" \
 done
 
 # 优先未发布节，避免拿新断言数核对不可改写的历史版本。
+# 该节必须同时包含合计与每个分项：只匹配其中一个数字时，写错总数仍会漏报。
+changelog_section() {
+  # 标题必须整行等于「## <版本>」，或其后紧跟空格；前缀相同的其它标题不算。
+  awk -v v="$2" '
+    $0 == "## " v || index($0, "## " v " ") == 1 { f = 1; next }
+    f && /^## / { exit }
+    f' "$1"
+}
+
+changelog_counts_ok() {
+  _file=$1; _ver=$2; shift 2
+  _sec=$(changelog_section "$_file" "$_ver")
+  [ -n "$_sec" ] || return 2
+  for _num in "$@"; do
+    printf '%s\n' "$_sec" | grep -qE "(^|[^0-9])$_num([^0-9]|\$)" || return 1
+  done
+  return 0
+}
+
 _cur_ver=$(sed -n 's/^version=//p' "$ROOT/module.prop")
-if grep -qx '## 未发布' "$ROOT/CHANGELOG.md" 2>/dev/null; then
+if grep -qxF '## 未发布' "$ROOT/CHANGELOG.md" 2>/dev/null; then
   _cur_ver=未发布
 fi
-if grep -qF "## $_cur_ver" "$ROOT/CHANGELOG.md" 2>/dev/null; then
-  _sec=$(awk -v v="$_cur_ver" 'index($0, "## " v) == 1 { f=1; next } f && /^## / { exit } f' "$ROOT/CHANGELOG.md")
-  if printf '%s' "$_sec" | grep -qE "$TOTAL|$LIB"; then
-    ok "CHANGELOG $_cur_ver 一节提到当前数字"
+if grep -qxF "## $_cur_ver" "$ROOT/CHANGELOG.md" 2>/dev/null; then
+  if changelog_counts_ok "$ROOT/CHANGELOG.md" "$_cur_ver" \
+       "$TOTAL" "$INS" "$WD" "$ACT" "$SV" "$LIB"; then
+    ok "CHANGELOG $_cur_ver 一节含合计 $TOTAL 与各分项"
   else
-    bad "CHANGELOG $_cur_ver 一节里的数字过时"
+    bad "CHANGELOG $_cur_ver 一节的数字过时或不全（应含 $TOTAL 与 $INS/$WD/$ACT/$SV/$LIB）"
   fi
 fi
 
