@@ -254,64 +254,55 @@ if [ -n "$DL_BB" ]; then
 fi
 
 echo "[9/10] 磁贴（可选组件）"
-# 磁贴是可选的，没装不是问题，这里只做只读体检。
-#
-# 能查到的分三层：装没装 / 画的是什么 / 和真实状态对不对。
-# 第三层只用来解释现象，不当成错误——磁贴只在展开面板时才重读状态，
-# 从命令行或看门狗启停服务后它没被通知过，显示旧值是预期行为。
-TILE_PKG=com.ruin.magpie.tile
-TILE_COMP="$TILE_PKG/.MagpieTileService"
-TILE_PKG_RE=$(printf '%s' "$TILE_PKG" | sed 's/\./\\./g')
-_tile_uid=$(cmd package list packages -U "$TILE_PKG" 2>/dev/null | sed -n 's/.*uid:\([0-9][0-9]*\).*/\1/p')
-if [ -z "$_tile_uid" ]; then
+# 取数与判定都用 scripts/tile-check.sh，磁贴 App 的「自查」按钮跑的是同一个脚本，
+# 这样两边不可能出现「doctor 说没事、App 说被冻了」。
+_tc_sh="$MODDIR/scripts/tile-check.sh"
+if [ -f "$_tc_sh" ]; then
+  _tc=$(sh "$_tc_sh" 2>/dev/null)
+else
+  _tc=""
+fi
+# 从 key=value 里取值；取不到返回空
+tcget() {
+  printf '%s\n' "$_tc" | sed -n "s/^$1=//p" | head -1
+}
+
+_tmod=$(tcget mod)
+_tinst=$(tcget installed)
+if [ "$_tmod" = "0" ]; then
+  bad "没找到 magpie 模块" "磁贴要靠模块里的脚本启停，先刷入模块"
+elif [ "$_tinst" != "1" ]; then
   ok "未安装磁贴 App（可选组件，不影响网关）"
 else
-  _tdump=$(dumpsys package "$TILE_PKG" 2>/dev/null)
-  _tver=$(printf '%s\n' "$_tdump" | sed -n 's/.*versionName=\([^ ]*\).*/\1/p' | head -1)
-  _tcode=$(printf '%s\n' "$_tdump" | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -1)
-  ok "已安装 ${_tver:-?}（versionCode ${_tcode:-?}，UID $_tile_uid）"
+  _tuid=$(tcget uid)
+  ok "已安装磁贴 App（versionCode $(tcget vcode)，UID ${_tuid:-?}）"
 
-  # root 授权：被撤销或被拒时磁贴只会显示「需要 root」，很容易被当成服务挂了。
-  # magisk --sqlite 只有 Magisk 有；KernelSU / APatch 下跳过，不报假红。
-  if command -v magisk >/dev/null 2>&1; then
-    _tpol=$(magisk --sqlite "SELECT policy FROM policies WHERE uid=$_tile_uid;" 2>/dev/null \
-      | sed -n 's/.*policy=\([0-9]*\).*/\1/p')
-    case "$_tpol" in
-      2) ok "Magisk 里已允许 root" ;;
-      1) bad "Magisk 里 root 被拒绝" "Magisk → 超级用户，把 Magpie 磁贴改成允许，否则只会显示「需要 root」" ;;
-      0) warn "Magisk 里 root 尚未授权" "点一次磁贴并在弹窗里允许；否则只会显示「需要 root」" ;;
-    esac
-  fi
-
-  # 不在面板里就不会被绑定、也不会刷新，属于用户选择，不算问题
-  _in_qs=0
-  case "$(settings get secure sysui_qs_tiles 2>/dev/null)" in
-    *"custom($TILE_COMP)"*) _in_qs=1 ;;
+  # root 授权：被拒或被撤销时磁贴只会显示「需要 root」，最容易被当成服务挂了。
+  case "$(tcget magisk)" in
+    2) ok "Magisk 里已允许 root" ;;
+    1) bad "Magisk 里 root 被拒绝" "Magisk → 超级用户，把 Magpie 磁贴改成允许" ;;
+    0) warn "Magisk 里 root 尚未授权" "点一次磁贴并在弹窗里允许" ;;
+    *) : ;;   # 非 Magisk 环境不查这一项
   esac
 
-  if [ "$_in_qs" = "0" ]; then
+  if [ "$(tcget inqs)" = "0" ]; then
     ok "未加入控制中心（不影响网关；需要时在编辑里拖进去）"
   else
-    # SystemUI 自己留着一份绘制结果：secondaryLabel 才是真正画出去的字。
-    # tile.state 会把「已停止」和「启动失败」压成同一个 1、「需要 root」和
-    # 「模块未安装」压成同一个 0，只有文案能区分。
-    _painted=$(dumpsys activity service com.android.systemui 2>/dev/null \
-      | grep -o "spec=custom(${TILE_PKG_RE}[^)]*)[^]]*" \
-      | sed -n 's/.*,secondaryLabel=\([^,]*\),.*/\1/p' | head -1)
-    if [ -z "$_painted" ]; then
+    _tpaint=$(tcget painted)
+    if [ -z "$_tpaint" ]; then
       warn "还没有绘制记录" "开机后没展开过控制中心；展开一次再看"
     else
-      case "$_painted" in
-        null|'') warn "磁贴还没画出状态" "展开一次控制中心让它刷新" ;;
-        处理中*) ok "磁贴正在刷新（处理中，属瞬态）" ;;
-        需要\ root) warn "磁贴显示「需要 root」" "看上一条 root 授权是否被拒或撤销" ;;
-        模块未安装) bad "磁贴显示「模块未安装」" "确认模块目录存在：$MODDIR" ;;
+      case "$_tpaint" in
+        null|'')      warn "磁贴还没画出状态" "展开一次控制中心让它刷新" ;;
+        处理中*)      ok "磁贴正在刷新（处理中，属瞬态）" ;;
+        需要\ root)   warn "磁贴显示「需要 root」" "看上一条 root 授权是否被拒或撤销" ;;
+        模块未安装)   bad "磁贴显示「模块未安装」" "确认模块目录存在：$MODDIR" ;;
         *)
-          if magpie_running; then _expect=运行中; else _expect=已停止; fi
-          if [ "$_painted" = "$_expect" ]; then
-            ok "磁贴显示「$_painted」，与实际一致"
+          if [ "$(tcget svc)" = "running" ]; then _expect=运行中; else _expect=已停止; fi
+          if [ "$_tpaint" = "$_expect" ]; then
+            ok "磁贴显示「$_tpaint」，与实际一致"
           else
-            warn "磁贴显示「$_painted」，实际是「$_expect」" \
+            warn "磁贴显示「$_tpaint」，实际是「$_expect」" \
               "服务被命令行或看门狗启停过、磁贴还没重读；展开一次控制中心就会对齐。若展开后仍不对，看下面的冻结检查"
           fi
           ;;
@@ -319,47 +310,24 @@ else
     fi
   fi
 
-  # 冻结检查：不假设是哪个模块在冻（NoActive / CZero / 系统 cached_apps_freezer /
-  # 厂商 greezer 都可能），只报「冻了」+ 找到的证据。
-  #
-  # 两个坑：uid_XXXX 目录里会残留已死进程的目录，也会有别的 uid 的进程
-  # （如 Chrome 沙箱 uid 90000）挂进来，所以必须回头核对 /proc/<pid>/cgroup。
-  _tile_alive=0
-  _tile_frozen=0
-  for _f in /sys/fs/cgroup/uid_"$_tile_uid"/pid_*/cgroup.freeze; do
-    [ -e "$_f" ] || continue
-    _pid=${_f#/sys/fs/cgroup/uid_"${_tile_uid}"/pid_}
-    _pid=${_pid%%/*}
-    [ -d "/proc/$_pid" ] || continue
-    case "$(sed -n 's/^0:://p' "/proc/$_pid/cgroup" 2>/dev/null)" in
-      */uid_"$_tile_uid"/pid_*) ;;
-      *) continue ;;
-    esac
-    _tile_alive=$((_tile_alive + 1))
-    [ "$(cat "$_f" 2>/dev/null)" = "1" ] && _tile_frozen=$((_tile_frozen + 1))
-  done
-
-  if [ "$_tile_alive" = "0" ]; then
+  # 冻结：不假设是哪个模块在冻，只报「冻了」+ 场上找到的线索
+  _talive=$(tcget alive)
+  _tfrozen=$(tcget frozen)
+  if [ "${_talive:-0}" = "0" ]; then
     ok "进程当前未运行（展开面板时会自动拉起，不需要常驻）"
-  elif [ "$_tile_frozen" = "0" ]; then
-    ok "进程未被冻结（$_tile_alive 个进程全部可运行）"
+  elif [ "${_tfrozen:-0}" = "0" ]; then
+    ok "进程未被冻结（$_talive 个进程全部可运行）"
   else
-    # 找出是谁在冻：尽量说具体，但不把话说死
-    _who=""
-    for _d in /data/system/NoActive_*; do
-      [ -d "$_d" ] && _who="NoActive" && break
-    done
-    if [ -z "$_who" ] && [ -f /data/system/czero_freeze_list.txt ]; then
-      _who="CZero"
-    fi
-    if [ -z "$_who" ] && [ "$(settings get global cached_apps_freezer 2>/dev/null)" = "enabled" ]; then
-      _who="系统 cached_apps_freezer"
-    fi
-    if [ -z "$_who" ] && service check greezer 2>/dev/null | grep -q "found"; then
-      _who="HyperOS greezer"
-    fi
-    warn "进程被冻结（$_tile_frozen/$_tile_alive 个），磁贴会停在上一帧" \
-      "冻结期间展开面板读不到状态，不是逻辑错误。${_who:+疑似 ${_who} 在冻；}把本 App 的 UID $_tile_uid 加入它的冻结白名单（App 自己躲不掉）"
+    _who=$(tcget freezer)
+    case "$_who" in
+      NoActive) _wname="NoActive" ;;
+      CZero)    _wname="CZero" ;;
+      system)   _wname="系统 cached_apps_freezer" ;;
+      greezer)  _wname="HyperOS greezer" ;;
+      *)        _wname="" ;;
+    esac
+    warn "进程被冻结（$_tfrozen/$_talive 个），磁贴会停在上一帧" \
+      "冻结期间展开面板读不到状态，不是逻辑错误。${_wname:+疑似 $_wname 在冻；}把本 App 的 UID $_tuid 加入它的白名单（App 自己躲不掉）"
   fi
 fi
 

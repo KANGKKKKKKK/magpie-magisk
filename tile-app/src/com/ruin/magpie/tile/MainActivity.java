@@ -26,6 +26,8 @@ public class MainActivity extends Activity {
     private Button grant;
     private Button launcherBtn;
     private TextView launcherNote;
+    private Button checkBtn;
+    private TextView checkOut;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -163,6 +165,40 @@ public class MainActivity extends Activity {
         lp.topMargin = dp(8);
         root.addView(launcherNote, lp);
 
+        // ---- 自查 ----
+        TextView checkLabel = new TextView(this);
+        checkLabel.setText(R.string.label_check);
+        checkLabel.setTextSize(13f);
+        checkLabel.setAlpha(0.7f);
+        lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(28);
+        root.addView(checkLabel, lp);
+
+        checkBtn = new Button(this);
+        checkBtn.setText(R.string.btn_check);
+        checkBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runSelfCheck();
+            }
+        });
+        lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        root.addView(checkBtn, lp);
+
+        checkOut = new TextView(this);
+        checkOut.setTextSize(14f);
+        checkOut.setVisibility(View.GONE);
+        lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(12);
+        root.addView(checkOut, lp);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         return scroll;
@@ -256,6 +292,28 @@ public class MainActivity extends Activity {
             return;
         }
         refreshLauncherToggle();
+    }
+
+    /** 跑一次自查，把结论按行贴到界面上。 */
+    private void runSelfCheck() {
+        checkBtn.setEnabled(false);
+        checkOut.setText(R.string.check_running);
+        checkOut.setVisibility(View.VISIBLE);
+        Shell.run(SelfCheck.command(), new Shell.Callback<Shell.Result>() {
+            @Override
+            public void onResult(Shell.Result r) {
+                checkBtn.setEnabled(true);
+                StringBuilder sb = new StringBuilder();
+                for (String line : SelfCheck.parse(r == null ? null : r.out).report()) {
+                    if (sb.length() > 0) {
+                        sb.append('\n');
+                    }
+                    sb.append(line);
+                }
+                checkOut.setText(sb.toString());
+                checkOut.setVisibility(View.VISIBLE);
+            }
+        });
     }
 
     private int dp(int v) {

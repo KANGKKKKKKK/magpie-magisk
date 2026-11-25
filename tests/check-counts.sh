@@ -74,6 +74,8 @@ else
 fi
 
 # JVM 用例
+# 两套：ClassifyTest（磁贴状态判定）、SelfCheckTest（自查结论）。
+# SelfCheckTest 要把 SelfCheck.java 一起编进去 —— 它不引 Android 类，能在纯 JVM 上跑。
 JVM=""
 if command -v javac >/dev/null 2>&1 && [ -f "$HERE/jvm/ClassifyTest.java" ]; then
   _w="$_TMP/count-check-jvm"
@@ -86,8 +88,27 @@ if command -v javac >/dev/null 2>&1 && [ -f "$HERE/jvm/ClassifyTest.java" ]; the
   JVM=$(count_suite jvm java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$_w" ClassifyTest) || {
     rm -rf "$_w"; exit 1;
   }
-  say "  jvm/ClassifyTest  $JVM"
+  say "  jvm/ClassifyTest   $JVM"
   rm -rf "$_w"
+
+  if [ -f "$HERE/jvm/SelfCheckTest.java" ]; then
+    _w2="$_TMP/count-check-jvm2"
+    rm -rf "$_w2"
+    if ! javac -encoding UTF-8 \
+        "$ROOT/tile-app/src/com/ruin/magpie/tile/SelfCheck.java" \
+        "$HERE/jvm/SelfCheckTest.java" -d "$_w2" >/dev/null 2>&1; then
+      rm -rf "$_w2"
+      say "SelfCheckTest 编译失败" >&2
+      exit 1
+    fi
+    _sc=$(count_suite selfcheck java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 \
+        -cp "$_w2" com.ruin.magpie.tile.SelfCheckTest) || {
+      rm -rf "$_w2"; exit 1;
+    }
+    say "  jvm/SelfCheckTest  $_sc"
+    JVM=$((JVM + _sc))
+    rm -rf "$_w2"
+  fi
 fi
 
 if [ -z "$INS" ] || [ -z "$ACT" ]; then

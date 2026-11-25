@@ -51,13 +51,20 @@ jobs:
       - name: 磁贴的状态判定逻辑
         run: |
           set -eu
-          # 纯 JVM，不依赖 Android SDK。这段逻辑决定磁贴显示什么，
+          # 纯 JVM，不依赖 Android SDK。这两段逻辑决定磁贴和自查显示什么，
           # 判错会让「启动失败」看起来像「已停止」。
           W=$(mktemp -d)
           javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W"
           # -encoding 只影响「读源码」；控制台输出取决于 file/stdout.encoding。
           # 用例里有中文（"正在停止"），GBK/ASCII 环境下会变成问号，排查时更难看。
           java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W" ClassifyTest
+
+          # 自查结论。SelfCheck 不引 Android 类，能直接编进来。
+          W2=$(mktemp -d)
+          javac -encoding UTF-8 tile-app/src/com/ruin/magpie/tile/SelfCheck.java \
+            tests/jvm/SelfCheckTest.java -d "$W2"
+          java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W2" \
+            com.ruin.magpie.tile.SelfCheckTest
 
       - name: 磁贴 App 能编译
         run: |

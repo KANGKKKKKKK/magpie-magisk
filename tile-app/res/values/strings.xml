@@ -30,4 +30,9 @@
     <string name="btn_show_icon">显示桌面图标</string>
     <string name="launcher_hidden_note">已隐藏。要再打开这个页面：长按控制中心里的 Magpie 磁贴。</string>
     <string name="launcher_hide_failed">没能修改桌面图标，系统拒绝了这次操作。</string>
+
+    <!-- 自查 -->
+    <string name="label_check">自查</string>
+    <string name="btn_check">检查磁贴状态</string>
+    <string name="check_running">检查中…</string>
 </resources>
