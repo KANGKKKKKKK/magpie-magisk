@@ -188,7 +188,7 @@ _cur_ver=$(sed -n 's/^version=//p' "$ROOT/module.prop")
 if grep -qxF '## 未发布' "$ROOT/CHANGELOG.md" 2>/dev/null; then
   _cur_ver=未发布
 fi
-if grep -qxF "## $_cur_ver" "$ROOT/CHANGELOG.md" 2>/dev/null; then
+if [ -n "$(changelog_section "$ROOT/CHANGELOG.md" "$_cur_ver")" ]; then
   if changelog_counts_ok "$ROOT/CHANGELOG.md" "$_cur_ver" \
        "$TOTAL" "$INS" "$WD" "$ACT" "$SV" "$LIB"; then
     ok "CHANGELOG $_cur_ver 一节含合计 $TOTAL 与各分项"
