@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release
@@ -74,7 +76,7 @@ jobs:
       - name: 语法检查与测试
         run: |
           set -eu
-          for f in service.sh action.sh uninstall.sh customize.sh scripts/*.sh tests/*.sh; do
+          for f in service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh tests/*.sh; do
             sh -n "$f"
           done
           echo "语法检查通过"
@@ -82,7 +84,7 @@ jobs:
           # 只查生产脚本：测试文件里大量 a && b || c 是刻意写法，查出来全是噪音。
           # SC1090/SC1091 是动态 source（先判断 lib.sh 在不在），刻意如此。
           shellcheck -s sh -e SC1090,SC1091 \
-            service.sh action.sh uninstall.sh customize.sh scripts/*.sh
+            service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh
           echo "shellcheck 通过"
 
           python3 tests/make-fixtures.py /tmp/fx
@@ -96,6 +98,12 @@ jobs:
           TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
           sh tests/test-service.sh
           sh tests/test-lib.sh
+          W3=$(mktemp -d); mkdir -p "$W3/stubs/android/os" "$W3/classes"
+          printf '%s\n' 'package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }' > "$W3/stubs/android/os/Looper.java"
+          printf '%s\n' 'package android.os; public class Handler { public Handler(Looper l) {} public boolean post(Runnable r) { r.run(); return true; } }' > "$W3/stubs/android/os/Handler.java"
+          javac -encoding UTF-8 -d "$W3/classes" "$W3"/stubs/android/os/*.java \
+            tile-app/src/com/ruin/magpie/tile/Shell.java tests/jvm/ShellTest.java
+          java -cp "$W3/classes" com.ruin.magpie.tile.ShellTest
 
       - name: 打包
         env:
@@ -131,6 +139,7 @@ jobs:
           sh build.sh dist
           # 用完立刻删掉，别留在 runner 上
           rm -f "$RUNNER_TEMP/magpie-tile.jks"
+          ( cd dist && sha256sum magpie-*.zip > SHA256SUMS )
           ls -l dist/
 
       - name: 校验 zip 结构
@@ -167,6 +176,12 @@ jobs:
           fi
           echo "结构检查通过"
 
+      - name: 生成构建 provenance
+        # 由 GitHub OIDC 签发，不需要额外密钥；所需权限已在 workflow 顶部最小化列出。
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/magpie-*.zip
+
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -178,7 +193,7 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，覆盖上传资源"
-            gh release upload "$TAG" "$ZIP" --clobber
+            gh release upload "$TAG" "$ZIP" dist/SHA256SUMS --clobber
           else
             # 说明先写到文件里（占位符后面替换），免得长文本被引号或反引号弄乱
             cat > NOTES.md <<'EOF'
@@ -193,7 +208,7 @@ jobs:
           - 变更记录：[CHANGELOG.md](https://github.com/__REPO__/blob/main/CHANGELOG.md)
           EOF
             sed -i "s|__TAG__|$TAG|g; s|__SHA__|$GITHUB_SHA|g; s|__REPO__|$REPO|g" NOTES.md
-            gh release create "$TAG" "$ZIP" \
+            gh release create "$TAG" "$ZIP" dist/SHA256SUMS \
               --title "$TAG" \
               --notes-file NOTES.md
           fi

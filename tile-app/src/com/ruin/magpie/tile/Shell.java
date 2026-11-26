@@ -3,11 +3,11 @@ package com.ruin.magpie.tile;
 import android.os.Handler;
 import android.os.Looper;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 通过 su 执行模块脚本。
@@ -124,19 +124,24 @@ final class Shell {
 
     /** 同步执行，只在后台线程里调用。 */
     static Result exec(String command) {
-        Result r = execWith(cachedSu, command);
-        if (r.ok || cachedSu == null) {
-            return r;
-        }
-        // 缓存的 su 失效了（换了 Root 方案 / 被卸载），重新找一遍
-        cachedSu = null;
-        return execWith(null, command);
+        return exec(command, TIMEOUT_MS);
     }
 
-    private static Result execWith(String su, String command) {
+    static Result exec(String command, long timeoutMs) {
+        String cached = cachedSu;
+        if (cached != null) {
+            Result r = execWith(cached, command, timeoutMs);
+            // 业务命令的非零退出或超时不能自动重放（尤其 toggle），只让下次重找 su。
+            if (!r.ok) cachedSu = null;
+            return r;
+        }
+        return execWith(null, command, timeoutMs);
+    }
+
+    private static Result execWith(String su, String command, long timeoutMs) {
         if (su == null) {
             for (String candidate : SU_CANDIDATES) {
-                Result probe = execOnce(candidate, "id -u");
+                Result probe = execOnce(candidate, "id -u", Math.min(timeoutMs, 5000L));
                 if (probe.ok && "0".equals(probe.out.trim())) {
                     cachedSu = candidate;
                     su = candidate;
@@ -147,37 +152,98 @@ final class Shell {
                 return new Result(false, "", "no su");
             }
         }
-        return execOnce(su, command);
+        return execOnce(su, command, timeoutMs);
     }
 
-    private static Result execOnce(String su, String command) {
+    private static final long TIMEOUT_MS = 20000L;
+    private static final int MAX_STREAM_BYTES = 65536;
+
+    static Result execOnce(String su, String command, long timeoutMs) {
         Process p = null;
+        StreamReader out = null;
+        StreamReader err = null;
+        boolean timedOut = false;
         try {
             p = new ProcessBuilder(su, "-c", command)
                     .redirectErrorStream(false)
                     .start();
-            String out = readAll(p.getInputStream());
-            String err = readAll(p.getErrorStream());
-            int code = p.waitFor();
-            return new Result(code == 0, out, err);
-        } catch (Exception e) {
-            return new Result(false, "", String.valueOf(e.getMessage()));
-        } finally {
-            if (p != null) {
+            out = new StreamReader(p.getInputStream());
+            err = new StreamReader(p.getErrorStream());
+            out.start();
+            err.start();
+            if (!p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+                timedOut = true;
                 p.destroy();
+                if (!p.waitFor(500, TimeUnit.MILLISECONDS)) {
+                    p.destroyForcibly();
+                    p.waitFor(500, TimeUnit.MILLISECONDS);
+                }
             }
+            out.join(1000L);
+            err.join(1000L);
+            out.close();
+            err.close();
+            String suffix = timedOut ? "command timed out" : "";
+            return new Result(!timedOut && p.exitValue() == 0,
+                    out.text(), joinError(err.text(), suffix));
+        } catch (Exception e) {
+            if (p != null) {
+                p.destroyForcibly();
+            }
+            return new Result(false, out == null ? "" : out.text(),
+                    joinError(err == null ? "" : err.text(), String.valueOf(e.getMessage())));
+        } finally {
+            if (out != null) out.interrupt();
+            if (err != null) err.interrupt();
+            if (p != null) p.destroyForcibly();
         }
     }
 
-    private static String readAll(InputStream in) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        BufferedReader br = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-        String line;
-        while ((line = br.readLine()) != null) {
-            sb.append(line).append('\n');
+    private static String joinError(String first, String second) {
+        if (first == null || first.length() == 0) return second == null ? "" : second;
+        if (second == null || second.length() == 0) return first;
+        return first + second;
+    }
+
+    /** 两个流必须同时消费，否则 stderr 管道写满后 su 永远不会退出。 */
+    private static final class StreamReader extends Thread {
+        private final InputStream in;
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private boolean truncated;
+
+        StreamReader(InputStream in) {
+            super("magpie-su-stream");
+            this.in = in;
+            setDaemon(true);
         }
-        br.close();
-        return sb.toString();
+
+        @Override
+        public void run() {
+            byte[] buffer = new byte[4096];
+            try {
+                int n;
+                while ((n = in.read(buffer)) != -1) {
+                    int room = MAX_STREAM_BYTES - bytes.size();
+                    if (room > 0) bytes.write(buffer, 0, Math.min(room, n));
+                    if (n > room) truncated = true;
+                }
+            } catch (Exception ignored) {
+                // 进程销毁/超时关闭流是正常收尾；已有输出仍保留。
+            }
+        }
+
+        String text() {
+            try {
+                String value = bytes.toString("UTF-8");
+                return truncated ? value + "\n[output truncated]\n" : value;
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
+        void close() {
+            try { in.close(); } catch (Exception ignored) { }
+        }
     }
 
     static final class Result {

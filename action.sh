@@ -199,6 +199,7 @@ wait_ready() {
 
 set_gateway() {
   _to="$1"
+  [ "$_to" = lan ] && echo "警告：仅在自己可信的局域网开启；公共或陌生 Wi-Fi 请保持仅本机。"
   # 端口读不出来时不能改配置：会写出 "0.0.0.0:" 这种半截地址
   if [ -n "$ADDR_ERROR" ]; then
     echo "配置有问题，先改好再切网关："
@@ -442,8 +443,9 @@ menu_body() {
   else echo " 状态  已停止"; fi
   case "$_cur" in
     lan)
+      echo " 警告  仅在可信局域网开启；公共/陌生 Wi-Fi 请用仅本机"
       _lan=$(lan_ip)
-      echo " 网关  局域网 · 其他设备可连接"
+      echo " 网关  局域网 · 仅可信网络使用"
       echo " 地址  ${_lan:-无（Wi-Fi 与热点都没开）}"
       ;;
     *)

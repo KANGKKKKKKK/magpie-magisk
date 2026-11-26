@@ -109,6 +109,18 @@ if command -v javac >/dev/null 2>&1 && [ -f "$HERE/jvm/ClassifyTest.java" ]; the
     JVM=$((JVM + _sc))
     rm -rf "$_w2"
   fi
+
+  if [ -f "$HERE/jvm/ShellTest.java" ]; then
+    _w3="$_TMP/count-check-jvm3"; rm -rf "$_w3"
+    mkdir -p "$_w3/stubs/android/os" "$_w3/classes"
+    printf '%s\n' 'package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }' > "$_w3/stubs/android/os/Looper.java"
+    printf '%s\n' 'package android.os; public class Handler { public Handler(Looper l) {} public boolean post(Runnable r) { r.run(); return true; } }' > "$_w3/stubs/android/os/Handler.java"
+    javac -encoding UTF-8 -d "$_w3/classes" "$_w3"/stubs/android/os/*.java \
+      "$ROOT/tile-app/src/com/ruin/magpie/tile/Shell.java" "$HERE/jvm/ShellTest.java" || exit 1
+    _shell=$(count_suite shell java -cp "$_w3/classes" com.ruin.magpie.tile.ShellTest) || exit 1
+    say "  jvm/ShellTest      $_shell"
+    JVM=$((JVM + _shell)); rm -rf "$_w3"
+  fi
 fi
 
 if [ -z "$INS" ] || [ -z "$ACT" ]; then

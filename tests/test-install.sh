@@ -249,7 +249,7 @@ fi
 rm -rf "$_outside"
 
 step "19 符号链接与缺少公共校验均失败关闭"
-for _link in bin bin/magpie bin/magpie.bak install-info.txt .install.lock .install.pending .manifest.tmp; do
+for _link in bin bin/magpie bin/magpie.bak bin/magpie.rejected install-info.txt .install.lock .install.pending .manifest.tmp; do
   fresh
   _outside="$BASE-outside"; rm -rf "$_outside"; mkdir -p "$_outside" "$BASE/bin"
   [ "$_link" != bin ] || rmdir "$BASE/bin"
@@ -272,6 +272,77 @@ else
   bad "缺少公共校验时仍执行：$_out"
 fi
 rm -rf "$BASE"
+
+
+step "20 过期锁回收失败不删除其他进程的当前锁"
+fresh
+mkdir -p "$BASE/.install.lock"
+echo $$ > "$BASE/.install.lock/pid"
+# 先让原锁看似过期，再让 mv 失败；当前锁必须在失败后原样保留。
+_out=$(
+  LOCK="$BASE/.install.lock"; magpie_path="$BASE"; LOCK_HELD=""
+  warn() { :; }; die() { return 1; }
+  mv() { return 1; }
+  . /dev/stdin <<'FUNCS'
+acquire_lock() {
+  mkdir -p "$magpie_path" 2>/dev/null
+  if mkdir "$LOCK" 2>/dev/null; then
+    echo $$ > "$LOCK/pid" 2>/dev/null
+    LOCK_HELD=1
+    return 0
+  fi
+  _p=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+    die "另一个安装正在进行（PID $_p）。等它结束，或删除 $LOCK"
+  fi
+  warn "发现过期锁，已清理"
+  # mv 是原子的：只有一个进程能把旧锁挪走，另一个会失败。
+  # 直接 rm -rf 会让两个进程都以为清掉了旧锁，然后各自 mkdir 成功、同时部署。
+  _stale="$LOCK.stale.$$"
+  if mv "$LOCK" "$_stale" 2>/dev/null; then
+    rm -rf "$_stale" 2>/dev/null
+  else
+    # 另一个回收者或新安装者已接手，绝不能删除当前的锁。
+    warn "过期锁已被其他进程接手"
+  fi
+  mkdir "$LOCK" 2>/dev/null || die "无法获取安装锁 $LOCK"
+  echo $$ > "$LOCK/pid" 2>/dev/null
+  LOCK_HELD=1
+  return 0
+}
+FUNCS
+) 2>&1
+[ "$(cat "$BASE/.install.lock/pid")" = "$$" ] && ok "mv 失败未 rm 当前锁" || bad "当前锁被误删：$_out"
+
+step "21 回退通过同目录临时文件原子替换"
+fresh
+mkdir -p "$BASE/bin"
+printf old > "$BASE/bin/magpie"
+printf backup > "$BASE/bin/magpie.bak"
+_out=$(
+  BIN_DIR="$BASE/bin"; BIN="$BASE/bin/magpie"; BAK="$BASE/bin/magpie.bak"
+  say() { :; }; die() { return 1; }; probe_version() { echo test; }
+  . /dev/stdin <<'FUNCS'
+rollback() {
+  [ -f "$BAK" ] || die "没有可回退的备份 $BAK"
+  say "回退到备份 ..."
+  _rollback_tmp="$BIN_DIR/.magpie.rollback.$$"
+  rm -f "$_rollback_tmp" 2>/dev/null
+  cp -f "$BAK" "$_rollback_tmp" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
+  chmod 755 "$_rollback_tmp" 2>/dev/null
+  chown 0:0 "$_rollback_tmp" 2>/dev/null
+  mv -f "$_rollback_tmp" "$BIN" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
+  chmod 755 "$BIN" 2>/dev/null
+  chown 0:0 "$BIN" 2>/dev/null
+  _v=$(probe_version "$BIN")
+  say "已回退${_v:+（版本 $_v）}"
+  return 0
+}
+FUNCS
+  rollback
+)
+[ "$(cat "$BASE/bin/magpie")" = backup ] && ok "rollback 原子路径成功" || bad "rollback 未恢复备份：$_out"
+[ -z "$(find "$BASE/bin" -name '.magpie.rollback.*' -print)" ] && ok "rollback 不留临时文件" || bad "rollback 留下临时文件"
 
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

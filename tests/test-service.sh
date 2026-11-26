@@ -316,6 +316,54 @@ sleep 0.5
   || bad "停止没写 .user_stopped，会被看门狗拉回来"
 kill -9 "$_fp" 2>/dev/null
 
+
+echo "== 10 web.key 权限与日志脱敏"
+build
+mkdir -p "$B/bin"
+printf '#!/bin/sh\necho $$ > %s/fake.pid\nexec sleep 200\n' "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+stub_lib "magpie_main_pid() { _stubf=\"$B/fake.pid\"; _stubp=\"\"; [ -s \"\$_stubf\" ] && _stubp=\$(cat \"\$_stubf\"); [ -n \"\$_stubp\" ] && [ -d \"/proc/\$_stubp\" ] && echo \"\$_stubp\"; }"
+stub_lib "magpie_all_pids() { return 0; }"
+stub_lib "magpie_mcp_pids() { return 0; }"
+(umask 000; sh "$B/scripts/magpie.service" start >/dev/null 2>&1)
+_mode=$(stat -c %a "$B/data/web.key" 2>/dev/null)
+[ "$_mode" = 600 ] && ok "web.key 在宽松 umask 下仍为 600" || bad "web.key 权限为 $_mode"
+if grep 'log Info "      WebUI' "$B/scripts/magpie.service" | grep -q '<redacted>'; then
+  ok "启动日志不记录 ?k= 密钥"
+else
+  bad "启动日志仍可能泄露密钥"
+fi
+sh "$B/scripts/magpie.service" stop >/dev/null 2>&1 || true
+
+echo "== 11 锁文件中的停止意图不会被 start 清除"
+build
+mkdir -p "$B/bin"
+printf '#!/bin/sh\nexit 0\n' > "$B/bin/magpie"; chmod 755 "$B/bin/magpie"
+stub_lib "magpie_main_pid() { return 1; }"
+stub_lib "magpie_all_pids() { return 0; }"
+stub_lib "magpie_mcp_pids() { return 0; }"
+mkdir -p "$B/run/.service.lock"
+# 存活的本测试进程充当锁持有者。
+echo $$ > "$B/run/.service.lock/pid"
+sh "$B/scripts/magpie.service" stop >/dev/null 2>&1 & _stop=$!
+sleep 0.3
+[ -f "$B/run/.user_stopped" ] && ok "等待锁时已写入停止标记" || bad "停止意图被锁延迟"
+rm -rf "$B/run/.service.lock"
+wait "$_stop"
+[ -f "$B/run/.user_stopped" ] && ok "stop 完成后保留停止标记" || bad "stop 完成未保留停止标记"
+[ ! -d "$B/run/.service.lock" ] && ok "启停锁最终释放" || bad "启停锁未释放"
+
+
+echo "== 12 卸载 dnsmasq.keep.pid 必须校验进程身份"
+_kp=$$
+mkdir -p "$B/run"; echo "$_kp" > "$B/run/dnsmasq.keep.pid"
+DATA="$B"; export DATA
+# 抽出的卸载片段只能看到沙箱 PID；没有 fifo 身份时绝不能杀。
+eval "$(sed -n '/^if \[ -f "\$DATA\/run\/dnsmasq.keep.pid" \]/,/^fi$/p' "$SRCDIR/uninstall.sh")"
+if kill -0 "$_kp" 2>/dev/null; then ok "keep.pid 指向普通 sleep 时不误杀"; else bad "普通 sleep 被 keep.pid 误杀"; fi
+eval "$(sed -n '/^kill_if_magpie()/,/^}/p' "$SRCDIR/uninstall.sh")"
+if kill_if_magpie "$$"; then bad "非 magpie 进程通过身份校验"; else ok "非 magpie 进程被拒绝 kill"; fi
+
 reap
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

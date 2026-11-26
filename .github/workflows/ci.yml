@@ -25,7 +25,7 @@ jobs:
       - name: 语法检查
         run: |
           set -eu
-          for f in service.sh action.sh uninstall.sh customize.sh scripts/*.sh tests/*.sh; do
+          for f in service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh tests/*.sh; do
             sh -n "$f"
           done
           echo "语法检查通过"
@@ -39,7 +39,7 @@ jobs:
           # 单处例外用内联 `# shellcheck disable=` 标注并写理由，
           # 这样能保证例外是「解释过的」，不是「整体关掉」。
           shellcheck -s sh -e SC1090,SC1091 \
-            service.sh action.sh uninstall.sh customize.sh scripts/*.sh
+            service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh
 
       - name: 文档里的测试数字是否与实际一致
         run: |
@@ -65,6 +65,19 @@ jobs:
             tests/jvm/SelfCheckTest.java -d "$W2"
           java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W2" \
             com.ruin.magpie.tile.SelfCheckTest
+
+          # Shell 进程执行：用两个最小 android.os 桩，在桌面 JVM 跑真实 Process。
+          W3=$(mktemp -d)
+          mkdir -p "$W3/stubs/android/os" "$W3/classes"
+          cat > "$W3/stubs/android/os/Looper.java" <<'JAVA'
+          package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }
+          JAVA
+          cat > "$W3/stubs/android/os/Handler.java" <<'JAVA'
+          package android.os; public class Handler { public Handler(Looper l) {} public boolean post(Runnable r) { r.run(); return true; } }
+          JAVA
+          javac -encoding UTF-8 -d "$W3/classes" "$W3"/stubs/android/os/*.java \
+            tile-app/src/com/ruin/magpie/tile/Shell.java tests/jvm/ShellTest.java
+          java -cp "$W3/classes" com.ruin.magpie.tile.ShellTest
 
       - name: 磁贴 App 能编译
         run: |

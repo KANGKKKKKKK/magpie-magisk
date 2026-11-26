@@ -62,9 +62,15 @@ mkdir -p "$RUN" "$magpie_path/data"
 WEB_KEY_FILE="$magpie_path/data/web.key"
 if [ -s "$WEB_KEY_FILE" ]; then
   WEB_KEY=$(cat "$WEB_KEY_FILE" 2>/dev/null)
+  chmod 600 "$WEB_KEY_FILE" 2>/dev/null
 else
   WEB_KEY=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)
-  [ -n "$WEB_KEY" ] && echo "$WEB_KEY" > "$WEB_KEY_FILE"
+  _web_key_tmp="$magpie_path/data/.web.key.$$"
+  if [ -n "$WEB_KEY" ] && ( umask 077; printf '%s\n' "$WEB_KEY" > "$_web_key_tmp" ) 2>/dev/null; then
+    chmod 600 "$_web_key_tmp" 2>/dev/null
+    mv -f "$_web_key_tmp" "$WEB_KEY_FILE" 2>/dev/null
+  fi
+  rm -f "$_web_key_tmp" 2>/dev/null
 fi
 WEB_URL=""
 [ -n "$WEB_PORT" ] && WEB_URL="http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY"
@@ -103,6 +109,42 @@ clean_logs() { rotate_log "$LOG"; }
 DNS_SERVERS="$MAGPIE_DNS"
 RESOLV_CONF="$RUN/resolv.conf"
 USER_STOPPED="$RUN/.user_stopped"
+SERVICE_LOCK="$RUN/.service.lock"
+SERVICE_LOCK_HELD=""
+
+# 启停操作串行执行。停止请求先落盘再等待锁：即使较早的 start 仍在运行，
+# 它也不会把较新的停止意图清掉；stop 获得锁后会做最终收尾。
+acquire_service_lock() {
+  _i=0
+  while ! mkdir "$SERVICE_LOCK" 2>/dev/null; do
+    _owner=$(cat "$SERVICE_LOCK/pid" 2>/dev/null)
+    case "$_owner" in ''|*[!0-9]*) _owner="" ;; esac
+    if [ -n "$_owner" ] && ! kill -0 "$_owner" 2>/dev/null; then
+      _stale="$SERVICE_LOCK.stale.$$"
+      mv "$SERVICE_LOCK" "$_stale" 2>/dev/null && rm -rf "$_stale" 2>/dev/null
+      continue
+    fi
+    [ "$_i" -lt 150 ] || { log Error "另一个启停操作仍在进行，请稍后重试"; return 1; }
+    sleep 0.1; _i=$((_i + 1))
+  done
+  echo $$ > "$SERVICE_LOCK/pid" 2>/dev/null
+  SERVICE_LOCK_HELD=1
+}
+release_service_lock() {
+  [ -n "$SERVICE_LOCK_HELD" ] || return 0
+  SERVICE_LOCK_HELD=""
+  rm -rf "$SERVICE_LOCK" 2>/dev/null
+}
+has_stop_request() {
+  for _r in "$RUN"/.stop-request.*; do
+    [ -e "$_r" ] || continue
+    _rp=${_r##*.}
+    case "$_rp" in ''|*[!0-9]*) continue ;; esac
+    if kill -0 "$_rp" 2>/dev/null; then return 0; fi
+    rm -f "$_r" 2>/dev/null
+  done
+  return 1
+}
 CA_BUNDLE="$magpie_path/data/certs/ca-bundle.crt"
 CA_STAMP="$CA_BUNDLE.stamp"
 
@@ -310,6 +352,10 @@ start() {
     log Error "配置文件 $CONF"
     return 1
   fi
+  if has_stop_request; then
+    log Info "收到较新的停止请求，取消本次启动"
+    return 0
+  fi
   rm -f "$USER_STOPPED" 2>/dev/null
   # 清理必须在"已在运行"早退之前，否则覆盖安装后旧 dnsmasq 一直清不掉
   cleanup_legacy_dnsmasq
@@ -359,7 +405,10 @@ start() {
   if command -v setsid >/dev/null 2>&1; then _new_session="setsid"; fi
   # shellcheck disable=SC2086  # $_new_session 要么空、要么是两个词，故意分词
   ( cd "$magpie_path/data" && exec $_new_session "$BIN" serve --web="$WEB_HOST" ) >>"$LOG" 2>&1 &
-  echo "$WEB_URL" > "$RUN/web.url"
+  _web_url_tmp="$RUN/.web.url.$$"
+  ( umask 077; printf '%s\n' "$WEB_URL" > "$_web_url_tmp" ) 2>/dev/null && \
+    mv -f "$_web_url_tmp" "$RUN/web.url" 2>/dev/null
+  rm -f "$_web_url_tmp" 2>/dev/null
   chmod 600 "$RUN/web.url" 2>/dev/null
 
   # 等进程就绪，最多 6 秒
@@ -374,7 +423,7 @@ start() {
     # 紧接着的 $! 可能是中间进程、不是 serve。按实际探测到的 pid 记才准。
     echo "$pid" > "$PIDFILE" 2>/dev/null
     log Info "已启动 网关 http://$MAGPIE_ADDR"
-    log Info "      WebUI $WEB_URL (PID $pid)"
+    log Info "      WebUI http://127.0.0.1:$WEB_PORT/?k=<redacted> (PID $pid)"
     pin_oom "$pid"
     # 二进制自己报的地址会被 fake-ip 骗，这里自己算
     refresh_lan_url || true
@@ -430,9 +479,21 @@ sync_status() {
 
 case "$1" in
   # 退出码要带出 start 的结果，否则失败也返回 0
-  start)   start; _rc=$?; sync_status; exit $_rc ;;
-  stop)    stop;  sync_status ;;
-  restart) stop; start; _rc=$?; sync_status; exit $_rc ;;
+  start)
+    acquire_service_lock || exit 1; trap release_service_lock EXIT INT TERM HUP
+    start; _rc=$?; sync_status; exit $_rc ;;
+  stop)
+    : > "$USER_STOPPED" 2>/dev/null
+    _stop_request="$RUN/.stop-request.$$"; : > "$_stop_request" 2>/dev/null
+    acquire_service_lock || { _rc=$?; rm -f "$_stop_request"; exit $_rc; }
+    trap release_service_lock EXIT INT TERM HUP
+    stop; _rc=$?; rm -f "$_stop_request"; sync_status; exit $_rc ;;
+  restart)
+    : > "$USER_STOPPED" 2>/dev/null
+    _stop_request="$RUN/.stop-request.$$"; : > "$_stop_request" 2>/dev/null
+    acquire_service_lock || { _rc=$?; rm -f "$_stop_request"; exit $_rc; }
+    trap release_service_lock EXIT INT TERM HUP
+    stop; rm -f "$_stop_request"; start; _rc=$?; sync_status; exit $_rc ;;
   status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
 
   # 在跑就停，没跑就起。给磁贴 / 快捷方式用：一个动作，不用先判断状态。
@@ -440,8 +501,11 @@ case "$1" in
   # start() 会清掉那个标记。
   # 输出一行结果，方便调用方（磁贴、Tasker）直接展示。
   toggle)
+    acquire_service_lock || exit 1; trap release_service_lock EXIT INT TERM HUP
     if pid=$(running); then
+      _stop_request="$RUN/.stop-request.$$"; : > "$_stop_request" 2>/dev/null
       stop
+      rm -f "$_stop_request"
       sync_status
       echo "stopped"
       exit 0

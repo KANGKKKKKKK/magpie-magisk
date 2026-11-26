@@ -44,24 +44,27 @@ for _d in /proc/[0-9]*; do
   esac
 done
 
-# 3) 兜底按进程名收尾（含插件用的 bun 子进程）
+# 3) 兜底收尾。每次发信号前重新核对 exe/argv，避免 pidof 与 kill 之间
+# PID 被复用而误杀无关进程；MCP 子进程也属于本模块。
+kill_if_magpie() {
+  _kp=$1; _ksig=${2:--15}
+  case "$_kp" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$_kp/cmdline" ] || return 1
+  _kc=$(tr '\0' ' ' < "/proc/$_kp/cmdline" 2>/dev/null)
+  _ke=$(readlink "/proc/$_kp/exe" 2>/dev/null)
+  case "$_ke" in
+    "$DATA/bin/magpie"|/data/adb/magpie/bin/magpie)
+      case "$_kc" in *" serve "*|*" mcp "*) kill "$_ksig" "$_kp" 2>/dev/null ;; *) return 1 ;; esac ;;
+    */magpie-bun) kill "$_ksig" "$_kp" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
 _pid=$(pidof magpie 2>/dev/null)
-if [ -n "$_pid" ]; then
-  # 这里**不能**加引号：pidof 返回的是空格分隔的多个 pid，
-  # 加引号会把 "123 456" 当成一个 pid 传给 kill，一个都杀不掉。
-  # shellcheck disable=SC2086
-  kill -15 $_pid 2>/dev/null
-  sleep 1
-  _pid=$(pidof magpie 2>/dev/null)
-  # shellcheck disable=SC2086
-  [ -n "$_pid" ] && kill -9 $_pid 2>/dev/null
-fi
-# 进程名清单：现在只有一个，留成循环是为了以后加名字不用改结构
-# shellcheck disable=SC2043
-for _n in magpie-bun; do
-  _pid=$(pidof "$_n" 2>/dev/null)
-  # shellcheck disable=SC2086
-  [ -n "$_pid" ] && kill -9 $_pid 2>/dev/null
+for _kp in $_pid; do kill_if_magpie "$_kp"; done
+sleep 1
+_pid="$(pidof magpie 2>/dev/null) $(pidof magpie-bun 2>/dev/null)"
+for _kp in $_pid; do
+  kill_if_magpie "$_kp" -9
 done
 
 # 3.5) 顺手卸掉磁贴 App（它只是本模块的配件，留着没有意义）。
@@ -83,7 +86,22 @@ if [ -f "$DATA/run/dnsmasq.pid" ]; then
     *) grep -aq 'listen-address=::1' "/proc/$_dp/cmdline" 2>/dev/null && kill -15 "$_dp" 2>/dev/null ;;
   esac
 fi
-[ -f "$DATA/run/dnsmasq.keep.pid" ] && kill -15 "$(cat "$DATA/run/dnsmasq.keep.pid" 2>/dev/null)" 2>/dev/null
+if [ -f "$DATA/run/dnsmasq.keep.pid" ]; then
+  _kp=$(cat "$DATA/run/dnsmasq.keep.pid" 2>/dev/null)
+  case "$_kp" in
+    ''|*[!0-9]*) : ;;
+    *)
+      _kc=$(tr '\0' ' ' < "/proc/$_kp/cmdline" 2>/dev/null)
+      case "$_kc" in
+        "sleep 2147483647 "*)
+          for _fd in /proc/"$_kp"/fd/*; do
+            case "$(readlink "$_fd" 2>/dev/null)" in
+              *dnsmasq.fifo*) kill -15 "$_kp" 2>/dev/null; break ;;
+            esac
+          done ;;
+      esac ;;
+  esac
+fi
 
 echo "- Magpie 服务已停止"
 

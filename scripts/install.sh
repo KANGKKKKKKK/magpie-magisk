@@ -328,7 +328,8 @@ check_target() {
   # 已有的子路径也不能是链接：否则 bin 指到别处仍会越过目录白名单，
   # 清单临时文件、备份或记录文件的重定向也可能跟随链接写到外面。
   for _target in "$BIN_DIR" "$BIN" "$BAK" "$INFO" "$LOCK" "$PENDING" \
-                 "$magpie_path/.manifest.tmp"; do
+                 "$magpie_path/.manifest.tmp" \
+                 "$BIN.rejected" "$BIN_DIR/.magpie.new.$$" "$BIN_DIR/.magpie.rollback.$$"; do
     [ ! -L "$_target" ] || die "$_target 是符号链接，出于安全考虑不接受"
   done
   return 0
@@ -373,7 +374,8 @@ acquire_lock() {
   if mv "$LOCK" "$_stale" 2>/dev/null; then
     rm -rf "$_stale" 2>/dev/null
   else
-    rm -rf "$LOCK" 2>/dev/null
+    # 另一个回收者或新安装者已接手，绝不能删除当前的锁。
+    warn "过期锁已被其他进程接手"
   fi
   mkdir "$LOCK" 2>/dev/null || die "无法获取安装锁 $LOCK"
   echo $$ > "$LOCK/pid" 2>/dev/null
@@ -487,7 +489,12 @@ verify_installed() {
 rollback() {
   [ -f "$BAK" ] || die "没有可回退的备份 $BAK"
   say "回退到备份 ..."
-  cp -f "$BAK" "$BIN" 2>/dev/null || die "回退失败"
+  _rollback_tmp="$BIN_DIR/.magpie.rollback.$$"
+  rm -f "$_rollback_tmp" 2>/dev/null
+  cp -f "$BAK" "$_rollback_tmp" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
+  chmod 755 "$_rollback_tmp" 2>/dev/null
+  chown 0:0 "$_rollback_tmp" 2>/dev/null
+  mv -f "$_rollback_tmp" "$BIN" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
   chmod 755 "$BIN" 2>/dev/null
   chown 0:0 "$BIN" 2>/dev/null
   _v=$(probe_version "$BIN")
