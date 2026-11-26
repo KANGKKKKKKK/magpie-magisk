@@ -5,8 +5,11 @@ import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
+
+import java.lang.ref.WeakReference;
 
 /**
  * 控制中心磁贴。
@@ -27,15 +30,18 @@ import android.service.quicksettings.TileService;
  * 的进程冻住（cgroup.freeze=1）。冻结期间 SystemUI 的 onStartListening
  * 根本到不了这里 —— 连 su 都不会执行，磁贴就停在最后一次画出的状态上，
  * 表现为「磁贴和运行状态不符」。本类只能做到「不把已经知道的状态丢掉」
- * （见 render 的重试、resolve 的兜底），根治要把本 App 加进冻结白名单。
+ * （见 render 的重试、TileState 的缓存），根治要把本 App 加进冻结白名单。
  */
 public class MagpieTileService extends TileService {
 
     /** 状态缓存有效期：这段时间内重复 onStartListening 不重复执行 su。 */
     private static final long CACHE_MS = 5000L;
 
-    private static long cachedAt = 0L;
-    private static String cachedState = null;
+    // Accessed only on the main thread; includes request generations and a busy guard.
+    private static final TileState STATE = new TileState();
+    // A command can outlive its Service instance; completion belongs to the current listener.
+    private static WeakReference<MagpieTileService> currentListener = new WeakReference<>(null);
+    private boolean listening;
 
     /**
      * 拿不到 Tile 对象时的重试间隔。
@@ -56,26 +62,42 @@ public class MagpieTileService extends TileService {
     public void onStartListening() {
         super.onStartListening();
 
-        long now = System.currentTimeMillis();
-        if (cachedState != null && now - cachedAt < CACHE_MS) {
-            render(cachedState);
+        listening = true;
+        currentListener = new WeakReference<>(this);
+        if (STATE.isBusy()) {
+            render("working");
             return;
         }
-        // 已知状态先顶上，完全没头绪才画「处理中」。
-        // 以前是无条件画灰：su 慢一点（比如刚开机、root 授权还没下来），
-        // 整块磁贴就会灰在那里显示「处理中」，看起来同样是状态不对。
-        render(cachedState != null ? cachedState : "working");
-        // 一条命令同时问「模块在不在」与「服务状态」：/data/adb 是 0700 root，
-        // App 自己 stat 不到，只能让 su 去看。
+        String fresh = STATE.freshState(SystemClock.elapsedRealtime(), CACHE_MS);
+        if (fresh != null) {
+            render(fresh);
+            return;
+        }
+        // Keep a known value visible while reading; never invent 'stopped'.
+        render(STATE.lastState() != null ? STATE.lastState() : "working");
+        final long request = STATE.beginRead();
+        if (request == -1L) return; // Coalesce repeated SystemUI callbacks.
         Shell.run(Shell.statusCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state = resolve(r);
-                cachedState = state;
-                cachedAt = System.currentTimeMillis();
-                render(state);
+                String state = classify(r);
+                if (STATE.completeRead(request, state, SystemClock.elapsedRealtime())) {
+                    renderCurrent(state);
+                }
             }
         });
+    }
+
+    @Override
+    public void onStopListening() {
+        clearListeningInstance();
+        super.onStopListening();
+    }
+
+    @Override
+    public void onDestroy() {
+        clearListeningInstance();
+        super.onDestroy();
     }
 
     /**
@@ -87,8 +109,8 @@ public class MagpieTileService extends TileService {
     @Override
     public void onTileRemoved() {
         super.onTileRemoved();
-        cachedState = null;
-        cachedAt = 0L;
+        clearListeningInstance();
+        STATE.invalidateCache();
         stopSelf();
     }
 
@@ -105,78 +127,50 @@ public class MagpieTileService extends TileService {
     }
 
     private void doToggle() {
+        // unlockAndRun may finish after this instance stopped listening or was replaced.
+        if (!isCurrentListener()) return;
+        final long request = STATE.beginToggle();
+        if (request == -1L) return; // UI gray-out alone does not prevent queued clicks.
         render("working");
-        // 走 toggle：在跑就停、没跑就起。停止会写 .user_stopped，
-        // 看门狗不会把用户主动停掉的服务又拉回来。
+        // No retry/replay: the root script owns serialization and final state.
         Shell.run(Shell.toggleCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state = resolve(r);
-                cachedState = state;
-                cachedAt = System.currentTimeMillis();
-                render(state);
+                String state = classify(r);
+                if (STATE.completeToggle(request, state, SystemClock.elapsedRealtime())) {
+                    renderCurrent(state);
+                }
             }
         });
     }
 
-    /**
-     * 把 su 的返回结果翻成磁贴状态，认不出来时沿用上次已知状态。
-     *
-     * <p>宁可显示「上一次的结果」，也不能把「不知道」画成「已停止」：
-     * 后者会让用户以为服务挂了，或者以为点了启动其实没起来，两头都是误导。
-     */
-    static String resolve(Shell.Result r) {
-        String state = classify(r);
-        if ("unknown".equals(state)) {
-            return cachedState != null ? cachedState : "stopped";
-        }
-        return state;
+    /** Shared pure classifier; unknown execution results stay unknown. */
+    static String classify(Shell.Result r) {
+        return r == null ? "unknown" : TileState.classify(r.ok, r.out, r.err);
     }
 
-    /**
-     * 把 su 的返回结果翻译成磁贴状态。
-     *
-     * <p>判据是「输出」而不是退出码：su 成功把命令交给 sh 之后，退出码来自脚本
-     * 本身，所以 `sh: 脚本不存在` 的 127 也带着非 0；只看 !ok 会把它误判成
-     * 「没 root」，用户看到的提示完全对不上。
-     *
-     * <p>失败必须如实显示成「失败」。以前 toggle 失败会落到 else 分支被画成
-     * 「已停止」—— 用户点了启动、其实没起来，界面上却是「已停止」，看不出出过事。
-     *
-     * <p>返回 "unknown" 表示「有输出但认不出来」，由调用方决定怎么兜底。
-     */
-    static String classify(Shell.Result r) {
-        String out = r.trimmed();
-        // 模块不存在时命令会打印哨兵 —— 这条要在最前面判，
-        // 否则会被后面「输出非空但认不出来」兜到旧状态。
-        if (out.contains(Shell.NO_MODULE)) {
-            return "nomodule";
+    private boolean isCurrentListener() {
+        return listening && currentListener.get() == this;
+    }
+
+    private void clearListeningInstance() {
+        listening = false;
+        // A late stop/destroy from an older instance must not clear its replacement
+        // or invalidate the replacement's pending render retries. Never release busy here.
+        if (currentListener.get() == this) {
+            currentListener.clear();
+            ++renderSeq;
         }
-        // status 打印的是 "running (PID 123)"，toggle 打印的是裸 "running"，
-        // 所以不能只用 endsWith。取最后一行再双向匹配。
-        String last = out;
-        int nl = out.lastIndexOf('\n');
-        if (nl >= 0) {
-            last = out.substring(nl + 1).trim();
-        }
-        if (last.equals("running") || last.startsWith("running ")) {
-            return "running";
-        }
-        if (last.equals("stopped") || last.startsWith("stopped ")) {
-            return "stopped";
-        }
-        if (last.equals("failed") || last.startsWith("failed ")) {
-            return "failed";
-        }
-        // 输出为空且命令失败：这才是「根本没拿到 root / su 不可用」
-        if (out.isEmpty() && !r.ok) {
-            return "noroot";
-        }
-        return "unknown";
+    }
+
+    private static void renderCurrent(String state) {
+        MagpieTileService listener = currentListener.get();
+        if (listener != null) listener.render(state);
     }
 
     /** 把状态画到磁贴上。 */
     private void render(String state) {
+        if (!isCurrentListener()) return;
         render(state, 0, ++renderSeq);
     }
 
@@ -187,7 +181,7 @@ public class MagpieTileService extends TileService {
      *            否则慢的那次会把新的盖回去。
      */
     private void render(final String state, final int attempt, final long seq) {
-        if (seq != renderSeq) {
+        if (!isCurrentListener() || seq != renderSeq) {
             return;
         }
         Tile tile = getQsTile();
@@ -229,6 +223,10 @@ public class MagpieTileService extends TileService {
             label = getString(R.string.tile_label);
             sub = getString(R.string.state_unavailable);
             tileState = Tile.STATE_UNAVAILABLE;
+        } else if ("unknown".equals(state)) {
+            label = getString(R.string.tile_label);
+            sub = getString(R.string.state_unknown);
+            tileState = Tile.STATE_INACTIVE;
         } else {
             // working：显示处理中，同时置灰防止连点
             label = getString(R.string.tile_label);
@@ -256,8 +254,7 @@ public class MagpieTileService extends TileService {
      * 不是这里的逻辑问题。
      */
     static void refresh(android.content.Context ctx) {
-        cachedState = null;
-        cachedAt = 0L;
+        STATE.invalidateCache();
         try {
             TileService.requestListeningState(
                     ctx, new ComponentName(ctx, MagpieTileService.class));

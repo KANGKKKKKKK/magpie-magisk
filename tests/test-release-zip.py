@@ -335,7 +335,7 @@ elif name == "javac":
 elif name == "d8":
     if os.environ.get("MOCK_D8_RC"):
         sys.exit(int(os.environ["MOCK_D8_RC"]))
-    (Path(arg("--output")) / "classes.dex").write_bytes(b"MagpieTileService MainActivity LauncherIcon Shell")
+    (Path(arg("--output")) / "classes.dex").write_bytes(b"MagpieTileService MainActivity LauncherIcon Shell SelfCheck TileState SerialExecutor")
 elif name == "zipalign":
     shutil.copyfile(args[-2], args[-1])
 elif name == "apksigner":

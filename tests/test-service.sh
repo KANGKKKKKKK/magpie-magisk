@@ -60,13 +60,23 @@ build() {
   rm -rf "$B"; mkdir -p "$B/scripts" "$B/bin"
   # 两处 CONF 都改指沙箱，别读真实配置
   sed -e "s#^CONF=.*#CONF=$B/cfg#" \
-      "$SRCDIR/scripts/magpie.service" > "$B/scripts/magpie.service"
+      "$SRCDIR/scripts/magpie.service" | awk '
+      /^# 每条 start\/stop 路径/ {
+        # 生命周期用例用 sleep 冒充本体；精确 /proc 分类器另在第 21 节测试。
+        print "service_pid_command() { kill -0 \"$1\" 2>/dev/null; }"
+        print "pin_oom() { return 0; }"
+        print "ensure_cli() { return 0; }"
+      }
+      { print }
+    ' > "$B/scripts/magpie.service"
   sed -e "s#^CONF=.*#CONF=$B/cfg#" -e "s#^MODDIR=.*#MODDIR=$B#" \
       "$SRCDIR/service.sh" > "$B/service.sh"
   printf 'magpie_path="%s"\n' "$B" > "$B/cfg"
   cp "$SRCDIR/scripts/lib.sh" "$B/scripts/lib.sh"
   # 默认绝不扫描宿主进程；需要进程的用例只返回自己创建的 PID。
   printf '\npidof() { return 1; }\nmagpie_main_pid() { return 1; }\nmagpie_all_pids() { return 0; }\nmagpie_mcp_pids() { return 0; }\n' >> "$B/scripts/lib.sh"
+  # 旧生命周期夹具的候选来自桩，新的全量 serve API 也不能扫描宿主。
+  printf '%s\n' 'magpie_command_pids() { case "$1" in serve) magpie_main_pid ;; mcp) magpie_mcp_pids ;; *) return 1 ;; esac; }' >> "$B/scripts/lib.sh"
   printf '#!/bin/sh\nexit 0\n' > "$B/scripts/status.sh"
   chmod 755 "$B"/*.sh "$B"/scripts/*.sh
   : > "$B/calls.log"
@@ -122,7 +132,7 @@ O1=$(sleeper); O2=$(sleeper)
 KIDS="$KIDS $O1 $O2"
 stub_lib "magpie_main_pid() { return 1; }
 magpie_all_pids() { echo $O1 $O2; }
-magpie_mcp_pids() { echo $O1 $O2; }"
+magpie_mcp_pids() { for _mock_pid in $O1 $O2; do kill -0 \"\$_mock_pid\" 2>/dev/null && echo \"\$_mock_pid\"; done; }"
 out=$(sh "$B/scripts/magpie.service" stop 2>&1)
 case "$out" in *"主进程未在运行"*) ok "如实报告主进程不在" ;; *) bad "报告不对：$out" ;; esac
 if alive "$O1" || alive "$O2"; then bad "孤儿进程没清干净"; else ok "孤儿进程已清理"; fi
@@ -134,9 +144,9 @@ echo "== 3 stop：主进程在时清主进程 + 孤儿"
 build
 MAIN=$(sleeper); ORPH=$(sleeper)
 KIDS="$KIDS $MAIN $ORPH"
-stub_lib "magpie_main_pid() { echo $MAIN; }
+stub_lib "magpie_main_pid() { kill -0 $MAIN 2>/dev/null && echo $MAIN; }
 magpie_all_pids() { echo $MAIN $ORPH; }
-magpie_mcp_pids() { echo $ORPH; }"
+magpie_mcp_pids() { kill -0 $ORPH 2>/dev/null && echo $ORPH; }"
 out=$(sh "$B/scripts/magpie.service" stop 2>&1)
 case "$out" in *"正在停止"*) ok "报告了停止的主进程" ;; *) bad "没有停止记录：$out" ;; esac
 if alive "$MAIN"; then bad "主进程还活着"; else ok "主进程已停"; fi
@@ -532,6 +542,277 @@ _out=$(sh "$B/scripts/magpie.service" start 7>&- 2>&1); _rc=$?
 case "$_rc:$_out" in 1:*另一个启停操作仍在进行*) ok "有限轮询耗尽后拒绝启动" ;; *) bad "启停锁没有有界失败：$_rc $_out" ;; esac
 magpie_flock -u 7; exec 7>&-
 lock_available && ok "原持有者退出后锁正常可用" || bad "原持有者释放后仍被卡住"
+
+reap
+
+echo "== 20 status 完全只读：不建目录、不创建密钥、不改 pidfile 或权限"
+build
+_out=$(sh "$B/scripts/magpie.service" status 2>&1); _rc=$?
+[ "$_rc:$_out" = 0:stopped ] && ok "空目录 status 正确返回 stopped" || bad "空目录 status 输出错误"
+[ ! -e "$B/run" ] && [ ! -e "$B/data" ] && ok "status 不初始化 run/data 或 web.key" || bad "status 创建了目录或密钥"
+mkdir -p "$B/run" "$B/data"
+printf stale > "$B/run/magpie.pid"
+printf 'host-mock-key\n' > "$B/data/web.key"; chmod 644 "$B/data/web.key"
+_before=$(stat -c '%a:%Y:%Z' "$B/data/web.key")
+_out=$(sh "$B/scripts/magpie.service" status 2>&1)
+[ "$(cat "$B/run/magpie.pid")" = stale ] && ok "stopped 探测不删除旧 pidfile" || bad "status 删除了 pidfile"
+stub_lib 'magpie_main_pid() { echo 424242; }'
+_out=$(sh "$B/scripts/magpie.service" status 2>&1)
+[ "$_out" = 'running (PID 424242)' ] && [ "$(cat "$B/run/magpie.pid")" = stale ] && ok "running 探测不重写 pidfile" || bad "running status 修改了 pidfile 或报告错误"
+[ "$(stat -c '%a:%Y:%Z' "$B/data/web.key")" = "$_before" ] && ok "status 不 chmod 或重写现有密钥" || bad "status 修改了密钥元数据"
+rm "$B/run/magpie.pid"
+sh "$B/scripts/magpie.service" status >/dev/null 2>&1
+[ ! -e "$B/run/magpie.pid" ] && ok "running 探测也不创建缺失的 pidfile" || bad "status 创建了 pidfile"
+
+# 新回归只抽生产函数与 dispatch，加纯宿主替身；所有 kill 都被函数截获。
+extract_service() { sed -n "/^$1() /,/^[})]/p" "$SRCDIR/scripts/magpie.service"; }
+
+echo "== 21 精确命令身份：MCP / serve 的 argv 与本体路径都要匹配"
+build
+mkdir -p "$B/proc/41"
+printf 'ignored\000mcp\000vision\000' > "$B/proc/41/cmdline"
+ln -s "$B/bin/magpie" "$B/proc/41/exe"
+{
+  sed -n '/^magpie_pid_command() /,/^[})]/p' "$SRCDIR/scripts/lib.sh" | sed "s#/proc/#$B/proc/#g"
+  extract_service service_pid_command
+  printf 'BIN="%s/bin/magpie"\nservice_pid_command "$1" "$2"\n' "$B"
+} > "$B/identity.sh"
+sh "$B/identity.sh" 41 mcp && ok "精确 mcp 子命令通过" || bad "合法 mcp 被拒绝"
+printf 'ignored\000update\000mcp\000' > "$B/proc/41/cmdline"
+if sh "$B/identity.sh" 41 mcp; then bad "CLI 的 mcp 参数被误认"; else ok "普通 CLI 即使带 mcp 参数也被拒绝"; fi
+printf 'ignored\000serve-not\000' > "$B/proc/41/cmdline"
+if sh "$B/identity.sh" 41 serve; then bad "serve 前缀被误认"; else ok "serve 必须是完整 argv"; fi
+printf 'ignored\000serve\000--web=x\000' > "$B/proc/41/cmdline"
+sh "$B/identity.sh" 41 serve && ok "精确 serve 主进程通过" || bad "serve 被拒绝"
+rm "$B/proc/41/exe"; ln -s "$B/bin/other" "$B/proc/41/exe"
+if sh "$B/identity.sh" 41 serve; then bad "其他本体通过身份检查"; else ok "不同本体路径不能被杀"; fi
+rm "$B/proc/41/exe"; ln -s "$B/bin/magpie (deleted)" "$B/proc/41/exe"
+sh "$B/identity.sh" 41 serve && ok "升级后持有旧本体 inode 的 serve 仍可停止" || bad "升级后主进程无法停止"
+: > "$B/bin/magpie.real"; ln -s "$B/bin/magpie.real" "$B/bin/magpie"
+rm "$B/proc/41/exe"; ln -s "$B/bin/magpie.real" "$B/proc/41/exe"
+sh "$B/identity.sh" 41 serve && ok "符号链接形式的自定义本体仍能校验身份" || bad "符号链接本体被误拒绝"
+
+echo "== 22 stop 只选择主进程和 MCP；发信号前再次核对身份"
+build
+mkdir -p "$B/run"
+{
+  for _fn in running service_pid_matches stop_magpie_pid stop; do extract_service "$_fn"; done
+  cat <<'MOCK'
+RUN=$1; PIDFILE="$RUN/magpie.pid"; USER_STOPPED="$RUN/.user_stopped"
+log() { :; }; cleanup_legacy_dnsmasq() { :; }; sleep() { :; }
+magpie_main_pid() { [ ! -f "$RUN/killed.101" ] && echo 101; }
+magpie_all_pids() { echo all >> "$RUN/forbidden"; echo 101 202 303; }
+magpie_command_pids() {
+  for _mock_pid in 101; do service_pid_command "$_mock_pid" "$1" && echo "$_mock_pid"; done
+}
+magpie_mcp_pids() {
+  for _mock_pid in 202 404 505; do service_pid_command "$_mock_pid" mcp && echo "$_mock_pid"; done
+}
+service_pid_command() {
+  case "$1:$2" in
+    101:serve|202:mcp) [ ! -f "$RUN/killed.$1" ] ;;
+    404:mcp) return 1 ;; # 选择到候选后已经变成普通 CLI
+    505:mcp) [ ! -e "$RUN/term.505" ] ;; # TERM 后 PID 被复用
+    *) return 1 ;;
+  esac
+}
+kill() {
+  echo "$1 $2" >> "$RUN/signals"
+  [ "$1" != -15 ] || : > "$RUN/term.$2"
+  [ "$1" != -9 ] || : > "$RUN/killed.$2"
+  [ "$1" != -0 ]
+}
+stop
+MOCK
+} > "$B/stop-mock.sh"
+sh "$B/stop-mock.sh" "$B/run"
+[ ! -e "$B/run/forbidden" ] && ! grep -q ' 303$' "$B/run/signals" && ok "stop 不使用 all_pids 且绝不选择普通 CLI" || bad "stop 选择了 CLI / all_pids"
+grep -qx -- '-15 101' "$B/run/signals" && grep -qx -- '-9 101' "$B/run/signals" && ok "主进程停止路径仍完整" || bad "主进程未被停止"
+grep -qx -- '-15 202' "$B/run/signals" && ok "孤儿 MCP 仍被选择" || bad "遗漏 MCP 孤儿"
+if grep -q ' 404$' "$B/run/signals"; then bad "身份变化后仍发 TERM"; else ok "TERM 前重查身份，排除已变化候选"; fi
+grep -qx -- '-15 505' "$B/run/signals" && ! grep -qx -- '-9 505' "$B/run/signals" && ok "TERM 后身份变化时绝不补发 KILL" || bad "KILL 前未重查身份"
+
+echo "== 23 toggle 取消 / 启动失败 / 后置退出不能伪报 running"
+build
+{
+  extract_service running
+  extract_service start
+  # 直接抽生产 dispatch 中 toggle 分支，不复制判定算法。
+  sed -n '/^  toggle)/,/^    ;;/p' "$SRCDIR/scripts/magpie.service" | sed '1s/  toggle)/toggle_dispatch() {/' | sed '$s/    ;;/}/'
+  cat <<'MOCK'
+RUN=$1; USER_STOPPED="$RUN/.user_stopped"; PIDFILE="$RUN/magpie.pid"
+ADDR_ERROR=""; CONF=unused; BIN="$RUN/no-binary"
+log() { :; }; acquire_service_lock() { :; }; sync_status() { :; }
+magpie_main_pid() { return 1; }; cleanup_legacy_dnsmasq() { :; }
+magpie_mcp_pids() { :; }
+case "$2" in
+  cancel) has_stop_request() { return 0; } ;;
+  fail) has_stop_request() { return 1; } ;;
+  vanished) start() { return 0; } ;;
+esac
+toggle_dispatch
+MOCK
+} > "$B/toggle-mock.sh"
+mkdir -p "$B/run"
+for _scenario in cancel fail vanished; do
+  _out=$(sh "$B/toggle-mock.sh" "$B/run" "$_scenario" 2>&1); _rc=$?
+  case "$_scenario:$_rc:$_out" in
+    cancel:2:stopped) ok "较新 stop 取消返回 stopped / 2，不伪报 running" ;;
+    fail:1:failed) ok "真正启动失败返回 failed / 1" ;;
+    vanished:1:failed) ok "start 返回成功但后置已停也不能报 running" ;;
+    *) bad "toggle $_scenario 返回错误：$_rc $_out" ;;
+  esac
+done
+
+echo "== 24 并发首次 start：密钥只能锁内创建且整个启动使用同一份"
+build
+mkdir -p "$B/run"
+# 只模拟 daemon 就绪，不启动任何长期服务，不触碰真实 su / 启停。
+printf '#!/bin/sh\nprintf "%%s\\n" "$MAGPIE_WEB_KEY" > "%s/seen.key"\n: > "%s/launched"\n' "$B" "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+stub_lib "magpie_main_pid() { [ -f \"$B/launched\" ] && echo 424242; }
+magpie_write_ca_bundle() { return 1; }
+lan_ip() { return 1; }"
+. "$SRCDIR/scripts/lib.sh"
+magpie_pick_flock || exit 1
+exec 7>>"$B/run/.service.flock"
+magpie_flock -n 7 || exit 1
+sh "$B/scripts/magpie.service" start 7>&- >"$B/first.log" 2>&1 & _a=$!
+sh "$B/scripts/magpie.service" start 7>&- >"$B/second.log" 2>&1 & _b=$!
+KIDS="$KIDS $_a $_b"
+wait_file "/proc/$_a/fd/9" && wait_file "/proc/$_b/fd/9" || bad "并发 start 没有进入等锁"
+[ ! -e "$B/data" ] && ok "等锁期间不提前创建 data / web.key" || bad "密钥在持锁前初始化"
+magpie_flock -u 7; exec 7>&-
+wait "$_a"; _ar=$?; wait "$_b"; _br=$?
+[ "$_ar:$_br" = 0:0 ] && ok "并发首次 start 都完成" || bad "并发 start 失败：$_ar:$_br"
+[ "$(wc -c < "$B/data/web.key")" -eq 33 ] && cmp -s "$B/data/web.key" "$B/seen.key" && ok "持久密钥与启动进程收到的密钥完全一致" || bad "并发首次 start 密钥不稳定"
+[ "$(stat -c %a "$B/data/web.key")" = 600 ] && ok "并发初始化仍保持密钥 600 权限" || bad "并发密钥权限错误"
+if grep -Fq "$(cat "$B/data/web.key")" "$B/first.log" "$B/second.log"; then bad "启动日志泄露密钥"; else ok "并发启动日志不输出密钥"; fi
+cp "$B/data/web.key" "$B/stable.key"
+rm "$B/launched"  # 模拟 daemon 已退出，下一次必须真正执行 start，而非已运行早退。
+sh "$B/scripts/magpie.service" start >"$B/third.log" 2>&1
+cmp -s "$B/data/web.key" "$B/stable.key" && cmp -s "$B/seen.key" "$B/stable.key" && ok "后续 start 锁内重读但不更换密钥" || bad "后续 start 更换了密钥"
+
+reap
+
+# 全量控制器 + 生产 lib，只有 /proc 与信号实现是假：不启动任何真实本体。
+proc_candidate() {
+  _fixture_pid=$1; _fixture_exe=$2; shift 2
+  mkdir -p "$B/proc/$_fixture_pid"
+  rm -f "$B/proc/$_fixture_pid/exe"
+  ln -s "$_fixture_exe" "$B/proc/$_fixture_pid/exe"
+  printf '%s\000' "$@" > "$B/proc/$_fixture_pid/cmdline"
+}
+build_proc_controller() {
+  build
+  mkdir -p "$B/run" "$B/proc"
+  sed "s#/proc/#$B/proc/#g" "$SRCDIR/scripts/lib.sh" > "$B/scripts/lib.sh"
+  cat >> "$B/scripts/lib.sh" <<'MOCK'
+pidof() { [ "$1" = magpie ] && cat "$magpie_path/candidates"; }
+magpie_all_pids() { : > "$RUN/forbidden-all"; echo 90 101 102 201; }
+MOCK
+  printf '99 90 91 92 101 102 201\n' > "$B/candidates"
+  proc_candidate 90 "$B/bin/magpie" magpie update --note 'serve mcp'
+  proc_candidate 91 "$B/foreign/magpie" magpie serve
+  proc_candidate 92 "$B/bin/magpie" magpie serve-extra
+  proc_candidate 101 "$B/bin/magpie" magpie serve
+  proc_candidate 102 "$B/bin/magpie" magpie serve --web=x
+  proc_candidate 201 "$B/bin/magpie" magpie mcp search
+  printf '101\n' > "$B/run/magpie.pid"
+  : > "$B/run/signals"
+  # 全脚本路径，不抽取或重写 stop/restart 分支，确保真正退出码得到覆盖。
+  sed -e "s#^CONF=.*#CONF=$B/cfg#" "$SRCDIR/scripts/magpie.service" | awk -v fixture="$B/control-mocks.sh" '
+    /^# 每条 start\/stop 路径/ { print ". \"" fixture "\"" }
+    { print }
+  ' > "$B/scripts/magpie.service"
+  cat > "$B/control-mocks.sh" <<'MOCK'
+cleanup_legacy_dnsmasq() { :; }
+sync_status() { :; }
+sleep() { :; }
+# restart 只允许在真实生产 stop 成功后触发此启动哨兵，绝不起真实 daemon。
+start() { : > "$RUN/start-sentinel"; return 0; }
+service_pid_command() {
+  if [ "${MOCK_MODE:-normal}" = before-change ] && [ "$1" = 101 ]; then
+    printf 'magpie\000update\000serve\000' > "$magpie_path/proc/101/cmdline"
+  fi
+  magpie_pid_command "$1" "$2" "$BIN"
+}
+kill() {
+  _signal=$1; _signal_pid=$2
+  case "$_signal_pid" in
+    101|102|201|301) ;;
+    *) : > "$RUN/forbidden-signal"; return 1 ;;
+  esac
+  if [ "$_signal" = -0 ]; then
+    [ -e "$magpie_path/proc/$_signal_pid/cmdline" ]
+    return $?
+  fi
+  printf '%s %s\n' "$_signal" "$_signal_pid" >> "$RUN/signals"
+  case "${MOCK_MODE:-normal}:$_signal_pid:$_signal" in
+    term-fail:101:-15|kill-fail:101:-9) return 1 ;;
+    kill-fail:101:-15|stubborn:101:*|mcp-stubborn:201:*) return 0 ;;
+    after-change:101:-15)
+      printf 'magpie\000gateway-key\000serve\000' > "$magpie_path/proc/101/cmdline"
+      return 0 ;;
+    new-serve:102:-15)
+      mkdir -p "$magpie_path/proc/301"
+      ln -s "$BIN" "$magpie_path/proc/301/exe"
+      printf 'magpie\000serve\000' > "$magpie_path/proc/301/cmdline"
+      printf '301\n' >> "$magpie_path/candidates"
+      ;;
+  esac
+  rm -rf "$magpie_path/proc/$_signal_pid"
+  return 0
+}
+MOCK
+}
+
+echo "== 25 普通 CLI 先于真 serve；多同名主进程都能停止"
+build_proc_controller
+_out=$(sh "$B/scripts/magpie.service" status 2>&1); _rc=$?
+[ "$_rc:$_out" = '0:running (PID 101)' ] && ok "全控制器 status 跳过前面的 CLI / 外来本体 / 伪 serve" || bad "选错主进程：$_rc $_out"
+_out=$(sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
+[ "$_rc" = 0 ] && ok "全控制器停止多个真 serve 与 MCP 返回成功" || bad "多进程停止失败：$_rc $_out"
+grep -qx -- '-15 101' "$B/run/signals" && grep -qx -- '-15 102' "$B/run/signals" && ok "不只停止第一个真 serve，后面的同名主进程也被处理" || bad "遗漏同名主进程"
+grep -qx -- '-15 201' "$B/run/signals" && ok "MCP 孤儿仍被处理" || bad "遗漏 MCP 孤儿"
+[ ! -e "$B/run/forbidden-all" ] && [ ! -e "$B/run/forbidden-signal" ] && ok "不使用 all_pids，也不向普通 CLI / 外来本体发信号" || bad "清理边界被破坏"
+[ -e "$B/proc/90/cmdline" ] && [ -e "$B/proc/91/cmdline" ] && [ -e "$B/proc/92/cmdline" ] && ok "普通 CLI、其他本体与伪子命令全部原样保留" || bad "误删普通进程夹具"
+[ ! -e "$B/run/magpie.pid" ] && [ -f "$B/run/.user_stopped" ] && ok "停止核验成功后才移除 pidfile，保留停止意图" || bad "成功停止元数据不正确"
+_out=$(sh "$B/scripts/magpie.service" status 2>&1)
+[ "$_out" = stopped ] && ok "停止后只剩伪候选时 status 确定 stopped" || bad "停止后 status 仍误报运行"
+
+for _change in before-change after-change; do
+  build_proc_controller
+  _out=$(MOCK_MODE="$_change" sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
+  [ "$_rc" = 0 ] && [ -e "$B/proc/101/cmdline" ] && ok "$_change 身份改变后不再把普通 CLI 当成待停止服务" || bad "$_change 身份切换未安全完成：$_rc $_out"
+  if [ "$_change" = before-change ]; then
+    if grep -q ' 101$' "$B/run/signals"; then bad "TERM 前换身份仍收到信号"; else ok "TERM 前换身份不发任何信号"; fi
+  else
+    grep -qx -- '-15 101' "$B/run/signals" && ! grep -qx -- '-9 101' "$B/run/signals" && ok "TERM 后换身份不再补发 KILL" || bad "TERM 后身份复用仍收到 KILL"
+  fi
+  grep -qx -- '-15 102' "$B/run/signals" && [ ! -e "$B/proc/102" ] && ok "$_change 跳过变化候选后继续停止后面的真 serve" || bad "$_change 没有继续清理真 serve"
+done
+
+echo "== 26 直接 stop / restart / toggle 必须传播停止失败，失败绝不启动"
+for _failure in term-fail kill-fail stubborn mcp-stubborn new-serve; do
+  for _action in stop restart toggle; do
+    build_proc_controller
+    _out=$(MOCK_MODE="$_failure" sh "$B/scripts/magpie.service" "$_action" 2>&1); _rc=$?
+    [ "$_rc" -ne 0 ] && ok "$_action / $_failure 返回非零" || bad "$_action / $_failure 错误返回成功：$_out"
+    [ ! -e "$B/run/start-sentinel" ] && ok "$_action / $_failure 停止失败绝不继续 start" || bad "$_action / $_failure 仍进入 start"
+    [ -f "$B/run/.user_stopped" ] && [ "$(cat "$B/run/magpie.pid" 2>/dev/null)" = 101 ] && ok "$_action / $_failure 保留停止意图和失败 pidfile" || bad "$_action / $_failure 丢失失败状态"
+    if [ "$_action" = toggle ]; then
+      [ "$(printf '%s\n' "$_out" | tail -1)" = failed ] && ok "toggle / $_failure 输出 failed，不伪报 stopped" || bad "toggle / $_failure 结果文本不正确：$_out"
+    fi
+  done
+done
+build_proc_controller
+_out=$(sh "$B/scripts/magpie.service" restart 2>&1); _rc=$?
+[ "$_rc" = 0 ] && [ -f "$B/run/start-sentinel" ] && [ ! -e "$B/proc/101" ] && [ ! -e "$B/proc/102" ] && [ ! -e "$B/proc/201" ] && ok "成功 restart 仅在全部 serve / MCP 已退出后进入 start" || bad "成功 restart 的顺序或返回值错误：$_rc $_out"
+build_proc_controller
+rm -rf "$B/proc/101" "$B/proc/102" "$B/proc/201"
+_out=$(sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
+[ "$_rc" = 0 ] && [ ! -s "$B/run/signals" ] && [ ! -e "$B/run/magpie.pid" ] && ok "已经停止时直接 stop 幂等成功，不碰仍在运行的普通 CLI" || bad "幂等 stop 不正确：$_rc $_out"
 
 reap
 

@@ -72,7 +72,7 @@ jobs:
           fi
           TOOLS="$RUNNER_TEMP/trusted-release-verifier"
           mkdir -p "$TOOLS"
-          cp scripts/ci/verify-release-zip.sh scripts/ci/tile-cert-sha256.txt "$TOOLS/"
+          cp scripts/ci/verify-release-zip.sh scripts/ci/check-tile-version.py scripts/ci/tile-cert-sha256.txt "$TOOLS/"
           git rev-parse HEAD > "$TOOLS/source-commit"
           git fetch --quiet origin main "+refs/tags/$TAG:refs/tags/$TAG"
           [ "$(git cat-file -t "refs/tags/$TAG")" = tag ] || { echo '::error::必须使用 annotated tag'; exit 1; }
@@ -83,6 +83,9 @@ jobs:
           fi
           git checkout --quiet --detach "$COMMIT"
           [ "$(git rev-parse HEAD)" = "$COMMIT" ] || exit 1
+          if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ]; then
+            python3 "$TOOLS/check-tile-version.py" --repo "$GITHUB_WORKSPACE" --current-tag "$TAG"
+          fi
           VER=$(sed -n 's/^version=//p' module.prop | tr -d '\r')
           CODE=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r')
           [ "$VER" = "$TAG" ] || { echo '::error::tag 与 module.prop version 不符'; exit 1; }

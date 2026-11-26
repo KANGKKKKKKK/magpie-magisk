@@ -21,6 +21,20 @@ jobs:
     steps:
       - name: 检出
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24，固定 SHA
+        with:
+          fetch-depth: 0
+
+      - name: 磁贴运行时变更必须递增 versionCode
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            [ -n "$PR_BASE_SHA" ] || { echo '::error::拿不到可信 PR 基线'; exit 1; }
+            python3 scripts/ci/check-tile-version.py --base-ref "$PR_BASE_SHA"
+          else
+            python3 scripts/ci/check-tile-version.py
+          fi
 
       - name: 全部公共测试（与 Release 同一份）
         # 语法检查 + shellcheck + 断言计数 + JVM 单测 + shell 行为套件。
@@ -72,7 +86,7 @@ jobs:
             exit 1
           fi
           # 清单声明的两个组件都必须在，防止「只编出一个类」的假绿
-          for c in MagpieTileService MainActivity LauncherIcon Shell; do
+          for c in MagpieTileService MainActivity LauncherIcon Shell SelfCheck TileState SerialExecutor; do
             if [ ! -f "$W/classes/com/ruin/magpie/tile/$c.class" ]; then
               echo "::error::缺少编译产物 $c.class"
               exit 1

@@ -54,26 +54,28 @@ elif [ -z "$WEB_PORT" ]; then
   ADDR_ERROR="面板监听地址 $WEB_HOST 的端口不可用（MAGPIE_WEB_ADDR 应为 主机:端口）"
 fi
 
-# run / data 目录必须在写任何文件之前建好：
-# 否则下面写 web.key 会失败（data 还不存在），面板密钥每次启动都换一个。
-mkdir -p "$RUN" "$magpie_path/data"
-
-# 密钥固定，否则每次重启 WebUI 链接都会变
 WEB_KEY_FILE="$magpie_path/data/web.key"
-if [ -s "$WEB_KEY_FILE" ]; then
-  WEB_KEY=$(cat "$WEB_KEY_FILE" 2>/dev/null)
-  chmod 600 "$WEB_KEY_FILE" 2>/dev/null
-else
-  WEB_KEY=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)
-  _web_key_tmp="$magpie_path/data/.web.key.$$"
-  if [ -n "$WEB_KEY" ] && ( umask 077; printf '%s\n' "$WEB_KEY" > "$_web_key_tmp" ) 2>/dev/null; then
-    chmod 600 "$_web_key_tmp" 2>/dev/null
-    mv -f "$_web_key_tmp" "$WEB_KEY_FILE" 2>/dev/null
+
+# 仅在持有启停锁的 start 内调用；必须锁内重读，两个首次 start 才不会各自
+# 生成密钥后互相覆盖。status 连目录、权限和 pidfile 都不应改动。
+ensure_web_key() {
+  mkdir -p "$magpie_path/data" || return 1
+  if [ -s "$WEB_KEY_FILE" ]; then
+    WEB_KEY=$(cat "$WEB_KEY_FILE" 2>/dev/null) || return 1
+    [ -n "$WEB_KEY" ] && chmod 600 "$WEB_KEY_FILE" 2>/dev/null || return 1
+  else
+    WEB_KEY=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)
+    _web_key_tmp="$magpie_path/data/.web.key.$$"
+    if [ "${#WEB_KEY}" -ne 32 ] ||
+       ! ( umask 077; printf '%s\n' "$WEB_KEY" > "$_web_key_tmp" ) 2>/dev/null ||
+       ! chmod 600 "$_web_key_tmp" 2>/dev/null ||
+       ! mv -f "$_web_key_tmp" "$WEB_KEY_FILE" 2>/dev/null; then
+      rm -f "$_web_key_tmp" 2>/dev/null
+      return 1
+    fi
   fi
-  rm -f "$_web_key_tmp" 2>/dev/null
-fi
-WEB_URL=""
-[ -n "$WEB_PORT" ] && WEB_URL="http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY"
+  WEB_URL="http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY"
+}
 
 # 带日期，跨天也能对上时间线
 log() { echo "$(date +'%Y-%m-%d %H:%M:%S') [$1] $2"; }
@@ -197,9 +199,38 @@ pin_oom() {
 running() {
   # 只认 serve 主进程。MCP 子进程（magpie mcp vision/search/image）也叫 magpie，
   # 用 pidof | head -1 会取到它们，导致判断错误、stop 杀错进程。
-  pid=$(magpie_main_pid) || { rm -f "$PIDFILE" 2>/dev/null; return 1; }
-  echo "$pid" > "$PIDFILE" 2>/dev/null
-  echo "$pid"
+  # 探测本身只读；pidfile 的维护由持锁的 start/stop 负责。
+  magpie_main_pid
+}
+
+# 与只读探测共用 lib.sh 的精确 argv / 本体身份判断，不再比较「第一个」PID：
+# 同时残留多个 serve 时，每一个合法候选都必须能停止。
+service_pid_command() {
+  magpie_pid_command "$1" "$2" "$BIN"
+}
+
+service_pid_matches() {
+  service_pid_command "$1" "$2"
+}
+
+stop_magpie_pid() {
+  # 候选已退出或换身份只跳过，绝不能因为快照过期去杀普通 CLI。
+  service_pid_matches "$1" "$2" || return 0
+  kill -15 "$1" 2>/dev/null || return 1
+  _stop_i=0
+  while kill -0 "$1" 2>/dev/null && [ "$_stop_i" -lt "$3" ]; do
+    sleep 0.1; _stop_i=$((_stop_i + 1))
+  done
+  # 等待中可能退出并复用 PID；KILL 前必须重新核对身份。
+  if service_pid_matches "$1" "$2"; then
+    kill -9 "$1" 2>/dev/null || return 1
+    # 信号发送成功不等于已经退出；给内核有限时间，再核实真正后置状态。
+    _stop_i=0
+    while service_pid_matches "$1" "$2" && [ "$_stop_i" -lt 10 ]; do
+      sleep 0.1; _stop_i=$((_stop_i + 1))
+    done
+    service_pid_matches "$1" "$2" && return 1
+  fi
   return 0
 }
 
@@ -361,26 +392,30 @@ start() {
   fi
   if has_stop_request; then
     log Info "收到较新的停止请求，取消本次启动"
-    return 0
+    return 2  # 与启动失败（1）区分；调用者不能把取消当成已启动
   fi
   rm -f "$USER_STOPPED" 2>/dev/null
   # 清理必须在"已在运行"早退之前，否则覆盖安装后旧 dnsmasq 一直清不掉
   cleanup_legacy_dnsmasq
   if pid=$(running); then
+    echo "$pid" > "$PIDFILE" 2>/dev/null
     log Info "已在运行 (PID $pid)"
     return 0
   fi
+
+  rm -f "$PIDFILE" 2>/dev/null
 
   # 主进程不在却有 mcp 子进程在跑：上次多半是崩溃或被强杀，子进程成了孤儿。
   # 不先收掉就启动，每次重启都会多留一批。只认 ` mcp ` 的命令行，
   # 用户手上正在跑的 magpie update / gateway-key 之类不会被误杀。
   for _p in $(magpie_mcp_pids 2>/dev/null); do
     log Warn "启动前清理孤儿进程 $_p"
-    stop_pid "$_p"
+    stop_magpie_pid "$_p" mcp 20 || :
   done
 
   [ -x "$BIN" ] || { log Error "找不到 $BIN"; return 1; }
 
+  ensure_web_key || { log Error "无法读取或保存 WebUI 密钥，取消启动"; return 1; }
   clean_logs
   ensure_cli
   ensure_ca_bundle
@@ -449,35 +484,39 @@ start() {
 }
 
 stop() {
-  # 打标记，免得看门狗又拉起来
+  # 打标记，免得看门狗又拉起来；失败时仍保留停止意图。
   : > "$USER_STOPPED" 2>/dev/null
   cleanup_legacy_dnsmasq
-  pid=$(running)
-  if [ -n "$pid" ]; then
-    log Warn "正在停止 (PID $pid)"
-    kill -15 "$pid" 2>/dev/null
-    i=0
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
-      sleep 0.1; i=$((i + 1))
+  _stop_result=0
+  _stop_mains=$(magpie_command_pids serve 2>/dev/null)
+  if [ -n "$_stop_mains" ]; then
+    for _stop_pid in $_stop_mains; do
+      log Warn "正在停止 (PID $_stop_pid)"
+      stop_magpie_pid "$_stop_pid" serve 20 || _stop_result=1
     done
-    kill -9 "$pid" 2>/dev/null
   else
-    # 主进程已经不在了，但下面那段孤儿清理仍必须跑
     log Info "主进程未在运行"
   fi
 
-  # 兜底：主进程被强杀时，MCP 子进程可能变成孤儿留在后台
-  for _p in $(magpie_all_pids); do
-    kill -15 "$_p" 2>/dev/null
-    _j=0
-    while kill -0 "$_p" 2>/dev/null && [ "$_j" -lt 10 ]; do
-      sleep 0.1; _j=$((_j + 1))
-    done
-    kill -9 "$_p" 2>/dev/null
-    log Info "已收掉残留进程 $_p"
+  # 主进程被强杀时，MCP 可能变成孤儿；绝不用包含普通 CLI 的 all_pids。
+  for _stop_pid in $(magpie_mcp_pids 2>/dev/null); do
+    if stop_magpie_pid "$_stop_pid" mcp 10; then
+      log Info "已收掉残留进程 $_stop_pid"
+    else
+      _stop_result=1
+    fi
   done
 
-  rm -f "$PIDFILE"
+  # 全量后置核验，而不是只相信 kill 返回值/第一个主进程。期间出现新的
+  # serve/MCP 也要报告停止失败，让直接 stop 和 restart 都能失败关闭。
+  _stop_mains=$(magpie_command_pids serve 2>/dev/null)
+  _stop_mcps=$(magpie_mcp_pids 2>/dev/null)
+  if [ -n "$_stop_mains$_stop_mcps" ]; then
+    log Error "停止失败，仍有服务进程 (serve: ${_stop_mains:-无}; mcp: ${_stop_mcps:-无})"
+    _stop_result=1
+  fi
+  [ "$_stop_result" -ne 0 ] || rm -f "$PIDFILE" || _stop_result=1
+  return "$_stop_result"
 }
 
 sync_status() {
@@ -504,6 +543,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
+# stop 的停止意图需要在等锁前发布；只为写操作准备 run，不触碰 data。
+case "$1" in
+  start|stop|restart|toggle)
+    [ ! -L "$RUN" ] && mkdir -p "$RUN" || exit 1 ;;
+esac
+
 case "$1" in
   # 退出码要带出 start 的结果，否则失败也返回 0
   start)
@@ -518,7 +563,11 @@ case "$1" in
     : > "$USER_STOPPED" 2>/dev/null
     STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
     acquire_service_lock || { _rc=$?; exit $_rc; }
-    stop; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; start; _rc=$?; sync_status; exit $_rc ;;
+    stop; _rc=$?
+    rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""
+    # 停不干净绝不能继续 start；保留 .user_stopped 和失败退出码。
+    if [ "$_rc" -eq 0 ]; then start; _rc=$?; fi
+    sync_status; exit $_rc ;;
   status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
 
   # 在跑就停，没跑就起。给磁贴 / 快捷方式用：一个动作，不用先判断状态。
@@ -529,16 +578,29 @@ case "$1" in
     acquire_service_lock || exit 1
     if pid=$(running); then
       STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
-      stop
+      stop; _rc=$?
       rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""
       sync_status
-      echo "stopped"
-      exit 0
+      if [ "$_rc" -ne 0 ] || running >/dev/null; then
+        echo "failed"; _rc=1
+      else
+        echo "stopped"
+      fi
+      exit $_rc
     fi
     start
     _rc=$?
     sync_status
-    if [ "$_rc" = "0" ]; then echo "running"; else echo "failed"; fi
+    # start 的返回值不是服务状态：较新的 stop 可让它取消（2），即使返回
+    # 成功，进程也可能已经退出。只按后置探测输出 running。
+    if [ "$_rc" -eq 2 ]; then
+      if running >/dev/null; then echo "failed"; _rc=1; else echo "stopped"; fi
+    elif [ "$_rc" -eq 0 ] && running >/dev/null; then
+      echo "running"
+    else
+      echo "failed"
+      [ "$_rc" -ne 0 ] || _rc=1
+    fi
     exit $_rc
     ;;
 

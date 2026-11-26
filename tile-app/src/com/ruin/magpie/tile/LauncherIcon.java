@@ -144,7 +144,7 @@ final class LauncherIcon {
                 ? "mkdir -p " + FLAG_DIR + " && : > " + FLAG_DIR + "/" + FLAG_NAME
                 + " && chmod 600 " + FLAG_DIR + "/" + FLAG_NAME
                 : "rm -f " + FLAG_DIR + "/" + FLAG_NAME;
-        Shell.run(cmd, new Shell.Callback<Shell.Result>() {
+        Shell.runSerial(cmd, new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
                 if (!r.ok) {

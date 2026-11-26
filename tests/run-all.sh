@@ -51,28 +51,11 @@ echo "== 3 文档断言计数与实际一致"
 sh tests/check-counts.sh
 
 echo
-echo "== 4 磁贴状态判定 / 自查 / Shell 执行（纯 JVM，不依赖 Android SDK）"
-mkdir -p "$W/classify" "$W/self-check"
-javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W/classify"
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W/classify" ClassifyTest
-
-W2=$W/self-check
-javac -encoding UTF-8 tile-app/src/com/ruin/magpie/tile/SelfCheck.java \
-  tests/jvm/SelfCheckTest.java -d "$W2"
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W2" \
-  com.ruin.magpie.tile.SelfCheckTest
-
-W3=$W/shell-jvm
-mkdir -p "$W3/stubs/android/os" "$W3/classes"
-cat > "$W3/stubs/android/os/Looper.java" <<'JAVA'
-package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }
-JAVA
-cat > "$W3/stubs/android/os/Handler.java" <<'JAVA'
-package android.os; public class Handler { public Handler(Looper l) {} public boolean post(Runnable r) { r.run(); return true; } }
-JAVA
-javac -encoding UTF-8 -d "$W3/classes" "$W3"/stubs/android/os/*.java \
-  tile-app/src/com/ruin/magpie/tile/Shell.java tests/jvm/ShellTest.java
-java -cp "$W3/classes" com.ruin.magpie.tile.ShellTest
+echo "== 4 磁贴状态判定 / 自查 / Shell / SerialExecutor（有界纯 JVM）"
+sh tests/run-jvm.sh
+python3 tests/test-tile-lifecycle.py
+python3 tests/test-launcher.py
+python3 tests/test-doctor-tile.py
 
 echo
 echo "== 5 shell 行为套件（夹具 + 静态服务）"
@@ -107,10 +90,12 @@ sh tests/test-watchdog.sh
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
 sh tests/test-service.sh
 sh tests/test-lib.sh
+sh tests/test-tile-check.sh
 
 echo
-echo "== 6 Release ZIP / tile build 回归（独立计数，不加入原五套 Shell 断言）"
+echo "== 6 Release ZIP / tile build / versionCode 回归（独立于 Shell 断言总数）"
 python3 tests/test-release-zip.py
+python3 tests/test-tile-version.py
 
 echo
 echo "全部公共测试通过"

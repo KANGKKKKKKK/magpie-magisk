@@ -2,7 +2,9 @@ package com.ruin.magpie.tile;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
+import android.view.DisplayCutout;
 import android.view.WindowInsets;
 import android.view.View;
 import android.widget.Button;
@@ -58,10 +60,33 @@ public class MainActivity extends Activity {
         root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
             @Override
             public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
-                android.graphics.Insets bars = insets.getInsets(
-                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                v.setPadding(basePad + bars.left, basePad + bars.top,
-                        basePad + bars.right, basePad + bars.bottom);
+                int left;
+                int top;
+                int right;
+                int bottom;
+                if (Build.VERSION.SDK_INT >= 30) {
+                    android.graphics.Insets bars = insets.getInsets(
+                            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                    left = bars.left;
+                    top = bars.top;
+                    right = bars.right;
+                    bottom = bars.bottom;
+                } else {
+                    // API 29 没有 Type/getInsets；刘海可能超出状态栏边界，逐边取较大值。
+                    left = insets.getSystemWindowInsetLeft();
+                    top = insets.getSystemWindowInsetTop();
+                    right = insets.getSystemWindowInsetRight();
+                    bottom = insets.getSystemWindowInsetBottom();
+                    DisplayCutout cutout = insets.getDisplayCutout();
+                    if (cutout != null) {
+                        left = Math.max(left, cutout.getSafeInsetLeft());
+                        top = Math.max(top, cutout.getSafeInsetTop());
+                        right = Math.max(right, cutout.getSafeInsetRight());
+                        bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                    }
+                }
+                v.setPadding(basePad + left, basePad + top,
+                        basePad + right, basePad + bottom);
                 return insets;
             }
         });
@@ -211,6 +236,7 @@ public class MainActivity extends Activity {
         Shell.run(Shell.statusCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
+                if (isFinishing() || isDestroyed()) return;
                 // 与磁贴共用同一套判定，避免「磁贴说启动失败、界面说需要 root」
                 String state = MagpieTileService.classify(r);
                 if ("noroot".equals(state)) {
@@ -245,9 +271,10 @@ public class MainActivity extends Activity {
         Shell.run("id -u", new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
+                if (isFinishing() || isDestroyed()) return;
                 grant.setEnabled(true);
                 grant.setText(R.string.btn_grant);
-                if (r.ok && "0".equals(r.trimmed())) {
+                if (r != null && r.ok && "0".equals(r.trimmed())) {
                     MagpieTileService.refresh(MainActivity.this);
                     refreshStatus();
                 } else {
@@ -262,7 +289,8 @@ public class MainActivity extends Activity {
         Shell.run("cat /data/adb/magpie/run/web.url", new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String url = r.trimmed();
+                if (isFinishing() || isDestroyed()) return;
+                String url = r == null ? "" : r.trimmed();
                 if (url.isEmpty()) {
                     // 服务没起时没有这个文件，退回到不带密码的地址
                     url = "http://127.0.0.1:3430/";
@@ -302,9 +330,11 @@ public class MainActivity extends Activity {
         Shell.run(SelfCheck.command(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
+                if (isFinishing() || isDestroyed()) return;
                 checkBtn.setEnabled(true);
                 StringBuilder sb = new StringBuilder();
-                for (String line : SelfCheck.parse(r == null ? null : r.out).report()) {
+                for (String line : SelfCheck.parse(r == null ? null : r.out,
+                        r != null && r.ok, r == null ? null : r.err).report()) {
                     if (sb.length() > 0) {
                         sb.append('\n');
                     }

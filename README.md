@@ -755,6 +755,7 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - 只在 arm64 + Android 14（HyperOS 2.0）实测；理论上 Android 10+ 的 arm64 设备都适用。
 - 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
 - **DNS 覆盖要重启一次手机才生效**：`system/etc/resolv.conf` 由 Magisk 在开机时挂载，装或更新模块后得重启；之后改 `MAGPIE_DNS` 重启服务即可重写覆盖文件，若 doctor 里上游还是旧的，再重启一次手机。
+- **磁贴 Shell 超时不代表 root 后代任务已取消**：保留不自动重放 toggle；超时显示未知，不把部分输出当作成功。跨 Magisk/KernelSU/APatch 的 root 控制任务取消尚待独立环境验证，不能把客户端 Process 清理等同于整棵 root 任务终止。
 - **可选磁贴 App 对自定义数据目录支持不完整**：面板 URL 固定从 `/data/adb/magpie/run/web.url` 读取，桌面图标隐藏标记固定使用 `/data/adb/magpie/run/.tile_launcher_hidden`；自定义 `magpie_path` 时这两项不会跟随迁移。磁贴启停经模块 `magpie.service` 执行，服务仍按配置中的数据目录工作。App 内的 `SERVICE` 指模块脚本目录，不是数据目录。
 
 ## 开发与测试
@@ -765,13 +766,14 @@ python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 77 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 43 条
-sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 57 条
-sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/磁贴入口 237 条
+sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 150 条
+sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 267 条
+sh tests/test-tile-check.sh                               # 自查取数与未知值 72 条
 ```
 
-五个套件共 427 条断言（77 + 13 + 43 + 57 + 237），另有 47 条 JVM 用例（磁贴状态判定 13、自查结论 28、Shell 进程回归 6）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+六个套件共 622 条断言（77 + 13 + 43 + 150 + 267 + 72），另有 424 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程回归 6、串行队列 8）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 
-`sh tests/run-all.sh` 还运行 33 个发布 ZIP/磁贴构建回归用例。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
+`sh tests/run-all.sh` 还运行 84 个 Python unittest（发布 ZIP/构建 33、磁贴版本门槛 9、TileService 生命周期 14、桌面图标 3、doctor 磁贴段 25）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 
@@ -796,7 +798,7 @@ CI 里也有这一步。
 
 发版流程：
 
-1. 改 `module.prop` 的 `version` 与 `versionCode`；
+1. 改 `module.prop` 的 `version` 与 `versionCode`；磁贴代码、资源或运行时 manifest 有变化时，同时递增 `tile-app/AndroidManifest.xml` 的独立 `versionCode`（CI/Release 会与基线核对，防止老用户跳过 APK 更新）；
 2. 打同名 tag（如 `v0.8`）并推送；
 3. 工作流自动打包、校验 zip 结构、发 Release、回写 `update.json`。
 

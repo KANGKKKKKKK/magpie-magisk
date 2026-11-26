@@ -124,7 +124,7 @@ fi
 # 少了任何一个，装上去就是 ClassNotFoundException / NoClassDefFoundError 闪退。
 # 这份清单要与 .github/workflows/ci.yml 里的一致 —— 漏掉一个类时
 # 编译能过、dex 也在，问题要到运行时才炸。
-for _need in MagpieTileService MainActivity LauncherIcon Shell; do
+for _need in MagpieTileService MainActivity LauncherIcon Shell SelfCheck TileState SerialExecutor; do
   if ! grep -qa "$_need" "$WORK/dex/classes.dex"; then
     echo "dex 里缺少 $_need，拒绝产出 APK" >&2
     exit 1

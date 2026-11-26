@@ -9,7 +9,8 @@
     <string name="state_working">处理中…</string>
     <string name="state_no_root">需要 root</string>
     <string name="state_unavailable">模块未安装</string>
-    <string name="state_failed">启动失败</string>
+    <string name="state_failed">操作失败</string>
+    <string name="state_unknown">状态未知</string>
 
     <!-- App 界面 -->
     <string name="intro">这个 App 只做一件事：把 Magpie 的启动/停止放进控制中心。</string>

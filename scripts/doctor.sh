@@ -257,78 +257,115 @@ echo "[9/10] 磁贴（可选组件）"
 # 取数与判定都用 scripts/tile-check.sh，磁贴 App 的「自查」按钮跑的是同一个脚本，
 # 这样两边不可能出现「doctor 说没事、App 说被冻了」。
 _tc_sh="$MODDIR/scripts/tile-check.sh"
+_tc=""; _tc_rc=1
 if [ -f "$_tc_sh" ]; then
   _tc=$(sh "$_tc_sh" 2>/dev/null)
-else
-  _tc=""
+  _tc_rc=$?
 fi
-# 从 key=value 里取值；取不到返回空
+# 缺字段或重复字段均无有效值；不能挑冲突输出中的第一条当作成功。
 tcget() {
-  printf '%s\n' "$_tc" | sed -n "s/^$1=//p" | head -1
+  [ "$(printf '%s\n' "$_tc" | grep -c "^$1=")" = 1 ] || return 1
+  printf '%s\n' "$_tc" | sed -n "s/^$1=//p"
 }
 
-_tmod=$(tcget mod)
+# done=1 必须唯一且位于最后。执行失败、旧脚本、截断/部分输出都不作健康结论。
+_tc_complete=1
+if [ "$_tc_rc" != 0 ] || [ "$(tcget 'done')" != 1 ] ||
+   [ "$(printf '%s\n' "$_tc" | tail -1)" != done=1 ]; then
+  _tc_complete=0
+fi
+for _tk in mod svc installed; do
+  tcget "$_tk" >/dev/null || _tc_complete=0
+done
 _tinst=$(tcget installed)
-if [ "$_tmod" = "0" ]; then
-  bad "没找到 magpie 模块" "磁贴要靠模块里的脚本启停，先刷入模块"
-elif [ "$_tinst" != "1" ]; then
-  ok "未安装磁贴 App（可选组件，不影响网关）"
+if [ "$_tinst" = 1 ]; then
+  for _tk in uid vcode magisk inqs painted alive frozen freezer; do
+    tcget "$_tk" >/dev/null || _tc_complete=0
+  done
+fi
+
+if [ "$_tc_complete" != 1 ]; then
+  warn "磁贴检查未完成，本次结果未知（可选组件，不影响网关）" \
+    "检查 tile-check.sh 是否为新版后重试；失败或部分输出不能证明未安装、已停止或被冻结"
 else
-  _tuid=$(tcget uid)
-  ok "已安装磁贴 App（versionCode $(tcget vcode)，UID ${_tuid:-?}）"
-
-  # root 授权：被拒或被撤销时磁贴只会显示「需要 root」，最容易被当成服务挂了。
-  case "$(tcget magisk)" in
-    2) ok "Magisk 里已允许 root" ;;
-    1) bad "Magisk 里 root 被拒绝" "Magisk → 超级用户，把 Magpie 磁贴改成允许" ;;
-    0) warn "Magisk 里 root 尚未授权" "点一次磁贴并在弹窗里允许" ;;
-    *) : ;;   # 非 Magisk 环境不查这一项
+  case "$(tcget mod)" in
+    0) bad "没找到 magpie 模块" "磁贴要靠模块里的脚本启停，先刷入模块" ;;
+    1) : ;;
+    *) warn "模块安装状态未知，无法确认模块目录" ;;
   esac
+  case "$_tinst" in
+    0) ok "未安装磁贴 App（可选组件，不影响网关）" ;;
+    1)
+      _tuid=$(tcget uid)
+      ok "已安装磁贴 App（versionCode $(tcget vcode)，UID ${_tuid:-?}）"
 
-  if [ "$(tcget inqs)" = "0" ]; then
-    ok "未加入控制中心（不影响网关；需要时在编辑里拖进去）"
-  else
-    _tpaint=$(tcget painted)
-    if [ -z "$_tpaint" ]; then
-      warn "还没有绘制记录" "开机后没展开过控制中心；展开一次再看"
-    else
-      case "$_tpaint" in
-        null|'')      warn "磁贴还没画出状态" "展开一次控制中心让它刷新" ;;
-        处理中*)      ok "磁贴正在刷新（处理中，属瞬态）" ;;
-        需要\ root)   warn "磁贴显示「需要 root」" "看上一条 root 授权是否被拒或撤销" ;;
-        模块未安装)   bad "磁贴显示「模块未安装」" "确认模块目录存在：$MODDIR" ;;
-        *)
-          if [ "$(tcget svc)" = "running" ]; then _expect=运行中; else _expect=已停止; fi
-          if [ "$_tpaint" = "$_expect" ]; then
-            ok "磁贴显示「$_tpaint」，与实际一致"
-          else
-            warn "磁贴显示「$_tpaint」，实际是「$_expect」" \
-              "服务被命令行或看门狗启停过、磁贴还没重读；展开一次控制中心就会对齐。若展开后仍不对，看下面的冻结检查"
-          fi
-          ;;
+      # unknown 包含非 Magisk 与查询失败；不等于 root 被拒或尚未授权。
+      case "$(tcget magisk)" in
+        2) ok "Magisk 里已允许 root" ;;
+        1) bad "Magisk 里 root 被拒绝" "Magisk → 超级用户，把 Magpie 磁贴改成允许" ;;
+        0) warn "Magisk 里 root 尚未授权" "点一次磁贴并在弹窗里允许" ;;
+        *) warn "root 授权状态未知（非 Magisk 或查询不可用），不据此判断授权被拒" ;;
       esac
-    fi
-  fi
 
-  # 冻结：不假设是哪个模块在冻，只报「冻了」+ 场上找到的线索
-  _talive=$(tcget alive)
-  _tfrozen=$(tcget frozen)
-  if [ "${_talive:-0}" = "0" ]; then
-    ok "进程当前未运行（展开面板时会自动拉起，不需要常驻）"
-  elif [ "${_tfrozen:-0}" = "0" ]; then
-    ok "进程未被冻结（$_talive 个进程全部可运行）"
-  else
-    _who=$(tcget freezer)
-    case "$_who" in
-      NoActive) _wname="NoActive" ;;
-      CZero)    _wname="CZero" ;;
-      system)   _wname="系统 cached_apps_freezer" ;;
-      greezer)  _wname="HyperOS greezer" ;;
-      *)        _wname="" ;;
-    esac
-    warn "进程被冻结（$_tfrozen/$_talive 个），磁贴会停在上一帧" \
-      "冻结期间展开面板读不到状态，不是逻辑错误。${_wname:+疑似 $_wname 在冻；}把本 App 的 UID $_tuid 加入它的白名单（App 自己躲不掉）"
-  fi
+      case "$(tcget inqs)" in
+        0) ok "未加入控制中心（不影响网关；需要时在编辑里拖进去）" ;;
+        1)
+          _tpaint=$(tcget painted)
+          case "$_tpaint" in
+            unknown) warn "磁贴绘制状态未知，无法读取控制中心状态" ;;
+            null|'') warn "磁贴还没画出状态" "展开一次控制中心让它刷新" ;;
+            处理中*) ok "磁贴正在刷新（处理中，属瞬态）" ;;
+            需要\ root) warn "磁贴显示「需要 root」" "看上一条 root 授权是否被拒或撤销" ;;
+            模块未安装) bad "磁贴显示「模块未安装」" "确认模块目录存在：$MODDIR" ;;
+            *)
+              _expect=""
+              case "$(tcget svc)" in
+                running) _expect=运行中 ;;
+                stopped) _expect=已停止 ;;
+              esac
+              if [ -z "$_expect" ]; then
+                warn "服务状态未知，无法确认磁贴显示「$_tpaint」是否与实际一致"
+              elif [ "$_tpaint" = "$_expect" ]; then
+                ok "磁贴显示「$_tpaint」，与实际一致"
+              else
+                warn "磁贴显示「$_tpaint」，实际是「$_expect」" \
+                  "服务被命令行或看门狗启停过、磁贴还没重读；展开一次控制中心就会对齐。若展开后仍不对，看下面的冻结检查"
+              fi
+              ;;
+          esac
+          ;;
+        *) warn "是否加入控制中心未知，无法确认磁贴位置" ;;
+      esac
+
+      # 只有两个确定的计数才可判断冻结；unknown 不能冒充 0 或正数。
+      _talive=$(tcget alive)
+      _tfrozen=$(tcget frozen)
+      _tcounts=1
+      case "$_talive" in ''|*[!0-9]*) _tcounts=0 ;; esac
+      case "$_tfrozen" in ''|*[!0-9]*) _tcounts=0 ;; esac
+      if [ "$_talive" = 0 ]; then
+        ok "进程当前未运行（展开面板时会自动拉起，不需要常驻）"
+      elif [ "$_tcounts" != 1 ]; then
+        warn "进程或冻结状态未知，无法确认是否被冻结"
+      elif [ "$_tfrozen" -gt "$_talive" ] 2>/dev/null; then
+        warn "进程与冻结计数不一致，本次冻结状态未知"
+      elif [ "$_tfrozen" = 0 ]; then
+        ok "进程未被冻结（$_talive 个进程全部可运行）"
+      else
+        _who=$(tcget freezer)
+        case "$_who" in
+          NoActive) _wname="NoActive" ;;
+          CZero) _wname="CZero" ;;
+          system) _wname="系统 cached_apps_freezer" ;;
+          greezer) _wname="HyperOS greezer" ;;
+          *) _wname="" ;;
+        esac
+        warn "进程被冻结（$_tfrozen/$_talive 个），磁贴会停在上一帧" \
+          "冻结期间展开面板读不到状态，不是逻辑错误。${_wname:+疑似 $_wname 在冻；}把本 App 的 UID $_tuid 加入它的白名单（App 自己躲不掉）"
+      fi
+      ;;
+    *) warn "磁贴 App 安装状态未知（可选组件，不影响网关），不能判断为未安装" ;;
+  esac
 fi
 
 echo "[10/10] 日志与磁盘"

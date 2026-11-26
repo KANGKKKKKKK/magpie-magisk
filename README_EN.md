@@ -784,6 +784,7 @@ cache) and finally verifies nothing is left.
 - **The DNS overlay needs one reboot**: `system/etc/resolv.conf` is mounted by Magisk at boot, so
   installing or updating the module needs a reboot. Afterwards a service restart rewrites the
   overlay; if doctor still shows the old upstream, reboot once more.
+- **A tile Shell timeout is not confirmed cancellation of root descendants**: toggle is never automatically replayed, and incomplete/timeout results stay unknown. Root-side cancellation still needs isolated testing across Magisk/KernelSU/APatch; destroying the client Process does not prove the whole root task ended.
 - **The optional tile app only partially supports custom data paths**: it reads the panel URL from
   `/data/adb/magpie/run/web.url`, and the launcher-hidden marker is fixed at
   `/data/adb/magpie/run/.tile_launcher_hidden`; neither follows a custom `magpie_path`. Tile
@@ -798,20 +799,23 @@ python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manife
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 77 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 43 assertions
-sh tests/test-service.sh                                  # process, dirs, status, session, 57 assertions
-sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA/tile, 237 assertions
+sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 150 assertions
+sh tests/test-lib.sh                                      # pure helpers and process identity: 267 assertions
+sh tests/test-tile-check.sh                               # self-check data and unknown results: 72 assertions
 ```
 
-427 assertions total (77 + 13 + 43 + 57 + 237), plus 47 JVM cases in `tests/jvm/` (13 for tile state, 28 for self-check, 6 for Shell process handling). Tests use temp
+622 assertions total (77 + 13 + 43 + 150 + 267 + 72), plus 424 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 6 Shell process handling, 8 serial-executor assertions). Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
 wrong port and you get a pile of fake failures. Details and known gaps in
 [tests/README.md](tests/README.md).
 
+`sh tests/run-all.sh` also runs 84 Python unittests: 33 release/build, 9 tile-version gate, 14 service-lifecycle, 3 launcher and 25 doctor-tile cases. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
+
 Releasing:
 
-1. bump `version` and `versionCode` in `module.prop`;
+1. bump `version` and `versionCode` in `module.prop`; when tile runtime code, resources or manifest change, also increment the independent `versionCode` in `tile-app/AndroidManifest.xml` (CI/Release enforce this against their baseline);
 2. tag the same name (e.g. `v0.8`) and push the tag;
 3. the workflow packs the zip, checks its structure, publishes the release and rewrites
    `update.json`.

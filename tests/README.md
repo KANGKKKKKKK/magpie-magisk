@@ -1,9 +1,9 @@
 # 测试
 
-五套脚本都在临时目录运行，并用桩替代服务进程；不会操作真实运行的 magpie。
-当前文档计数为 427 条断言（77 + 13 + 43 + 57 + 237），另有 47 条 JVM 用例（`tests/jvm/`：`ClassifyTest` 13 条判定磁贴状态，`SelfCheckTest` 28 条判定自查结论，`ShellTest` 6 条真实进程回归）。
+六套脚本都在临时目录运行，并用桩替代服务进程；不会操作真实运行的 magpie。
+当前文档计数为 622 条断言（77 + 13 + 43 + 150 + 267 + 72），另有 424 条 JVM 用例（`ClassifyTest` 21、`TileStateTest` 28、`SelfCheckTest` 361、`ShellTest` 6、`SerialExecutorTest` 8）。
 
-- **桌面 Linux**：本次修复后以 dash 和 bash 分别运行五套，均为 427 条通过、0 失败；另有 47 条 JVM 用例通过。
+- **桌面 Linux**：公共入口为 `sh tests/run-all.sh`；JVM 直接编译生产类，不再复制磁贴判定实现。计数描述当前套件，实际通过情况以对应运行记录为准。
 - **突变检验**：把安装器换回旧黑名单、把磁贴判据换回旧 `sed` 范围后，分别有 7 / 8 条断言失败；计数校验在「合计写错、分项仍对」时也会失败。这些用例不是只按新实现写的。
 - **真机 Android**：`test-lib` / `test-watchdog` / `test-service` 可直接运行，会自动选择可写临时目录；`test-install` 与 `test-action` 需要静态文件服务，设备上没有 `python3` 时跑不了。此前一次 mksh + toybox 对这三套的实测记录依次为 108 / 13 / 20；这是历史结果，不代表当前版本已在 Android 上全套重跑。`test-lib` 中两项 JSON 校验因缺少 `python3` 而显示 `SKIP`，**SKIP 不等于 PASS**。
 
@@ -12,10 +12,11 @@
 | `test-install.sh` | 77 | 安装器的 21 组用例 |
 | `test-watchdog.sh` | 13 | 看门狗的决定逻辑（含循环体抽取自检） |
 | `test-action.sh` | 43 | `[执行]` 菜单：安装分支、退路一键启停、子命令、按键解析、两种界面模式、收尾关窗口、白名单外路径的就绪拦截 |
-| `test-service.sh` | 57 | 进程清理、开机目录、配置路径、DNS 生成、状态输出与配置来源、看门狗等开机、服务脱离调用者会话 |
-| `test-lib.sh` | 237 | `lib.sh` 纯函数：地址切分、端口边界、回环判定（含 IPv6 大小写）、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转、安装/卸载路径白名单、磁贴入口对账、用户配置生成 |
+| `test-service.sh` | 150 | 进程清理、开机目录、配置路径、DNS 生成、状态输出与配置来源、看门狗等开机、服务脱离调用者会话 |
+| `test-lib.sh` | 267 | `lib.sh` 纯函数：地址切分、端口边界、回环判定（含 IPv6 大小写）、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转、安装/卸载路径白名单、磁贴入口对账、用户配置生成 |
+| `test-tile-check.sh` | 72 | 自查完成标记、命令失败、安装/服务/绘制/进程/cgroup 未知值与只读取数 |
 
-发布校验另有 `python3 tests/test-release-zip.py` 的 33 个测试（不计入上面的五套断言数），使用离线工具桩验证 ZIP 安全、证书判定、APK 元数据和构建失败路径；不能替代真实签名/验签。
+发布校验另有 `python3 tests/test-release-zip.py` 的 33 个测试（不计入上面的六套断言数），使用离线工具桩验证 ZIP 安全、证书判定、APK 元数据和构建失败路径；不能替代真实签名/验签。另有版本门槛 9、真实 TileService 配内存 API 的生命周期 14、桌面图标 3、doctor 磁贴段 25 个 unittest，共 84 个；生命周期测试的 SDK 29/35 参数不代表设备兼容性实测。
 
 需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service、lib 不需要。
 换端口跑时，夹具必须用同一地址生成，否则清单里的下载地址对不上，会看到一堆假失败：
@@ -194,3 +195,13 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 正式发布不覆盖任何已有资产。若 Actions 已上传草稿但尚未公开，在 `main` 手动运行 `release`，指定原 tag 并开启 `finalize_draft`：仅下载、验签和核对来源 commit，全部通过后才公开原草稿，不重建、不上传。若正式 Release 已成功、只是更新通道同步失败，则改用 `recovery_sync_only`，只修复 `update.json`。两种模式不能同时开启；缺少新校验清单或磁贴 APK 的历史版本（如 v1.2.4）不支持此恢复流程。
 
 草稿元数据必须从认证的 Release 列表/ID 取得，不能依赖只按 tag 读取的端点。实际中断恢复验证也必须核对资产 ID 与摘要未改变。
+
+## 磁贴审查回归与验证边界
+
+`sh tests/run-jvm.sh` 共用生产 `TileState`、`SelfCheck`、`Shell`、`SerialExecutor`。
+`test-tile-lifecycle.py` 编译真实 `MagpieTileService`，只替换 Android/Shell 运行环境；覆盖跨实例完成通知、忙碌防重复、旧查询与旧生命周期事件。
+`test-launcher.py` 编译真实 `LauncherIcon` 与串行队列，验证快速切换后的组件/偏好/模块标记一致。
+`test-doctor-tile.py` 只抽取真实 doctor 的磁贴段，不运行网络、凭据或写入探测。
+
+这些回归不会启停手机服务。Android 10 的 Insets 分支经静态 API 审核与 APK 编译；没有 Android 10 真机/模拟器布局验证。
+Shell 超时仍仅保证客户端有界等待，未声称可靠取消 root 后代任务；不自动重放 toggle，相关控制组取消留待隔离环境验证。

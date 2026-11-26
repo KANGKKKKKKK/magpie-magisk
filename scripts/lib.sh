@@ -233,34 +233,61 @@ lan_ip() {
 # `pidof magpie` 一次返回全部，head -1 拿到的可能是子进程而不是网关本身。
 # 所以凡是「服务是否在跑」「该杀哪个」的判断，都必须先认出主进程。
 
-# 主进程 PID（命令行里带 serve 的那个）
-magpie_main_pid() {
-  for _p in $(pidof magpie 2>/dev/null); do
-    [ -r "/proc/$_p/cmdline" ] || continue
-    if tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q -- ' serve'; then
-      echo "$_p"
-      return 0
-    fi
+# 同时核对本体与 argv[1]，不能只在整条命令行里搜 serve / mcp：
+# `magpie update --note 'serve ...'` 仍是普通 CLI。枚举和发信号共用此判断。
+# BIN 仅服务控制器有；status / doctor / 看门狗按调用时的 magpie_path 取本体，
+# 两者都未设置才用默认路径。可显式传第三个参数，且不要求本体文件仍存在。
+magpie_pid_command() (
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$2" in serve|mcp) ;; *) return 1 ;; esac
+  _mp_bin=${3:-${BIN:-${magpie_path:-/data/adb/magpie}/bin/magpie}}
+  _mp_exe=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
+  _mp_real=$(readlink -f "$_mp_bin" 2>/dev/null) || _mp_real=$_mp_bin
+  # 自定义路径可含符号链接；覆盖更新后的进程可能仍持有旧 inode。
+  case "$_mp_exe" in
+    "$_mp_bin"|"$_mp_bin (deleted)"|"$_mp_real"|"$_mp_real (deleted)") ;;
+    *) return 1 ;;
+  esac
+  # 先把原有换行转成非分隔符，只有 NUL 才能变成 argv 边界；否则 argv[0]
+  # 或 CLI 参数里的换行也会冒充 argv[1]。不做 shell 分词或 eval。
+  _mp_cmd=$(tr '\000\n' '\n\001' < "/proc/$1/cmdline" 2>/dev/null) || return 1
+  case "$_mp_cmd" in
+    *'
+'*) _mp_args=${_mp_cmd#*'
+'} ;;
+    *) return 1 ;;
+  esac
+  [ "${_mp_args%%'
+'*}" = "$2" ]
+)
+
+# 只枚举指定子命令；伪候选、异路径同名进程、已退出/换身份的 PID 均跳过。
+# first 只影响数量，不改变身份标准。子 shell 不污染调用者的循环变量。
+magpie_command_pids() (
+  case "$1" in serve|mcp) ;; *) return 1 ;; esac
+  _mp_rc=1
+  for _mp_pid in $(pidof magpie 2>/dev/null); do
+    magpie_pid_command "$_mp_pid" "$1" || continue
+    echo "$_mp_pid"
+    _mp_rc=0
+    [ "${2:-}" != first ] || return 0
   done
-  return 1
+  return "$_mp_rc"
+)
+
+# 主进程 PID：返回第一个真正属于本模块的 serve，不被前面的 CLI 迷惑。
+magpie_main_pid() {
+  magpie_command_pids serve first
 }
 
-# 所有 magpie 进程（含 MCP 子进程），一行一个
+# 所有同名进程（仅供 RSS 等统计，不能拿来自动清理）。
 magpie_all_pids() {
   pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'
 }
 
-# 只挑 MCP 子进程（命令行里带 ` mcp `）。
-# 自动清理只能用它：用户手上可能正在跑 `magpie update` 之类的命令，
-# 那不是孤儿，不能被顺手杀掉。
+# 只挑本模块的 MCP；普通 update / gateway-key 及其参数不属于孤儿。
 magpie_mcp_pids() {
-  for _p in $(magpie_all_pids 2>/dev/null); do
-    [ -r "/proc/$_p/cmdline" ] || continue
-    _cl=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
-    case "$_cl" in
-      *" mcp "*) echo "$_p" ;;
-    esac
-  done
+  magpie_command_pids mcp
 }
 
 # 服务是否在跑：只看主进程。

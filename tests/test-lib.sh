@@ -587,6 +587,111 @@ check_tile_case '空 dump 输出安全退回补隐藏' 1 </dev/null
 check_tile_case 'disable 失败返回非零且不谎报成功' 1 0 1 </dev/null
 rm -rf "$_tl"
 
+
+echo "== 进程身份：fake /proc，精确 argv[1] 与共享本体过滤"
+_pt=$(mktemp -d "$_TMPBASE/magpie-lib-proc.XXXXXX") || exit 1
+mkdir -p "$_pt/proc" "$_pt/owned/bin" "$_pt/foreign/bin"
+sed "s#/proc/#$_pt/proc/#g" "$LIB" > "$_pt/lib.sh"
+proc_set() {
+  _pt_pid=$1; _pt_exe=$2; shift 2
+  mkdir -p "$_pt/proc/$_pt_pid"
+  rm -f "$_pt/proc/$_pt_pid/exe"
+  ln -s "$_pt_exe" "$_pt/proc/$_pt_pid/exe"
+  printf '%s\000' "$@" > "$_pt/proc/$_pt_pid/cmdline"
+}
+proc_call() (
+  # 模拟 doctor 先 source、后读配置；不依赖服务控制器的 BIN。
+  . "$_pt/lib.sh"
+  unset BIN magpie_path
+  # 动态 source 的进程 helper 在调用时读取这些配置，不是未使用的变量。
+  # shellcheck disable=SC2034
+  case "$1" in
+    default) ;;
+    bin) BIN="$_pt/foreign/bin/magpie"; magpie_path="$_pt/owned" ;;
+    emptybin) BIN=""; magpie_path="$_pt/owned" ;;
+    *) magpie_path="$_pt/owned" ;;
+  esac
+  shift
+  pidof() { [ "$1" = magpie ] && cat "$_pt/candidates"; }
+  magpie_all_pids() { : > "$_pt/forbidden-all"; echo 777; }
+  case "$1" in
+    main) magpie_main_pid ;;
+    serves) magpie_command_pids serve ;;
+    mcps) magpie_mcp_pids ;;
+    match) shift; magpie_pid_command "$@" ;;
+  esac
+)
+proc_expect() {
+  _pt_want=$1; _pt_label=$2; shift 2
+  _pt_out=$(proc_call "$@" 2>/dev/null); _pt_rc=$?
+  if [ "$_pt_rc" = 0 ] && [ "$_pt_out" = "$_pt_want" ]; then ok "$_pt_label"
+  else bad "$_pt_label（rc=$_pt_rc，结果=[$_pt_out]）"; fi
+}
+proc_reject() {
+  _pt_label=$1; shift
+  _pt_out=$(proc_call "$@" 2>/dev/null); _pt_rc=$?
+  [ "$_pt_rc" -ne 0 ] && [ -z "$_pt_out" ] && ok "$_pt_label" || bad "$_pt_label（rc=$_pt_rc，结果=[$_pt_out]）"
+}
+printf '99 11 12 13 14 15 16 17 18 19 20 21\n' > "$_pt/candidates"
+proc_set 11 "$_pt/owned/bin/magpie" magpie update --note 'serve mcp'
+proc_set 12 "$_pt/owned/bin/magpie" magpie serve-extra
+proc_set 13 "$_pt/foreign/bin/magpie" magpie serve
+proc_set 14 "$_pt/owned/bin/magpie" magpie mcp vision
+proc_set 15 "$_pt/owned/bin/magpie" magpie serve --web=x
+proc_set 16 "$_pt/owned/bin/magpie" magpie serve
+proc_set 17 "$_pt/owned/bin/magpie" magpie gateway-key mcp
+proc_set 18 "$_pt/foreign/bin/magpie" magpie mcp
+proc_set 19 "$_pt/owned/bin/magpie" magpie mcp search
+proc_set 20 "$_pt/owned/bin/magpie" magpie serve
+rm "$_pt/proc/20/cmdline"
+proc_set 21 "$_pt/owned/bin/magpie" magpie serve
+rm "$_pt/proc/21/exe"
+proc_expect 15 '普通 CLI、伪 serve、其他本体在前仍找到真 serve' custom main
+proc_expect "$(printf '15\n16')" '多个同名 serve 全部保留且不混入 CLI / MCP' custom serves
+proc_expect "$(printf '14\n19')" 'MCP 使用同一精确过滤，不匹配 CLI 参数与外来本体' custom mcps
+[ ! -e "$_pt/forbidden-all" ] && ok '进程清理候选不依赖 all_pids' || bad '使用了未经筛选的 all_pids'
+proc_expect 15 'BIN 未定义时按后读取的自定义 magpie_path 识别' custom main
+proc_expect 15 'BIN 为空时同样兼容只读调用者' emptybin main
+proc_expect 13 '显式 BIN 优先于 magpie_path，只识别指定本体' bin main
+proc_set 31 /data/adb/magpie/bin/magpie magpie serve
+printf '11 31\n' > "$_pt/candidates"
+proc_expect 31 'BIN 与 magpie_path 都未定义时使用默认本体路径' default main
+proc_expect '' '可显式传第三参数选择本体，不依赖全局 BIN' custom match 13 serve "$_pt/foreign/bin/magpie"
+proc_reject '普通 CLI 参数内 serve 不能冒充主命令' custom match 11 serve
+proc_reject '普通 CLI 参数内 mcp 不能冒充子进程' custom match 17 mcp
+proc_reject 'serve-extra 不等于 serve' custom match 12 serve
+proc_reject '非本模块的同名 serve 不匹配' custom match 13 serve
+proc_reject '无 cmdline 的过期候选失败关闭' custom match 20 serve
+proc_reject '无 exe 的过期候选失败关闭' custom match 21 serve
+proc_reject '负 PID 不得进入进程操作' custom match -1 serve
+proc_reject '非数字 PID 不得进入进程操作' custom match 15x serve
+proc_reject '只允许 serve / mcp 两个子命令' custom match 11 update
+proc_set 22 "$_pt/owned/bin/magpie" "$(printf 'magpie\nserve')" update
+proc_reject 'argv[0] 内的换行不能伪造 argv[1]' custom match 22 serve
+proc_set 22 "$_pt/owned/bin/magpie" magpie "$(printf 'serve\nextra')"
+proc_reject 'argv[1] 内的换行不能截成 serve' custom match 22 serve
+proc_set 22 "$_pt/owned/bin/magpie" magpie '' serve
+proc_reject '空 argv[1] 后的 serve 仍是参数' custom match 22 serve
+proc_set 22 "$_pt/owned/bin/magpie" magpie
+proc_reject '不存在 argv[1] 不得匹配' custom match 22 serve
+proc_set 23 "$_pt/owned/bin/magpie (deleted)" magpie serve
+proc_expect '' '覆盖升级后持有已删除本体的 serve 仍可识别' custom match 23 serve
+: > "$_pt/owned/bin/real-magpie"; ln -s "$_pt/owned/bin/real-magpie" "$_pt/owned/bin/magpie"
+proc_set 24 "$_pt/owned/bin/real-magpie" magpie mcp
+proc_expect '' '经符号链接调用的本体可识别' custom match 24 mcp
+proc_set 24 "$_pt/owned/bin/real-magpie (deleted)" magpie mcp
+proc_expect '' '经符号链接升级后的旧本体可识别' custom match 24 mcp
+printf '11 15 16\n' > "$_pt/candidates"
+proc_set 15 "$_pt/owned/bin/magpie" magpie update serve
+proc_expect 16 '首个真 serve 换成 CLI 后继续找到后面的真 serve' custom main
+proc_expect 16 '全量枚举同步跳过已换身份的首个候选' custom serves
+proc_set 16 "$_pt/foreign/bin/magpie" magpie serve
+proc_reject '只剩普通 CLI / 外来本体时主进程探测返回非零' custom main
+proc_reject '只剩伪候选时全量 serve 枚举返回非零' custom serves
+printf '99\n' > "$_pt/candidates"
+proc_reject '只有已经消失的候选时 MCP 枚举返回非零' custom mcps
+rm -rf "$_pt"
+
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"
 

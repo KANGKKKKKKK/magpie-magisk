@@ -70,10 +70,9 @@ final class Shell {
      * IllegalArgumentException，且发生在类初始化里，整个 App 起不来。
      * 一次给全参数就没有这个顺序依赖。
      *
-     * <p>必须是守护线程且允许空闲回收：否则点过一次磁贴后，这个池的核心线程
-     * 会一直活着，Java 进程只要还有非守护线程就不会退出，表现为
-     * 「用了一次磁贴，App 就常驻内存」。磁贴是绑定服务，收起控制中心后就该被
-     * 销毁 —— 5 秒空闲回收后线程消失，进程没有其他组件时自然被系统回收。
+     * <p>空闲 5 秒后释放工作线程，避免保留不必要的线程资源。
+     * Android 进程何时回收由系统组件生命周期与进程管理决定，不能靠
+     * Java daemon 标记保证，也不能假设收起控制中心就一定销毁进程。
      */
     private static final ThreadPoolExecutor POOL = new ThreadPoolExecutor(
             2, 2,
@@ -92,6 +91,7 @@ final class Shell {
         POOL.allowCoreThreadTimeOut(true);
     }
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final SerialExecutor ORDERED = new SerialExecutor(POOL);
 
     /** 记住上一次成功的 su，省得每次都从头试。 */
     private static volatile String cachedSu;
@@ -108,7 +108,17 @@ final class Shell {
      * 命令串会被拼成 sh -c '...'，所以调用方传进来的内容必须是自己的常量。
      */
     static void run(final String command, final Callback<Result> cb) {
-        POOL.execute(new Runnable() {
+        runOn(POOL, command, cb);
+    }
+
+    /** Persist ordered side effects without creating another permanent thread. */
+    static void runSerial(final String command, final Callback<Result> cb) {
+        runOn(ORDERED, command, cb);
+    }
+
+    private static void runOn(java.util.concurrent.Executor executor,
+                              final String command, final Callback<Result> cb) {
+        executor.execute(new Runnable() {
             @Override
             public void run() {
                 final Result r = exec(command);
