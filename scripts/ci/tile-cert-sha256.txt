@@ -1,0 +1,9 @@
+# 磁贴 App (magpie-tile.apk) 签名证书的「公开预期 SHA-256 指纹」。
+# 指纹不是机密（任何人都能对公开 APK 算出它），放仓库里供 CI/Release 比对，
+# 防止 secret 配错 key、或 APK 被换成另一把 key 签的版本。
+# 私钥永远不进仓库：只存在 GitHub secrets（MAGPIE_KEYSTORE_B64 / MAGPIE_KS_PASS）。
+# 与 CHANGELOG「磁贴 App / 签名」一节、magpie-keys 备份仓库里的指纹必须一致。
+#
+# 规范形式：64 个十六进制字符，不带冒号、不带空格（apksigner --print-certs 的原生输出）。
+# 比对前两侧都会去掉冒号/空格并转大写，所以写成冒号分隔也能匹配。
+217CAC851F9D14BE986809039717DC428AFA04E1B506F68E753D185B21B00FF6

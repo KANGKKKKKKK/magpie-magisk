@@ -1,7 +1,7 @@
 name: ci
 
 # 每次推到 main 或提 PR 都跑：语法检查 + 全部测试套件。
-# 发布工作流也跑同一套，这里提前拦住问题。
+# 发布工作流跑同一份（tests/run-all.sh），两边永不漂移。
 on:
   push:
     branches: [main]
@@ -20,64 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (Node 20，固定 SHA 防供应链篡改)
 
-      - name: 语法检查
-        run: |
-          set -eu
-          for f in service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh tests/*.sh; do
-            sh -n "$f"
-          done
-          echo "语法检查通过"
-
-      - name: shellcheck
-        run: |
-          set -eu
-          # 只查生产脚本。测试文件里大量 `a && b || c` 是刻意写法，
-          # 查出来全是风格噪音（70 条里 59 条来自 tests/）。
-          # SC1090/SC1091：动态 source（先判断 lib.sh 在不在），刻意如此。
-          # 单处例外用内联 `# shellcheck disable=` 标注并写理由，
-          # 这样能保证例外是「解释过的」，不是「整体关掉」。
-          shellcheck -s sh -e SC1090,SC1091 \
-            service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh
-
-      - name: 文档里的测试数字是否与实际一致
-        run: |
-          set -eu
-          # 断言数散落在 README / README_EN / tests/README / CHANGELOG 四处，
-          # 手改容易漏（已经出现过 222 vs 232 vs 286）。这一步直接跑测试数一遍。
-          sh tests/check-counts.sh
-
-      - name: 磁贴的状态判定逻辑
-        run: |
-          set -eu
-          # 纯 JVM，不依赖 Android SDK。这两段逻辑决定磁贴和自查显示什么，
-          # 判错会让「启动失败」看起来像「已停止」。
-          W=$(mktemp -d)
-          javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W"
-          # -encoding 只影响「读源码」；控制台输出取决于 file/stdout.encoding。
-          # 用例里有中文（"正在停止"），GBK/ASCII 环境下会变成问号，排查时更难看。
-          java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W" ClassifyTest
-
-          # 自查结论。SelfCheck 不引 Android 类，能直接编进来。
-          W2=$(mktemp -d)
-          javac -encoding UTF-8 tile-app/src/com/ruin/magpie/tile/SelfCheck.java \
-            tests/jvm/SelfCheckTest.java -d "$W2"
-          java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W2" \
-            com.ruin.magpie.tile.SelfCheckTest
-
-          # Shell 进程执行：用两个最小 android.os 桩，在桌面 JVM 跑真实 Process。
-          W3=$(mktemp -d)
-          mkdir -p "$W3/stubs/android/os" "$W3/classes"
-          cat > "$W3/stubs/android/os/Looper.java" <<'JAVA'
-          package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }
-          JAVA
-          cat > "$W3/stubs/android/os/Handler.java" <<'JAVA'
-          package android.os; public class Handler { public Handler(Looper l) {} public boolean post(Runnable r) { r.run(); return true; } }
-          JAVA
-          javac -encoding UTF-8 -d "$W3/classes" "$W3"/stubs/android/os/*.java \
-            tile-app/src/com/ruin/magpie/tile/Shell.java tests/jvm/ShellTest.java
-          java -cp "$W3/classes" com.ruin.magpie.tile.ShellTest
+      - name: 全部公共测试（与 Release 同一份）
+        # 语法检查 + shellcheck + 断言计数 + JVM 单测 + shell 行为套件。
+        # 抽成 tests/run-all.sh：CI 与 Release 共用，新增测试只改一处。
+        run: sh tests/run-all.sh
 
       - name: 磁贴 App 能编译
         run: |
@@ -98,7 +46,7 @@ jobs:
           fi
           if [ ! -f "$JAR" ]; then
             # 装不上时不要误报失败：这一步是加分项，不是发布门槛
-            # （release.yml 打包前会真正构建一次）。
+            # （release.yml 打包前会真正构建一次并验签）。
             echo "::warning::拿不到 android-34，跳过编译检查"
             exit 0
           fi
@@ -131,18 +79,3 @@ jobs:
             fi
           done
           echo "磁贴 App 编译通过"
-
-      - name: 测试
-        run: |
-          set -eu
-          python3 tests/make-fixtures.py /tmp/fx
-          ( cd /tmp/fx && exec python3 -m http.server 8899 --bind 127.0.0.1 ) &
-          SRV_PID=$!
-          trap 'kill "$SRV_PID" 2>/dev/null || true' EXIT
-          sleep 1
-
-          TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
-          sh tests/test-watchdog.sh
-          TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
-          sh tests/test-service.sh
-          sh tests/test-lib.sh

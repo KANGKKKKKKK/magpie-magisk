@@ -1,6 +1,9 @@
 name: release
 
 # 推送 v* tag 时自动打包发版；也可以在 Actions 页面手动指定 tag 触发。
+#
+# 这一版把「发出去的东西必须可信」做成硬门槛：任何一项不满足直接失败，
+# 不再出现「缺签名 secret 就降级出一个不含磁贴的正式包」。
 on:
   push:
     tags:
@@ -11,6 +14,11 @@ on:
         description: '要发布的 tag（必须已存在，例如 v0.8）'
         required: true
         type: string
+      prerelease:
+        description: '标为 prerelease（允许对已存在的 prerelease 覆盖上传资源）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,28 +37,31 @@ jobs:
       # 直接写成 ${{ github.event.inputs.tag }} 塞进 run: 等于把用户输入
       # 当 shell 代码执行（命令注入）。
       INPUT_TAG: ${{ github.event.inputs.tag }}
+      INPUT_PRERELEASE: ${{ github.event.inputs.prerelease }}
       REPO: ${{ github.repository }}
+      EXPECTED_CERT_FILE: scripts/ci/tile-cert-sha256.txt
     steps:
       - name: 检出
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (Node 20，修掉 Node16 弃用告警；固定 SHA 防供应链篡改)
         with:
           fetch-depth: 0
           # 手动指定 tag 时必须检出那个 tag；否则打出来的包是触发时分支的代码
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: 读取版本并校验一致性
+      - name: 读取版本、校验一致性、并核对 tag 与 versionCode
         id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
           VER=$(sed -n 's/^version=//p' module.prop | tr -d '\r' | head -1)
           CODE=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r' | head -1)
 
+          # versionCode 必须是纯数字：下面所有「严格大于」比较才有意义。
+          case "$CODE" in ''|*[!0-9]*) echo "::error::versionCode 不是纯数字：[$CODE]"; exit 1 ;; esac
+
           if [ -n "${INPUT_TAG:-}" ]; then
             TAG="$INPUT_TAG"
-            # 只接受 v1.2 / v1.2.3 这种形状的 tag。
-            # 校验实现在 scripts/lib.sh：case 的 glob 会把 v1junk.2 也放行
-            #（除 . 和 [] 外都是通配符），所以那边改成按段显式检查，
-            # 并且由 tests/test-lib.sh 覆盖，改坏了本地就能发现。
             . scripts/lib.sh
             if ! is_valid_release_tag "$TAG"; then
               echo "::error::tag 形状不对：$TAG（应形如 v0.8 或 v0.9.2）"
@@ -69,133 +80,182 @@ jobs:
             exit 1
           fi
 
+          # --- versionCode 必须严格大于「当前 main」和「最新 Release」 ---
+          # 单调递增是更新通道的根：发一个更小的号，已装用户永远收不到更新。
+          git fetch --quiet origin main
+          MAIN_CODE=$(git show origin/main:module.prop | sed -n 's/^versionCode=//p' | tr -d '\r' | head -1)
+          case "$MAIN_CODE" in ''|*[!0-9]*) MAIN_CODE=0 ;; esac
+          echo "main 上的 versionCode: $MAIN_CODE"
+          if [ "$CODE" -le "$MAIN_CODE" ]; then
+            echo "::error::versionCode $CODE 没有严格大于 main 的 $MAIN_CODE（必须递增，否则更新通道倒退）"
+            exit 1
+          fi
+
+          # 最新 Release 里的 zip 也可能已经发过一个更大的号（例如从别的分支发过）。
+          # 把最新 Release 的 zip 拉下来读它内嵌 module.prop 的 versionCode 一起比。
+          LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          REL_CODE=0
+          if [ -n "$LATEST_TAG" ]; then
+            echo "最新 Release tag: $LATEST_TAG"
+            TMPZIP="$RUNNER_TEMP/latest.zip"
+            if gh release download "$LATEST_TAG" -p 'magpie-*.zip' -O "$TMPZIP" --clobber 2>/dev/null; then
+              REL_CODE=$(unzip -p "$TMPZIP" module.prop 2>/dev/null | sed -n 's/^versionCode=//p' | tr -d '\r' | head -1)
+            fi
+            case "$REL_CODE" in ''|*[!0-9]*) REL_CODE=0 ;; esac
+            echo "最新 Release zip 内嵌 versionCode: $REL_CODE"
+          fi
+          if [ "$CODE" -le "$REL_CODE" ]; then
+            echo "::error::versionCode $CODE 没有严格大于最新 Release 的 $REL_CODE"
+            exit 1
+          fi
+
+          # --- tag 指向的 commit 必须属于 main，且 CI 已成功 ---
+          # 防止从一个「不在 main 上」的悬空 commit 发版：那种包用户拉不到源码对应。
+          git fetch --quiet origin "$TAG" || true
+          TAG_COMMIT=$(git rev-list -n1 "$TAG")
+          echo "tag $TAG -> commit $TAG_COMMIT"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::tag $TAG 指向的 commit $TAG_COMMIT 不在 main 上，拒绝发版"
+            exit 1
+          fi
+          if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+            # workflow_dispatch 显式检出的是 tag，push 触发时 GITHUB_SHA 就是 tag commit
+            echo "注意：GITHUB_SHA=$GITHUB_SHA，tag commit=$TAG_COMMIT"
+          fi
+
+          # CI 必须在这个 commit 上成功（若仓库有 ci 工作流）。
+          # 用 check-runs 看结论；查不到 CI（例如从未启用）时给出警告但不阻断——
+          # 因为本工作流自己会跑完整套测试，等效兜底。
+          CHECKS=$(gh api "repos/$REPO/commits/$TAG_COMMIT/check-runs" -q '.total_count' 2>/dev/null || echo 0)
+          if [ "${CHECKS:-0}" -gt 0 ]; then
+            BAD=$(gh api "repos/$REPO/commits/$TAG_COMMIT/check-runs" \
+              -q '[.check_runs[] | select(.name=="ci" or .name=="test") | select(.conclusion!="success" and .conclusion!="skipped" and .conclusion!="neutral")] | length' 2>/dev/null || echo 0)
+            if [ "${BAD:-0}" -gt 0 ]; then
+              echo "::error::commit $TAG_COMMIT 上有未通过的 CI 检查，先发版前先让 CI 变绿"
+              exit 1
+            fi
+            echo "该 commit 的 CI 检查均通过"
+          else
+            echo "::notice::该 commit 上没有 CI 检查记录（可能未启用 ci），本工作流会跑完整测试兜底"
+          fi
+
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${INPUT_PRERELEASE:-false}" >> "$GITHUB_OUTPUT"
 
-      - name: 语法检查与测试
+      - name: 全部公共测试（与 CI 同一份）
+        run: sh tests/run-all.sh
+
+      - name: 安装打包与验签工具
         run: |
           set -eu
-          for f in service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh tests/*.sh; do
-            sh -n "$f"
+          # aapt / zipalign 是 Debian 独立包；apksigner 也在 apt（与 build-tools 同源）。
+          # 缺了它们：磁贴编不出来、或对 APK 的验签做不了，都必须在这里就装上。
+          need=""
+          for t in aapt zipalign apksigner; do
+            command -v "$t" >/dev/null 2>&1 || need="$need $t"
           done
-          echo "语法检查通过"
+          if [ -n "$need" ]; then
+            echo "安装:$need"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq aapt zipalign apksigner
+          fi
+          # android-34 平台：aapt 解析资源要用 android.jar
+          if [ ! -f "${ANDROID_HOME:-/nonexistent}/platforms/android-34/android.jar" ]; then
+            echo "安装 android-34 平台"
+            yes | "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager" \
+              "platforms;android-34" >/dev/null 2>&1 || true
+          fi
+          command -v apksigner >/dev/null 2>&1 || { echo "::error::apksigner 装不上，无法验签"; exit 1; }
 
-          # 只查生产脚本：测试文件里大量 a && b || c 是刻意写法，查出来全是噪音。
-          # SC1090/SC1091 是动态 source（先判断 lib.sh 在不在），刻意如此。
-          shellcheck -s sh -e SC1090,SC1091 \
-            service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh
-          echo "shellcheck 通过"
-
-          python3 tests/make-fixtures.py /tmp/fx
-          ( cd /tmp/fx && exec python3 -m http.server 8899 --bind 127.0.0.1 ) &
-          SRV_PID=$!
-          trap 'kill "$SRV_PID" 2>/dev/null || true' EXIT
-          sleep 1
-
-          TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
-          sh tests/test-watchdog.sh
-          TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
-          sh tests/test-service.sh
-          sh tests/test-lib.sh
-          W3=$(mktemp -d); mkdir -p "$W3/stubs/android/os" "$W3/classes"
-          printf '%s\n' 'package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }' > "$W3/stubs/android/os/Looper.java"
-          printf '%s\n' 'package android.os; public class Handler { public Handler(Looper l) {} public boolean post(Runnable r) { r.run(); return true; } }' > "$W3/stubs/android/os/Handler.java"
-          javac -encoding UTF-8 -d "$W3/classes" "$W3"/stubs/android/os/*.java \
-            tile-app/src/com/ruin/magpie/tile/Shell.java tests/jvm/ShellTest.java
-          java -cp "$W3/classes" com.ruin.magpie.tile.ShellTest
-
-      - name: 打包
+      - name: 签名 secret 必须齐全（正式 Release 硬门槛）
         env:
-          # 密钥以 base64 存在仓库 secret 里，用完即删。
-          # 没有这两个 secret 时也能打包，只是 zip 里不含磁贴 App。
+          KEYSTORE_B64: ${{ secrets.MAGPIE_KEYSTORE_B64 }}
+          MAGPIE_KS_PASS: ${{ secrets.MAGPIE_KS_PASS }}
+        run: |
+          set -eu
+          # 缺任一 secret 就 fail。绝不允许「警告一下然后打个不含磁贴的正式包」——
+          # 用户更新后磁贴 App 会凭空消失，而这种回退极难察觉。
+          if [ -z "${KEYSTORE_B64:-}" ] || [ -z "${MAGPIE_KS_PASS:-}" ]; then
+            echo "::error::缺少 MAGPIE_KEYSTORE_B64 或 MAGPIE_KS_PASS。"
+            echo "::error::正式 Release 必须带磁贴 App。请先在仓库 Settings → Secrets 配齐这两个 secret 再发版。"
+            exit 1
+          fi
+          echo "签名 secret 齐全"
+
+      - name: 打包（带磁贴签名）
+        env:
           KEYSTORE_B64: ${{ secrets.MAGPIE_KEYSTORE_B64 }}
           MAGPIE_KS_PASS: ${{ secrets.MAGPIE_KS_PASS }}
         run: |
           set -eu
           mkdir -p dist
-          if [ -n "${KEYSTORE_B64:-}" ] && [ -n "${MAGPIE_KS_PASS:-}" ]; then
-            echo "有签名密钥，构建磁贴 App"
-            # runner 上没预装 aapt / zipalign（它们不在 build-tools 里，
-            # 是 Debian 的独立包）。缺了会直接导致构建失败。
-            if ! command -v aapt >/dev/null 2>&1 || ! command -v zipalign >/dev/null 2>&1; then
-              echo "安装 aapt / zipalign"
-              sudo apt-get update -qq
-              sudo apt-get install -y -qq aapt zipalign
-            fi
-            # runner 的 ANDROID_HOME 指向的 SDK 里通常没有 android-34 平台，
-            # 只有 build-tools。缺 android.jar 时 aapt 无法解析资源。
-            if [ ! -f "${ANDROID_HOME:-/nonexistent}/platforms/android-34/android.jar" ]; then
-              echo "安装 android-34 平台"
-              yes | "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager" \
-                "platforms;android-34" >/dev/null 2>&1 || true
-            fi
-            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/magpie-tile.jks"
-            export MAGPIE_KEYSTORE="$RUNNER_TEMP/magpie-tile.jks"
-            export MAGPIE_KS_PASS
-          else
-            echo "::warning::没有 MAGPIE_KEYSTORE_B64 / MAGPIE_KS_PASS，本次 zip 不含磁贴 App"
-          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/magpie-tile.jks"
+          chmod 600 "$RUNNER_TEMP/magpie-tile.jks"
+          export MAGPIE_KEYSTORE="$RUNNER_TEMP/magpie-tile.jks"
+          export MAGPIE_KS_PASS
           sh build.sh dist
           # 用完立刻删掉，别留在 runner 上
           rm -f "$RUNNER_TEMP/magpie-tile.jks"
-          ( cd dist && sha256sum magpie-*.zip > SHA256SUMS )
           ls -l dist/
 
-      - name: 校验 zip 结构
-        run: |
-          set -eu
-          ZIP="dist/magpie-${{ steps.meta.outputs.ver }}.zip"
-          echo "包内文件："
-          unzip -l "$ZIP"
-
-          # module.prop 必须在包根目录，否则 Magisk 装不上
-          if ! unzip -l "$ZIP" | grep -qE '^ *[0-9]+ .* module\.prop$'; then
-            echo "::error::module.prop 不在 zip 根目录"
-            exit 1
-          fi
-          if unzip -l "$ZIP" | grep -qE ' (README\.md|LICENSE|CHANGELOG\.md|update\.json|build\.sh)$'; then
-            echo "::error::zip 里混进了仓库文件"
-            exit 1
-          fi
-          for f in service.sh action.sh uninstall.sh scripts/magpie.service; do
-            if ! unzip -l "$ZIP" | grep -qE " $f$"; then
-              echo "::error::zip 缺少 $f"
-              exit 1
-            fi
-          done
-          # 磁贴 App 是可选的：有就必须成对出现（apk + 版本号）
-          if unzip -l "$ZIP" | grep -qE " magpie-tile\.apk$"; then
-            if ! unzip -l "$ZIP" | grep -qE " tile-version$"; then
-              echo "::error::有 magpie-tile.apk 但缺 tile-version，安装器无法判断版本"
-              exit 1
-            fi
-            echo "含磁贴 App"
-          else
-            echo "::warning::本次 zip 不含磁贴 App"
-          fi
-          echo "结构检查通过"
-
-      - name: 生成构建 provenance
-        # 由 GitHub OIDC 签发，不需要额外密钥；所需权限已在 workflow 顶部最小化列出。
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: dist/magpie-*.zip
-
-      - name: 发布 Release
+      - name: zip 硬门槛校验（结构 / 磁贴签名 / APK 元数据）
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.meta.outputs.tag }}
           VER: ${{ steps.meta.outputs.ver }}
         run: |
           set -eu
+          sh scripts/ci/verify-release-zip.sh "dist/magpie-$VER.zip" "$TAG"
+
+      - name: 生成 SHA256SUMS 并自检
+        env:
+          VER: ${{ steps.meta.outputs.ver }}
+        run: |
+          set -eu
+          cd dist
+          sha256sum "magpie-$VER.zip" > SHA256SUMS
+          # 立刻用 -c 自证：清单里写的就是这份 zip 的真实摘要
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+          cd ..
+          # 把 SHA256SUMS 也纳入 attestation 的 subject：
+          # 这样「校验和清单」本身也有 provenance，而不是只签 zip、清单可被人换掉。
+          cp dist/SHA256SUMS dist/magpie-$VER.zip "$RUNNER_TEMP/" 2>/dev/null || true
+
+      - name: 生成构建 provenance（zip 与 SHA256SUMS 都纳入 subject）
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0（固定 SHA）
+        with:
+          subject-path: |
+            dist/magpie-*.zip
+            dist/SHA256SUMS
+
+      - name: 发布 Release（已存在则保护，prerelease 才允许覆盖）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.ver }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -eu
           ZIP="dist/magpie-$VER.zip"
 
+          PRE_FLAG=""
+          [ "$PRERELEASE" = "true" ] && PRE_FLAG="--prerelease"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，覆盖上传资源"
+            IS_PRE=$(gh release view "$TAG" --json isPrerelease -q .isPrerelease 2>/dev/null || echo false)
+            if [ "$IS_PRE" != "true" ] || [ "$PRERELEASE" != "true" ]; then
+              # 已发布的正式 Release 不允许被 rerun --clobber 覆盖：
+              # 覆盖会让「同一版本号、不同内容」的包流向已装用户，校验和与 attestation 全废。
+              echo "::error::Release $TAG 已存在且不是可覆盖的 prerelease（isPrerelease=$IS_PRE，本次 prerelease=$PRERELEASE）。"
+              echo "::error::如需重发，请递增 versionCode 并打新 tag；确属预发布请勾选 prerelease。"
+              exit 1
+            fi
+            echo "覆盖已存在的 prerelease $TAG 的资源"
+            # shellcheck disable=SC2086  # PRE_FLAG 要么空、要么 --prerelease，刻意分词
             gh release upload "$TAG" "$ZIP" dist/SHA256SUMS --clobber
           else
-            # 说明先写到文件里（占位符后面替换），免得长文本被引号或反引号弄乱
             cat > NOTES.md <<'EOF'
           模块 __TAG__，由 __SHA__ 自动构建。
 
@@ -208,21 +268,75 @@ jobs:
           - 变更记录：[CHANGELOG.md](https://github.com/__REPO__/blob/main/CHANGELOG.md)
           EOF
             sed -i "s|__TAG__|$TAG|g; s|__SHA__|$GITHUB_SHA|g; s|__REPO__|$REPO|g" NOTES.md
+            # shellcheck disable=SC2086
             gh release create "$TAG" "$ZIP" dist/SHA256SUMS \
               --title "$TAG" \
-              --notes-file NOTES.md
+              --notes-file NOTES.md $PRE_FLAG
           fi
 
-      - name: 同步 update.json
+      - name: 上传后用 GitHub asset digest 对账
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.ver }}
+        run: |
+          set -eu
+          # 本地算出的 zip 摘要
+          LOCAL=$(sha256sum "dist/magpie-$VER.zip" | awk '{print $1}')
+          echo "本地 zip sha256: $LOCAL"
+          # 从 Release 把刚传上去的 zip 再拉回来，独立算一遍，验证「传上去的就是我打的」。
+          DL="$RUNNER_TEMP/verify.zip"
+          gh release download "$TAG" -p "magpie-$VER.zip" -O "$DL" --clobber
+          REMOTE=$(sha256sum "$DL" | awk '{print $1}')
+          echo "回读 zip sha256: $REMOTE"
+          [ "$LOCAL" = "$REMOTE" ] || { echo "::error::上传后回读的 zip 与本地不一致"; exit 1; }
+          # GitHub 服务端也记录 asset 的 digest（sha256:...）。核对它，三处一致才算闭环。
+          ASSET_DIGEST=$(gh api "repos/$REPO/releases/tags/$TAG" \
+            -q ".assets[] | select(.name==\"magpie-$VER.zip\") | .digest" 2>/dev/null || true)
+          echo "GitHub asset digest: ${ASSET_DIGEST:-<无>}"
+          if [ -n "$ASSET_DIGEST" ]; then
+            [ "$ASSET_DIGEST" = "sha256:$LOCAL" ] || { echo "::error::GitHub 记录的 digest 与本地 sha256 不符"; exit 1; }
+          else
+            echo "::notice::该 asset 暂无 GitHub 侧 digest 字段（可能尚未生成），已用回读 zip 的方式校验一致"
+          fi
+          echo "digest 对账通过"
+
+      - name: 同步 update.json（先验证资产可下载、再提交；失败给恢复指引）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.meta.outputs.tag }}
           VER: ${{ steps.meta.outputs.ver }}
           CODE: ${{ steps.meta.outputs.code }}
         run: |
           set -eu
+          # 推 update.json 会让所有已装用户去拉这个版本。所以推之前必须确认
+          # 「用户真能下到、且下到的就是刚发的这份」。否则会把更新通道指向一个坏包。
+          URL="https://github.com/$REPO/releases/download/$TAG/magpie-$VER.zip"
+          EXPECT=$(sha256sum "dist/magpie-$VER.zip" | awk '{print $1}')
+          echo "预检下载: $URL"
+          # 资产刚上传可能有秒级可见性延迟，重试几次。
+          ok=""
+          for _try in 1 2 3 4 5; do
+            if curl -fsSL --max-time 60 "$URL" -o "$RUNNER_TEMP/uj.zip" 2>/dev/null; then
+              GOT=$(sha256sum "$RUNNER_TEMP/uj.zip" | awk '{print $1}')
+              if [ "$GOT" = "$EXPECT" ]; then ok=1; break; fi
+              echo "第 $_try 次下载到内容但摘要不符，重试…"
+            else
+              echo "第 $_try 次下载失败，重试…"
+            fi
+            sleep 3
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::Release 已发布，但 update.json 预检多次下载/校验失败。"
+            echo "::error::【恢复指引】Release 与 zip 本身已在 GitHub 上，用户手动下载没问题；"
+            echo "          只是更新通道(update.json)还没指向它。可稍后重跑本工作流的这一步骤，"
+            echo "          或手工在 main 上把 update.json 的 version/versionCode/zipUrl 改成本版本。"
+            exit 1
+          fi
+          echo "预检通过：资产可下载且 digest 一致"
+
           # 在 main 的最新提交上改这个文件，原因有两个：
-          #   1. 从旧 tag 触发时，checkout 出来的不是 main，直接在它上面
-          #      提交再推 main 会因为非快进被拒；
+          #   1. 从旧 tag 触发时，checkout 出来的不是 main，直接在它上面提交再推 main 会因非快进被拒；
           #   2. 发旧版本不该把更新通道倒退，所以先比 versionCode。
           WT="$RUNNER_TEMP/main-wt"
           rm -rf "$WT"
@@ -257,13 +371,22 @@ jobs:
           git add update.json
           git commit -m "chore: update.json -> $TAG"
 
-          # 另一个发版任务可能刚好也推了 main，重试一次
-          if git push --quiet origin HEAD:main; then
+          # 另一个发版任务可能刚好也推了 main，多试几次 rebase。
+          pushed=""
+          for _try in 1 2 3; do
+            if git push --quiet origin HEAD:main; then pushed=1; break; fi
+            echo "推送被拒（第 $_try 次），跟 main 对齐后重试"
+            git fetch --quiet origin main
+            git rebase --quiet origin/main || git rebase --abort || true
+            sleep 2
+          done
+          if [ -n "$pushed" ]; then
             echo "update.json 已同步"
           else
-            echo "推送被拒，跟 main 对齐后重试"
-            git fetch --quiet origin main
-            git rebase --quiet origin/main
-            git push --quiet origin HEAD:main
-            echo "update.json 已同步（重试成功）"
+            echo "::error::update.json 多次 push 失败。"
+            echo "::error::【恢复指引】Release $TAG 已发布且 zip 可下载，仅更新通道未更新。"
+            echo "          在本地 main 上执行："
+            echo "            把 update.json 的 version 改为 $VER、versionCode 改为 $CODE、"
+            echo "            zipUrl 改为 $URL，然后 commit 并 push 到 main 即可。"
+            exit 1
           fi

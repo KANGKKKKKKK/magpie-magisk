@@ -114,19 +114,54 @@ SERVICE_LOCK_HELD=""
 
 # 启停操作串行执行。停止请求先落盘再等待锁：即使较早的 start 仍在运行，
 # 它也不会把较新的停止意图清掉；stop 获得锁后会做最终收尾。
+
+# /proc/<pid>/starttime 是「这次启动的实例号」，PID 复用后一定会变。
+# 与锁文件里记的 pid 一起比对，能把「PID 恰好被复用」误判成「锁主还活着」
+# 的窗口压到最低（TOCTOU）。
+proc_starttime() {
+  [ -r "/proc/$1/stat" ] || return 1
+  # comm 里可能含空格和右括号（如 ")(worker)"），按最后一个 ')' 切，第 22 列才是 starttime
+  _stat=$(sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null)
+  # shellcheck disable=SC2086  # 故意分词：把 /proc/stat 的字段按空白拆成位置参数
+  set -- $_stat
+  # 去掉前 19 个字段（state..startstack），第 20 个就是原第 22 列 starttime
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  echo "$1"
+}
+
 acquire_service_lock() {
   _i=0
   while ! mkdir "$SERVICE_LOCK" 2>/dev/null; do
     _owner=$(cat "$SERVICE_LOCK/pid" 2>/dev/null)
+    _ost=$(cat "$SERVICE_LOCK/starttime" 2>/dev/null)
     case "$_owner" in ''|*[!0-9]*) _owner="" ;; esac
-    if [ -n "$_owner" ] && ! kill -0 "$_owner" 2>/dev/null; then
-      _stale="$SERVICE_LOCK.stale.$$"
-      mv "$SERVICE_LOCK" "$_stale" 2>/dev/null && rm -rf "$_stale" 2>/dev/null
+    case "$_ost"   in ''|*[!0-9]*) _ost=""   ;; esac
+    _stale=""
+    if [ -z "$_owner" ]; then
+      # 读不到 owner：不是「没有锁主」，是锁目录建了一半。
+      # 交给下一次循环重读；反复读不到就按超时处理，绝不当成「没人」硬抢。
+      :
+    elif ! kill -0 "$_owner" 2>/dev/null; then
+      _stale=1                      # 进程已死
+    elif [ -n "$_ost" ]; then
+      _nowst=$(proc_starttime "$_owner" 2>/dev/null)
+      if [ -n "$_nowst" ] && [ "$_nowst" != "$_ost" ]; then
+        _stale=1                    # starttime 对不上：PID 已被复用
+      fi
+    fi
+    if [ -n "$_stale" ]; then
+      _s="$SERVICE_LOCK.stale.$$"
+      mv "$SERVICE_LOCK" "$_s" 2>/dev/null && rm -rf "$_s" 2>/dev/null
       continue
     fi
     [ "$_i" -lt 150 ] || { log Error "另一个启停操作仍在进行，请稍后重试"; return 1; }
     sleep 0.1; _i=$((_i + 1))
   done
+  # 先落盘自己的实例号再记 pid：读方拿到 pid 时 starttime 必然已可核对，
+  # 不会出现「pid 在、starttime 还没写」的中间态被误判成新锁主。
+  proc_starttime $$ > "$SERVICE_LOCK/starttime" 2>/dev/null
   echo $$ > "$SERVICE_LOCK/pid" 2>/dev/null
   SERVICE_LOCK_HELD=1
 }
@@ -477,23 +512,35 @@ sync_status() {
   [ -f "$(dirname "$0")/status.sh" ] && sh "$(dirname "$0")/status.sh" >/dev/null 2>&1
 }
 
+# 每条 start/stop 路径都可能建「停止意图」标记并拿启停锁。
+# 进程若在临界区里被信号打断（TERM/HUP/INT），只放锁、不清标记，
+# 会留下一个 .stop-request.<pid>：has_stop_request 发现它属于死进程时会顺手清掉，
+# 但下次 stop 完成前若又被信号打断，残留的标记可能把一次「较新的启动」误判成该取消。
+# 所以把「放锁 + 清自己那条停止标记」绑进同一个 trap，任何退出路径都会走到。
+STOP_REQUEST_FILE=""
+cleanup_lifecycle() {
+  release_service_lock
+  [ -n "$STOP_REQUEST_FILE" ] && rm -f "$STOP_REQUEST_FILE" 2>/dev/null
+  STOP_REQUEST_FILE=""
+}
+
 case "$1" in
   # 退出码要带出 start 的结果，否则失败也返回 0
   start)
-    acquire_service_lock || exit 1; trap release_service_lock EXIT INT TERM HUP
+    acquire_service_lock || exit 1; trap cleanup_lifecycle EXIT INT TERM HUP
     start; _rc=$?; sync_status; exit $_rc ;;
   stop)
     : > "$USER_STOPPED" 2>/dev/null
-    _stop_request="$RUN/.stop-request.$$"; : > "$_stop_request" 2>/dev/null
-    acquire_service_lock || { _rc=$?; rm -f "$_stop_request"; exit $_rc; }
-    trap release_service_lock EXIT INT TERM HUP
-    stop; _rc=$?; rm -f "$_stop_request"; sync_status; exit $_rc ;;
+    STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
+    acquire_service_lock || { _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; exit $_rc; }
+    trap cleanup_lifecycle EXIT INT TERM HUP
+    stop; _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; sync_status; exit $_rc ;;
   restart)
     : > "$USER_STOPPED" 2>/dev/null
-    _stop_request="$RUN/.stop-request.$$"; : > "$_stop_request" 2>/dev/null
-    acquire_service_lock || { _rc=$?; rm -f "$_stop_request"; exit $_rc; }
-    trap release_service_lock EXIT INT TERM HUP
-    stop; rm -f "$_stop_request"; start; _rc=$?; sync_status; exit $_rc ;;
+    STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
+    acquire_service_lock || { _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; exit $_rc; }
+    trap cleanup_lifecycle EXIT INT TERM HUP
+    stop; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; start; _rc=$?; sync_status; exit $_rc ;;
   status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
 
   # 在跑就停，没跑就起。给磁贴 / 快捷方式用：一个动作，不用先判断状态。
@@ -501,11 +548,11 @@ case "$1" in
   # start() 会清掉那个标记。
   # 输出一行结果，方便调用方（磁贴、Tasker）直接展示。
   toggle)
-    acquire_service_lock || exit 1; trap release_service_lock EXIT INT TERM HUP
+    acquire_service_lock || exit 1; trap cleanup_lifecycle EXIT INT TERM HUP
     if pid=$(running); then
-      _stop_request="$RUN/.stop-request.$$"; : > "$_stop_request" 2>/dev/null
+      STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
       stop
-      rm -f "$_stop_request"
+      rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""
       sync_status
       echo "stopped"
       exit 0

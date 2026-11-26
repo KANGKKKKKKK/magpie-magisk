@@ -366,5 +366,62 @@ if kill_if_magpie "$$"; then bad "非 magpie 进程通过身份校验"; else ok 
 
 reap
 echo
+echo "== 13 acquire_service_lock：starttime 能识别 PID 复用"
+# 构造一个锁：pid 指向「活着」的进程，但 starttime 故意填一个不可能相等的值。
+# 真实事故：锁主死后 PID 被复用，光 kill -0 会误判「锁主还在」，新启停操作永远等锁。
+# starttime 是这次启动的实例号，复用后必然不同，能把这种误判挡掉。
+build
+mkdir -p "$B/run/.service.lock"
+echo $$ > "$B/run/.service.lock/pid"
+echo "1" > "$B/run/.service.lock/starttime"   # 真实 starttime 是几十亿量级，1 绝不相等
+# 内嵌判定片段：与 magpie.service 里 acquire_service_lock 的 stale 判定同源
+_sr=$(sed -n '/^acquire_service_lock()/,/^}/p' "$SRCDIR/scripts/magpie.service")
+printf '%s\n' "$_sr" | grep -q 'proc_starttime' && ok "acquire_service_lock 引入 starttime 校验" \
+  || bad "acquire_service_lock 没有 starttime 校验"
+# proc_starttime 必须返回纯数字，否则比对会失效
+_st=$(. "$B/scripts/lib.sh" 2>/dev/null; eval "$(sed -n '/^proc_starttime()/,/^}/p' "$SRCDIR/scripts/magpie.service")"; proc_starttime $$)
+case "$_st" in ''|*[!0-9]*) bad "proc_starttime 返回非数字：[$_st]" ;; *) ok "proc_starttime 返回本进程实例号" ;; esac
+# starttime 不匹配（1 != 真实值）→ 锁被判 stale 并被回收
+SERVICE_LOCK="$B/run/.service.lock"; RUN="$B/run"
+eval "$(sed -n '/^proc_starttime()/,/^}/p' "$SRCDIR/scripts/magpie.service")"
+# 直接跑一次 acquire：应识别 stale、回收旧锁、拿到新锁
+eval "$(sed -n '/^acquire_service_lock()/,/^}/p' "$SRCDIR/scripts/magpie.service")"
+if acquire_service_lock; then ok "starttime 不符时识别为 stale 并拿到锁"; else bad "stale 锁没被回收，acquire 失败"; fi
+_newowner=$(cat "$B/run/.service.lock/pid" 2>/dev/null)
+[ "$_newowner" = "$$" ] && ok "新锁主写入了自己的 pid" || bad "新锁主 pid 不对：$_newowner"
+[ -f "$B/run/.service.lock/starttime" ] && ok "新锁写入了 starttime" || bad "新锁没写 starttime"
+eval "$(sed -n '/^release_service_lock()/,/^}/p' "$SRCDIR/scripts/magpie.service")"
+release_service_lock
+
+echo "== 14 信号中断：停止标记与锁都被 trap 清掉"
+# stop 在临界区里被 TERM 打断：不能留下 .stop-request.<pid> 与 .service.lock，
+# 否则一次「较新的启动」会被残留标记误判成该取消（has_stop_request）。
+build
+mkdir -p "$B/bin"
+# 假 stop 走得慢：给 TERM 一个能落在临界区里的窗口
+stub_lib "magpie_main_pid() { return 1; }
+magpie_all_pids() { return 0; }
+magpie_mcp_pids() { return 0; }"
+# 用 restart：它先建 stop-request、拿锁，再 stop；让 stop 阻塞以便中途发信号
+stub_lib "cleanup_legacy_dnsmasq() { sleep 5; }"
+sh "$B/scripts/magpie.service" restart >/dev/null 2>&1 &
+_rp=$!
+KIDS="$KIDS $_rp"
+# 等它确实建出 stop-request 与锁（最多 3 秒）
+i=0
+while [ "$i" -lt 30 ]; do
+  [ -d "$B/run/.service.lock" ] && ls "$B/run"/.stop-request.* >/dev/null 2>&1 && break
+  sleep 0.1; i=$((i + 1))
+done
+[ -d "$B/run/.service.lock" ] && ok "restart 临界区里确实持有锁" || bad "restart 没拿到锁"
+kill -TERM "$_rp" 2>/dev/null
+# 等 trap 跑完
+wait "$_rp" 2>/dev/null
+sleep 0.3
+if [ -d "$B/run/.service.lock" ]; then bad "信号中断后启停锁没被 trap 释放"; else ok "信号中断后启停锁被 trap 释放"; fi
+if ls "$B/run"/.stop-request.* >/dev/null 2>&1; then bad "信号中断后残留 stop-request 标记"; else ok "信号中断后 stop-request 被 trap 清掉"; fi
+reap
+
+echo
 echo "结果： PASS $PASS ， FAIL $FAIL"
 [ "$FAIL" = "0" ] || exit 1

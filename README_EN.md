@@ -798,11 +798,11 @@ python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manife
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 57 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 43 assertions
-sh tests/test-service.sh                                  # process, dirs, status, session, 33 assertions
+sh tests/test-service.sh                                  # process, dirs, status, session, 41 assertions
 sh tests/test-lib.sh                                      # pure helpers: addr/path/IP/JSON/tag/CA/tile, 237 assertions
 ```
 
-383 assertions total (57 + 13 + 43 + 33 + 237), plus 47 JVM cases in `tests/jvm/` (13 for tile state, 28 for self-check, 6 for Shell process handling). Tests use temp
+391 assertions total (57 + 13 + 43 + 41 + 237), plus 47 JVM cases in `tests/jvm/` (13 for tile state, 28 for self-check, 6 for Shell process handling). Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
