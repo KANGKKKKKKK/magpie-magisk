@@ -49,6 +49,7 @@ kill_matching() {
 
 reap() {
   for _p in $KIDS; do kill -9 "$_p" 2>/dev/null; done
+  KIDS=""
   kill_matching "$B/service.sh"
   kill_matching "$B/scripts/magpie.service"
   return 0
@@ -64,6 +65,8 @@ build() {
       "$SRCDIR/service.sh" > "$B/service.sh"
   printf 'magpie_path="%s"\n' "$B" > "$B/cfg"
   cp "$SRCDIR/scripts/lib.sh" "$B/scripts/lib.sh"
+  # 默认绝不扫描宿主进程；需要进程的用例只返回自己创建的 PID。
+  printf '\npidof() { return 1; }\nmagpie_main_pid() { return 1; }\nmagpie_all_pids() { return 0; }\nmagpie_mcp_pids() { return 0; }\n' >> "$B/scripts/lib.sh"
   printf '#!/bin/sh\nexit 0\n' > "$B/scripts/status.sh"
   chmod 755 "$B"/*.sh "$B"/scripts/*.sh
   : > "$B/calls.log"
@@ -71,6 +74,21 @@ build() {
 
 # 往沙箱的 lib.sh 末尾追加桩函数
 stub_lib() { printf '\n%s\n' "$1" >> "$B/scripts/lib.sh"; }
+
+wait_file() {
+  _wait_i=0
+  while [ "$_wait_i" -lt 100 ]; do
+    [ -f "$1" ] && return 0
+    sleep 0.05; _wait_i=$((_wait_i + 1))
+  done
+  return 1
+}
+lock_available() (
+  . "$SRCDIR/scripts/lib.sh"
+  magpie_pick_flock || exit 1
+  exec 7>>"$B/run/.service.flock"
+  magpie_flock -n 7
+)
 
 echo "== 1 首次开机：run 目录不存在时仍要拉起服务"
 build
@@ -342,16 +360,19 @@ printf '#!/bin/sh\nexit 0\n' > "$B/bin/magpie"; chmod 755 "$B/bin/magpie"
 stub_lib "magpie_main_pid() { return 1; }"
 stub_lib "magpie_all_pids() { return 0; }"
 stub_lib "magpie_mcp_pids() { return 0; }"
-mkdir -p "$B/run/.service.lock"
-# 存活的本测试进程充当锁持有者。
-echo $$ > "$B/run/.service.lock/pid"
-sh "$B/scripts/magpie.service" stop >/dev/null 2>&1 & _stop=$!
-sleep 0.3
+mkdir -p "$B/run"
+. "$SRCDIR/scripts/lib.sh"
+magpie_pick_flock || exit 1
+exec 7>>"$B/run/.service.flock"
+magpie_flock -n 7 || exit 1
+sh "$B/scripts/magpie.service" stop 7>&- >"$B/stop.log" 2>&1 & _stop=$!
+KIDS="$KIDS $_stop"
+wait_file "$B/run/.stop-request.$_stop" || bad "stop 未进入等待"
 [ -f "$B/run/.user_stopped" ] && ok "等待锁时已写入停止标记" || bad "停止意图被锁延迟"
-rm -rf "$B/run/.service.lock"
+magpie_flock -u 7; exec 7>&-
 wait "$_stop"
 [ -f "$B/run/.user_stopped" ] && ok "stop 完成后保留停止标记" || bad "stop 完成未保留停止标记"
-[ ! -d "$B/run/.service.lock" ] && ok "启停锁最终释放" || bad "启停锁未释放"
+lock_available && ok "启停锁最终释放且锁文件保留" || bad "启停锁未释放"
 
 
 echo "== 12 卸载 dnsmasq.keep.pid 必须校验进程身份"
@@ -366,60 +387,152 @@ if kill_if_magpie "$$"; then bad "非 magpie 进程通过身份校验"; else ok 
 
 reap
 echo
-echo "== 13 acquire_service_lock：starttime 能识别 PID 复用"
-# 构造一个锁：pid 指向「活着」的进程，但 starttime 故意填一个不可能相等的值。
-# 真实事故：锁主死后 PID 被复用，光 kill -0 会误判「锁主还在」，新启停操作永远等锁。
-# starttime 是这次启动的实例号，复用后必然不同，能把这种误判挡掉。
+echo "== 13 两个过期目录锁回收竞争者仍由同一内核锁串行执行"
 build
 mkdir -p "$B/run/.service.lock"
-echo $$ > "$B/run/.service.lock/pid"
-echo "1" > "$B/run/.service.lock/starttime"   # 真实 starttime 是几十亿量级，1 绝不相等
-# 内嵌判定片段：与 magpie.service 里 acquire_service_lock 的 stale 判定同源
-_sr=$(sed -n '/^acquire_service_lock()/,/^}/p' "$SRCDIR/scripts/magpie.service")
-printf '%s\n' "$_sr" | grep -q 'proc_starttime' && ok "acquire_service_lock 引入 starttime 校验" \
-  || bad "acquire_service_lock 没有 starttime 校验"
-# proc_starttime 必须返回纯数字，否则比对会失效
-_st=$(. "$B/scripts/lib.sh" 2>/dev/null; eval "$(sed -n '/^proc_starttime()/,/^}/p' "$SRCDIR/scripts/magpie.service")"; proc_starttime $$)
-case "$_st" in ''|*[!0-9]*) bad "proc_starttime 返回非数字：[$_st]" ;; *) ok "proc_starttime 返回本进程实例号" ;; esac
-# starttime 不匹配（1 != 真实值）→ 锁被判 stale 并被回收
-SERVICE_LOCK="$B/run/.service.lock"; RUN="$B/run"
-eval "$(sed -n '/^proc_starttime()/,/^}/p' "$SRCDIR/scripts/magpie.service")"
-# 直接跑一次 acquire：应识别 stale、回收旧锁、拿到新锁
-eval "$(sed -n '/^acquire_service_lock()/,/^}/p' "$SRCDIR/scripts/magpie.service")"
-if acquire_service_lock; then ok "starttime 不符时识别为 stale 并拿到锁"; else bad "stale 锁没被回收，acquire 失败"; fi
-_newowner=$(cat "$B/run/.service.lock/pid" 2>/dev/null)
-[ "$_newowner" = "$$" ] && ok "新锁主写入了自己的 pid" || bad "新锁主 pid 不对：$_newowner"
-[ -f "$B/run/.service.lock/starttime" ] && ok "新锁写入了 starttime" || bad "新锁没写 starttime"
-eval "$(sed -n '/^release_service_lock()/,/^}/p' "$SRCDIR/scripts/magpie.service")"
+echo 999999 > "$B/run/.service.lock/pid"
+echo 1 > "$B/run/.service.lock/starttime"
+: > "$B/run/.service.flock"
+_inode=$(stat -c '%d:%i' "$B/run/.service.flock")
+# 运行时加载生产函数，不在测试中维护第二份锁算法。
+{
+  printf '. "%s/scripts/lib.sh"\n' "$B"
+  sed -n '/^acquire_service_lock() {/,/^}/p; /^release_service_lock() {/,/^}/p' "$SRCDIR/scripts/magpie.service"
+  cat <<'WORKER'
+RUN=$1; SERVICE_LOCK="$RUN/.service.flock"
+log() { echo "$*" >&2; }
+trap release_service_lock EXIT
+trap 'exit 143' TERM
+: > "$RUN/ready.$2"
+while [ ! -f "$RUN/go" ]; do sleep 0.01; done
+acquire_service_lock || exit 1
+mkdir "$RUN/critical" 2>/dev/null || : > "$RUN/overlap"
+echo "$2" >> "$RUN/entries"
+sleep 0.2
+rmdir "$RUN/critical" 2>/dev/null || :
 release_service_lock
+WORKER
+} > "$B/worker.sh"
+sh "$B/worker.sh" "$B/run" a & _a=$!
+sh "$B/worker.sh" "$B/run" b & _b=$!
+KIDS="$KIDS $_a $_b"
+wait_file "$B/run/ready.a" && wait_file "$B/run/ready.b" || bad "锁竞争者没有就绪"
+: > "$B/run/go"
+wait "$_a"; _ar=$?; wait "$_b"; _br=$?
+[ "$_ar:$_br" = 0:0 ] && ok "两个 stale-lock 竞争者都完成" || bad "竞争者失败：$_ar:$_br"
+[ ! -e "$B/run/overlap" ] && [ "$(wc -l < "$B/run/entries")" -eq 2 ] && ok "竞争者临界区从不重叠" || bad "竞争者并行或未进入"
+[ "$(stat -c '%d:%i' "$B/run/.service.flock")" = "$_inode" ] && ok "持久 flock inode 从未替换或删除" || bad "flock inode 分叉"
+[ "$(cat "$B/run/.service.lock/pid")" = 999999 ] && ok "旧目录仅作元信息，不执行不安全回收" || bad "旧目录被回收"
 
-echo "== 14 信号中断：停止标记与锁都被 trap 清掉"
-# stop 在临界区里被 TERM 打断：不能留下 .stop-request.<pid> 与 .service.lock，
-# 否则一次「较新的启动」会被残留标记误判成该取消（has_stop_request）。
+echo "== 14 restart 收到 TERM 返回 143，绝不继续 start"
 build
-mkdir -p "$B/bin"
-# 假 stop 走得慢：给 TERM 一个能落在临界区里的窗口
-stub_lib "magpie_main_pid() { return 1; }
-magpie_all_pids() { return 0; }
-magpie_mcp_pids() { return 0; }"
-# 用 restart：它先建 stop-request、拿锁，再 stop；让 stop 阻塞以便中途发信号
-stub_lib "cleanup_legacy_dnsmasq() { sleep 5; }"
-sh "$B/scripts/magpie.service" restart >/dev/null 2>&1 &
-_rp=$!
+stub_lib "pidof() { : > \"$B/stop-entered\"; sleep 0.4; return 1; }"
+printf '#!/bin/sh\n: > "%s/start-sentinel"\nexit 0\n' "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+sh "$B/scripts/magpie.service" restart >"$B/restart.log" 2>&1 & _rp=$!
 KIDS="$KIDS $_rp"
-# 等它确实建出 stop-request 与锁（最多 3 秒）
-i=0
-while [ "$i" -lt 30 ]; do
-  [ -d "$B/run/.service.lock" ] && ls "$B/run"/.stop-request.* >/dev/null 2>&1 && break
-  sleep 0.1; i=$((i + 1))
-done
-[ -d "$B/run/.service.lock" ] && ok "restart 临界区里确实持有锁" || bad "restart 没拿到锁"
+wait_file "$B/stop-entered" || bad "restart 未进入 stop 临界区"
+if lock_available; then bad "restart 临界区没有持锁"; else ok "restart 临界区确实持锁"; fi
 kill -TERM "$_rp" 2>/dev/null
-# 等 trap 跑完
-wait "$_rp" 2>/dev/null
-sleep 0.3
-if [ -d "$B/run/.service.lock" ]; then bad "信号中断后启停锁没被 trap 释放"; else ok "信号中断后启停锁被 trap 释放"; fi
-if ls "$B/run"/.stop-request.* >/dev/null 2>&1; then bad "信号中断后残留 stop-request 标记"; else ok "信号中断后 stop-request 被 trap 清掉"; fi
+wait "$_rp" 2>/dev/null; _rc=$?
+[ "$_rc" -eq 143 ] && ok "TERM 返回 143" || bad "TERM 退出码为 $_rc"
+[ ! -f "$B/start-sentinel" ] && ok "TERM 后绝不启动本体" || bad "释放锁后仍启动了本体"
+lock_available && ok "TERM 后内核锁可立即重取" || bad "TERM 后锁未释放"
+if ls "$B/run"/.stop-request.* >/dev/null 2>&1; then bad "信号中断后残留停止请求"; else ok "信号清理了停止请求"; fi
+
+echo "== 15 open/flock 半初始化窗口被 TERM 打断也不会留下锁"
+for _phase in before after; do
+  build
+  # 包裹真实生产 flock 转发函数，只在系统调用前/返回后精确注入信号。
+  sed -n '/^magpie_flock() {/,/^}/p' "$SRCDIR/scripts/lib.sh" | sed '1s/magpie_flock/kernel_flock/' >> "$B/scripts/lib.sh"
+  stub_lib "magpie_flock() {
+    if [ \"\$1\" = -n ] && [ \"$_phase\" = before ]; then kill -TERM \$\$; fi
+    kernel_flock \"\$@\"; _kernel_rc=\$?
+    if [ \"\$1\" = -n ] && [ \"$_phase\" = after ]; then kill -TERM \$\$; fi
+    return \"\$_kernel_rc\"
+  }"
+  stub_lib "magpie_main_pid() { : > \"$B/start-sentinel\"; return 1; }"
+  sh "$B/scripts/magpie.service" start >"$B/half.log" 2>&1; _rc=$?
+  [ "$_rc" -eq 143 ] && ok "$_phase flock 窗口 TERM 返回 143" || bad "$_phase 窗口未被信号中止：$_rc"
+  lock_available && [ ! -f "$B/start-sentinel" ] && ok "$_phase 半初始化无死锁且未进入 start" || bad "$_phase 半初始化遗留锁或继续运行"
+done
+
+echo "== 16 并发 start/stop：后来的 stop 不越过持锁 start"
+build
+stub_lib "pidof() {
+  [ \"\$1\" = dnsmasq ] || return 1
+  mkdir \"$B/critical\" 2>/dev/null || : > \"$B/overlap\"
+  echo \$\$ >> \"$B/entries\"
+  : > \"$B/entered.\$\$\"
+  while [ ! -f \"$B/release-first\" ]; do sleep 0.05; done
+  rmdir \"$B/critical\" 2>/dev/null || :
+  return 1
+}"
+sh "$B/scripts/magpie.service" start >"$B/start.log" 2>&1 & _sp=$!
+KIDS="$KIDS $_sp"
+wait_file "$B/entered.$_sp" || bad "start 未进入临界区"
+sh "$B/scripts/magpie.service" stop >"$B/stop.log" 2>&1 & _tp=$!
+KIDS="$KIDS $_tp"
+wait_file "$B/run/.stop-request.$_tp" || bad "stop 没写入等待标记"
+sleep 0.2
+[ ! -f "$B/entered.$_tp" ] && ok "stop 在 start 临界区外等待" || bad "stop 越过持锁 start"
+: > "$B/release-first"
+wait "$_sp"; wait "$_tp"; _rc=$?
+[ "$_rc" -eq 0 ] && [ "$(wc -l < "$B/entries")" -eq 2 ] && [ ! -e "$B/overlap" ] && ok "start/stop 串行完成，无临界区重叠" || bad "并发 start/stop 失败或重叠"
+[ -f "$B/run/.user_stopped" ] && lock_available && ok "最终停止意图保留且锁可重取" || bad "停止意图或锁状态错误"
+
+echo "== 17 daemon 不继承锁；控制器被 SIGKILL 也不永久持锁"
+build
+printf '#!/bin/sh\necho $$ > "%s/fake.pid"\nexec sleep 60\n' "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+sh "$B/scripts/magpie.service" start >"$B/start.log" 2>&1 & _ctl=$!
+KIDS="$KIDS $_ctl"
+wait_file "$B/fake.pid" || bad "沙箱 daemon 没有启动"
+_fake=$(cat "$B/fake.pid" 2>/dev/null)
+kill -KILL "$_ctl" 2>/dev/null; wait "$_ctl" 2>/dev/null || :
+# 短命的就绪轮询 sleep 最多还活 0.5 秒；daemon 必须完全没有锁 FD。
+sleep 0.7
+if [ -n "$_fake" ] && kill -0 "$_fake" 2>/dev/null && lock_available; then
+  ok "SIGKILL 控制器后，活 daemon 不会占锁"
+else
+  bad "daemon 继承锁或未存活"
+fi
+if [ -n "$_fake" ] && [ ! -e "/proc/$_fake/fd/9" ]; then ok "daemon 的锁 FD 已关闭"; else bad "daemon 仍继承 FD 9"; fi
+[ -z "$_fake" ] || kill -KILL "$_fake" 2>/dev/null
+
+echo "== 18 新锁路径链接拒绝；缺少 flock 时失败关闭"
+build
+mkdir -p "$B/run"; printf sentinel > "$B/outside"
+ln -s "$B/outside" "$B/run/.service.flock"
+_out=$(sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && [ "$(cat "$B/outside")" = sentinel ] && ok "拒绝 flock 符号链接，不改外部文件" || bad "flock 链接未拒绝：$_out"
+build
+stub_lib 'magpie_pick_flock() { return 1; }'
+_out=$(sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
+case "$_rc:$_out" in 1:*缺少可用的*flock*) ok "没有 flock 时明确失败，不回退目录抢锁" ;; *) bad "缺少 flock 未安全拒绝：$_rc $_out" ;; esac
+
+echo "== 19 等待启停锁时 TERM 退出，不能释放别人的锁或进入 start"
+build
+mkdir -p "$B/run"
+. "$SRCDIR/scripts/lib.sh"
+magpie_pick_flock || exit 1
+exec 7>>"$B/run/.service.flock"
+magpie_flock -n 7 || exit 1
+stub_lib "magpie_main_pid() { : > \"$B/start-sentinel\"; return 1; }"
+sh "$B/scripts/magpie.service" start 7>&- >"$B/wait.log" 2>&1 & _wp=$!
+KIDS="$KIDS $_wp"
+wait_file "/proc/$_wp/fd/9" || bad "start 未打开等待锁 FD"
+kill -TERM "$_wp" 2>/dev/null
+wait "$_wp" 2>/dev/null; _rc=$?
+[ "$_rc" -eq 143 ] && [ ! -f "$B/start-sentinel" ] && ok "等锁时 TERM 返回 143 且不执行 start" || bad "等锁信号处理错误：$_rc"
+if lock_available; then bad "等待者退出释放了别人的锁"; else ok "等待者退出不会解锁当前持有者"; fi
+# 加速轮询而不改变生产锁函数，确认达到有限次数后拒绝进入临界区。
+stub_lib 'sleep() { :; }'
+_out=$(sh "$B/scripts/magpie.service" start 7>&- 2>&1); _rc=$?
+case "$_rc:$_out" in 1:*另一个启停操作仍在进行*) ok "有限轮询耗尽后拒绝启动" ;; *) bad "启停锁没有有界失败：$_rc $_out" ;; esac
+magpie_flock -u 7; exec 7>&-
+lock_available && ok "原持有者退出后锁正常可用" || bad "原持有者释放后仍被卡住"
+
 reap
 
 echo

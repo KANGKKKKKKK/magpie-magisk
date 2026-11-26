@@ -46,7 +46,7 @@ BIN_DIR="$magpie_path/bin"
 BIN="$BIN_DIR/magpie"
 BAK="$BIN_DIR/magpie.bak"
 INFO="$magpie_path/install-info.txt"
-LOCK="$magpie_path/.install.lock"
+LOCK="$magpie_path/.install.flock"
 PENDING="$magpie_path/.install.pending"
 
 # 清单地址：厂商自己的更新端点，与 magpie 本体 `magpie update` 用的是同一个。
@@ -173,36 +173,34 @@ have_timeout() { command -v timeout >/dev/null 2>&1; }
 dl_fetch() {
   _url="$1"; _out="$2"
   pick_downloader || return 127
-  # 放到后台再 wait：shell 要等前台命令结束才会执行 trap，
-  # 大文件下到一半按 Ctrl-C / 管理器被杀时就会干等好几分钟。
-  # wait 是可中断的，信号一到马上就能跑 on_signal。
-  case "$DL_KIND" in
-    wget|busybox)
-      # busybox 是 multicall，后面还要跟子命令 wget；系统 wget 不用。
-      if [ "$DL_KIND" = "busybox" ]; then
-        _wget_wrap="$DL_CMD wget"
-      else
-        _wget_wrap="wget"
-      fi
-      # $_wget_wrap 故意不加引号：busybox 那条是 "busybox wget" 两个词，
-      # 加引号会整体当一个命令名去找。系统 wget 那条只有一个词，分词后等价。
-      # shellcheck disable=SC2086
-      if have_timeout; then
-        timeout "$DL_TOTAL" $_wget_wrap -q -O "$_out" -T "$DL_STALL" "$_url" 2>/dev/null &
-      else
-        $_wget_wrap -q -O "$_out" -T "$DL_STALL" "$_url" 2>/dev/null &
-      fi
-      ;;
-    curl)
-      # --speed-limit/--speed-time 等价于 wget 的 -T：60 秒内平均低于 1 KB/s 就断。
-      # --max-time 才是总上限。
-      "$DL_CMD" -fsSL --connect-timeout "$DL_STALL" \
-        --speed-limit 1024 --speed-time "$DL_STALL" \
-        --max-time "$DL_TOTAL" -o "$_out" "$_url" 2>/dev/null &
-      ;;
-    *) return 127 ;;
-  esac
+  # 后台 wait 可被信号打断。下载进程先关闭安装锁 FD，SIGKILL 安装器也不留锁。
+  DL_STARTING=1
+  (
+    exec 8>&-
+    case "$DL_KIND" in
+      wget|busybox)
+        if [ "$DL_KIND" = busybox ]; then
+          if have_timeout; then
+            exec timeout "$DL_TOTAL" "$DL_CMD" wget -q -O "$_out" -T "$DL_STALL" "$_url"
+          fi
+          exec "$DL_CMD" wget -q -O "$_out" -T "$DL_STALL" "$_url"
+        fi
+        if have_timeout; then
+          exec timeout "$DL_TOTAL" "$DL_CMD" -q -O "$_out" -T "$DL_STALL" "$_url"
+        fi
+        exec "$DL_CMD" -q -O "$_out" -T "$DL_STALL" "$_url"
+        ;;
+      curl)
+        exec "$DL_CMD" -fsSL --connect-timeout "$DL_STALL" \
+          --speed-limit 1024 --speed-time "$DL_STALL" \
+          --max-time "$DL_TOTAL" -o "$_out" "$_url"
+        ;;
+      *) exit 127 ;;
+    esac
+  ) 2>/dev/null &
   DL_PID=$!
+  DL_STARTING=""
+  [ -z "$DL_SIGNAL" ] || on_signal "$DL_SIGNAL"
   wait "$DL_PID"
   _rc=$?
   DL_PID=""
@@ -327,7 +325,7 @@ check_target() {
   done
   # 已有的子路径也不能是链接：否则 bin 指到别处仍会越过目录白名单，
   # 清单临时文件、备份或记录文件的重定向也可能跟随链接写到外面。
-  for _target in "$BIN_DIR" "$BIN" "$BAK" "$INFO" "$LOCK" "$PENDING" \
+  for _target in "$BIN_DIR" "$BIN" "$BAK" "$INFO" "$LOCK" "$magpie_path/.install.lock" "$PENDING" \
                  "$magpie_path/.manifest.tmp" \
                  "$BIN.rejected" "$BIN_DIR/.magpie.new.$$" "$BIN_DIR/.magpie.rollback.$$"; do
     [ ! -L "$_target" ] || die "$_target 是符号链接，出于安全考虑不接受"
@@ -353,53 +351,52 @@ check_space() {
 
 # ---------- 锁定 ----------
 
-# 当前进程是否持有安装锁。release_lock 只释放自己那把，避免误删别人的锁。
-LOCK_HELD=""
-
+# 旧 .install.lock 目录只作诊断信息，不再读取 owner 或自动回收。
+# 8 号 FD 始终由 cleanup_install 无条件解锁并关闭，无 HELD 标志窗口。
 acquire_lock() {
-  mkdir -p "$magpie_path" 2>/dev/null
-  if mkdir "$LOCK" 2>/dev/null; then
-    echo $$ > "$LOCK/pid" 2>/dev/null
-    LOCK_HELD=1
-    return 0
+  if ! command -v magpie_pick_flock >/dev/null 2>&1 || ! magpie_pick_flock; then
+    die "缺少可用的 flock，拒绝不安全地安装（请恢复 Root BusyBox / lib.sh）"
   fi
-  _p=$(cat "$LOCK/pid" 2>/dev/null)
-  if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
-    die "另一个安装正在进行（PID $_p）。等它结束，或删除 $LOCK"
+  mkdir -p "$magpie_path" 2>/dev/null || die "无法创建 $magpie_path"
+  if [ -L "$LOCK" ] || { [ -e "$LOCK" ] && [ ! -f "$LOCK" ]; }; then
+    die "安装锁不是普通文件或是符号链接：$LOCK"
   fi
-  warn "发现过期锁，已清理"
-  # mv 是原子的：只有一个进程能把旧锁挪走，另一个会失败。
-  # 直接 rm -rf 会让两个进程都以为清掉了旧锁，然后各自 mkdir 成功、同时部署。
-  _stale="$LOCK.stale.$$"
-  if mv "$LOCK" "$_stale" 2>/dev/null; then
-    rm -rf "$_stale" 2>/dev/null
-  else
-    # 另一个回收者或新安装者已接手，绝不能删除当前的锁。
-    warn "过期锁已被其他进程接手"
+  exec 8>>"$LOCK"
+  # shellcheck disable=SC3013  # Android ash/mksh 与 Linux dash 均支持 inode 比较
+  if [ -L "$LOCK" ] || [ ! "$LOCK" -ef /proc/self/fd/8 ]; then
+    die "安装锁路径已改变：$LOCK"
   fi
-  mkdir "$LOCK" 2>/dev/null || die "无法获取安装锁 $LOCK"
-  echo $$ > "$LOCK/pid" 2>/dev/null
-  LOCK_HELD=1
-  return 0
+  # 安装采用非阻塞锁，重复点击立即给出可读错误；不依赖 BusyBox 的 -w。
+  magpie_flock -n 8 || die "另一个安装正在进行，或内核 flock 不可用，请稍后重试"
 }
 
-# 幂等：trap 和显式释放都会调它
 release_lock() {
-  [ -n "$LOCK_HELD" ] || return 0
-  LOCK_HELD=""
-  rm -rf "$LOCK" 2>/dev/null
+  magpie_flock -u 8 2>/dev/null || :
+  exec 8>&-
 }
 
-# 正在下载的子进程；收到信号时要一并收掉，免得留下没人管的 wget
 DL_PID=""
+DL_STARTING=""
+DL_SIGNAL=""
 
-# 收到 INT/TERM/HUP：收掉下载、放锁、退出。
-# 原先是 trap 'release_lock' INT TERM —— 只放锁不退出，脚本会继续下载、
-# 继续替换二进制，而锁已经没了，另一个安装可以同时进来。
-on_signal() {
-  [ -n "$DL_PID" ] && kill -9 "$DL_PID" 2>/dev/null
+stop_download() {
+  [ -n "$DL_PID" ] || return 0
+  # TERM 让 timeout 把信号转发给 wget；SIGKILL timeout 会留下下载孤儿。
+  kill -TERM "$DL_PID" 2>/dev/null || :
+  wait "$DL_PID" 2>/dev/null || :
+  DL_PID=""
+}
+
+cleanup_install() {
+  stop_download
   release_lock
-  exit 130
+}
+
+on_signal() {
+  # spawn 与记录 $! 之间信号先记账，PID 一就绪立即退出，不遗留下载进程。
+  if [ -n "$DL_STARTING" ]; then DL_SIGNAL="$1"; return; fi
+  trap '' INT TERM HUP
+  exit "$1"
 }
 
 # ---------- 下载 ----------
@@ -646,8 +643,6 @@ cmd_install() {
 
   mkdir -p "$magpie_path" 2>/dev/null
   acquire_lock
-  trap 'release_lock' EXIT
-  trap 'on_signal' INT TERM HUP
 
   say "取更新清单 ..."
   if ! load_manifest; then
@@ -709,14 +704,19 @@ cmd_install() {
 
 cmd_rollback() {
   acquire_lock
-  trap 'release_lock' EXIT
-  trap 'on_signal' INT TERM HUP
   rollback
   release_lock
   return 0
 }
 
 # ---------- 入口 ----------
+
+# 先装 trap 再触碰锁；check/plan 的清单下载也必须能被信号取消。
+exec 8>&-  # 预留本脚本的 FD，不解锁调用者可能传入的同号 FD。
+trap cleanup_install EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
 
 # 统一放在分派之前：check / plan 也会创建目录和清单临时文件，rollback 会
 # 加锁并覆盖本体；status 会执行本体 --version。它们都不能绕过路径校验。

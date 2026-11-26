@@ -3,6 +3,46 @@
 # 被 magpie.service / status.sh / action.sh / doctor.sh / service.sh 共用。
 # 只定义函数，不做任何动作。
 
+# ---------- 内核文件锁 ----------
+# 只选择支持 FD flock 的实现；没有 flock 时调用方必须失败关闭。
+# 锁文件必须持久保留，绝不能 unlink/替换，否则等待者会锁住不同 inode。
+magpie_pick_flock() {
+  MAGPIE_FLOCK_CMD=""; MAGPIE_FLOCK_BUSYBOX=""
+  if command -v flock >/dev/null 2>&1; then
+    MAGPIE_FLOCK_CMD=$(command -v flock)
+    return 0
+  fi
+  for _flock_bb in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
+    if [ -x "$_flock_bb" ] && "$_flock_bb" flock --help >/dev/null 2>&1; then
+      MAGPIE_FLOCK_CMD="$_flock_bb"; MAGPIE_FLOCK_BUSYBOX=1
+      return 0
+    fi
+  done
+  return 1
+}
+
+magpie_flock() {
+  [ -n "${MAGPIE_FLOCK_CMD:-}" ] || return 1
+  _flock_fd=${2:-}
+  [ -z "${MAGPIE_FLOCK_BUSYBOX:-}" ] || set -- flock "$@"
+  # Android mksh 的 exec N>>file 默认 CLOEXEC，函数调用处 N>&N 也不够；
+  # 必须在真正外部 flock 命令上重定向 FD。只支持 shell 的单数字 FD，
+  # 用明确分支而不是对调用参数 eval，避免把锁操作变成代码执行入口。
+  case "$_flock_fd" in
+    0) "$MAGPIE_FLOCK_CMD" "$@" 0>&0 ;;
+    1) "$MAGPIE_FLOCK_CMD" "$@" 1>&1 ;;
+    2) "$MAGPIE_FLOCK_CMD" "$@" 2>&2 ;;
+    3) "$MAGPIE_FLOCK_CMD" "$@" 3>&3 ;;
+    4) "$MAGPIE_FLOCK_CMD" "$@" 4>&4 ;;
+    5) "$MAGPIE_FLOCK_CMD" "$@" 5>&5 ;;
+    6) "$MAGPIE_FLOCK_CMD" "$@" 6>&6 ;;
+    7) "$MAGPIE_FLOCK_CMD" "$@" 7>&7 ;;
+    8) "$MAGPIE_FLOCK_CMD" "$@" 8>&8 ;;
+    9) "$MAGPIE_FLOCK_CMD" "$@" 9>&9 ;;
+    *) return 2 ;;
+  esac
+}
+
 # ---------- 监听地址 ----------
 #
 # 配置里的 MAGPIE_ADDR / MAGPIE_WEB_ADDR 形如 "host:port"。

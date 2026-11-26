@@ -46,6 +46,21 @@ fresh() {
     "$BASE" "$BASE" >> "$BASE/scripts/lib.sh"
 }
 run() { sh "$BASE/scripts/install.sh" "$@" 2>&1; }
+wait_file() {
+  _wait_i=0
+  while [ "$_wait_i" -lt 100 ]; do
+    [ -f "$1" ] && return 0
+    sleep 0.05; _wait_i=$((_wait_i + 1))
+  done
+  return 1
+}
+lock_available() (
+  . "$HERE/../scripts/lib.sh"
+  magpie_pick_flock || exit 1
+  exec 7>>"$BASE/.install.flock"
+  magpie_flock -n 7
+)
+
 
 export MAGPIE_MANIFEST_URL="$SRV/manifest.json"
 export MAGPIE_CONFIRM_WINDOW=600
@@ -79,7 +94,7 @@ v=$(sh "$BASE/bin/magpie" --version 2>/dev/null)
 [ "$v" = "magpie 9.9.9" ] && ok "落盘内容正确" || bad "落盘内容不对：$v"
 [ -f "$BASE/install-info.txt" ] && ok "记录了安装信息" || bad "没记录安装信息"
 [ -f "$BASE/.install.pending" ] && bad "确认标记应已清除" || ok "确认标记已清除"
-[ -d "$BASE/.install.lock" ] && bad "锁没释放" || ok "锁已释放"
+lock_available && [ -f "$BASE/.install.flock" ] && ok "锁已释放，持久文件保留" || bad "锁没释放或锁文件丢失"
 
 step "5 已就绪时默认不覆盖"
 before=$(sha256sum "$BASE/bin/magpie" | awk '{print $1}')
@@ -143,20 +158,22 @@ case "$out" in *"取不到更新清单"*) ok "install 提示清晰" ;; *) bad "�
 out=$(MAGPIE_MANIFEST_URL="$SRV/nope.json" run plan)
 case "$out" in *"取不到更新清单"*) ok "plan 同样清晰" ;; *) bad "plan 提示不清：$out" ;; esac
 
-step "14 并发安装被锁拦住"
+step "14 并发安装被真实内核锁拦住"
 fresh
-mkdir -p "$BASE/.install.lock"
-echo $$ > "$BASE/.install.lock/pid"
-out=$(run install --yes)
-case "$out" in *"另一个安装正在进行"*) ok "并发放行被拦" ;; *) bad "没有拦住并发：$out" ;; esac
-rm -rf "$BASE/.install.lock"
+. "$HERE/../scripts/lib.sh"
+magpie_pick_flock || exit 1
+exec 7>>"$BASE/.install.flock"
+magpie_flock -n 7 || exit 1
+out=$(run install --yes 7>&-)
+case "$out" in *"另一个安装正在进行"*) ok "并发安装立即拒绝，不等待下载" ;; *) bad "没有拦住并发：$out" ;; esac
+magpie_flock -u 7; exec 7>&-
 
-step "15 过期锁能被清理"
+step "15 遗留过期目录不参与新锁的所有权判断"
 mkdir -p "$BASE/.install.lock"
 echo 999999 > "$BASE/.install.lock/pid"
 out=$(run install --yes)
-case "$out" in *"过期锁"*) ok "识别并清理了过期锁" ;; *) bad "没有处理过期锁：$out" ;; esac
-case "$out" in *"已安装 magpie 9.9.9"*) ok "清理后安装成功" ;; *) bad "清理后仍失败" ;; esac
+[ "$(cat "$BASE/.install.lock/pid")" = 999999 ] && ok "旧目录保持原样，不做 ABA 回收" || bad "旧目录被改动"
+case "$out" in *"已安装 magpie 9.9.9"*) ok "遗留目录不阻止新内核锁下的安装" ;; *) bad "安装失败：$out" ;; esac
 
 step "16 找不到下载器时的行为"
 fresh
@@ -181,37 +198,30 @@ else
   esac
 fi
 
-step "17 收到 TERM：先释放锁再退出，不继续安装"
-if command -v python3 >/dev/null 2>&1; then
-  fresh
-  # 一个只接受连接、从不应答的服务器：把清单下载卡住
-  python3 -c 'import socket,time
-s=socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 8898))
-s.listen(1)
-c, _ = s.accept()
-time.sleep(120)' >/dev/null 2>&1 &
-  HANG=$!
-  sleep 0.5
-  MAGPIE_MANIFEST_URL="http://127.0.0.1:8898/manifest.json" \
-    sh "$BASE/scripts/install.sh" install --yes >/dev/null 2>&1 &
-  INS=$!
-  sleep 1.5
-  kill -TERM "$INS" 2>/dev/null
-  sleep 1.5
-  if kill -0 "$INS" 2>/dev/null; then
-    bad "收到 TERM 后仍在继续跑"
-    kill -9 "$INS" 2>/dev/null
-  else
-    ok "收到 TERM 后立即退出"
-  fi
-  [ -d "$BASE/.install.lock" ] && bad "锁没释放，别的安装会同时进来" || ok "锁已释放"
-  [ -f "$BASE/bin/magpie" ] && bad "终止后仍落了文件" || ok "没有落盘"
-  kill -9 "$HANG" 2>/dev/null
-else
-  echo "  SKIP 没有 python3，跳过挂起服务器用例"
+step "17 TERM 退出 143：杀掉下载进程并释放锁，不继续部署"
+for _download_kind in curl wget; do
+fresh
+# 确定性阻塞下载桩：自身 exec 成 sleep，不依赖端口、网络或固定 sleep 猜时序。
+printf '#!%s\necho $$ > "%s/download.pid"\n: > "%s/download-entered"\nexec sleep 120\n' \
+  "$(command -v sh)" "$BASE" "$BASE" > "$BASE/slow-download"
+chmod 755 "$BASE/slow-download"
+if [ "$_download_kind" = wget ]; then
+  # 覆盖选择器，不覆盖 dl_fetch：同时回归 timeout -> wget 的信号转发。
+  printf '\npick_downloader() { DL_KIND=wget; DL_CMD="%s/slow-download"; }\n' "$BASE" >> "$BASE/scripts/lib.sh"
 fi
+MAGPIE_DL="$BASE/slow-download" sh "$BASE/scripts/install.sh" install --yes >"$BASE/signal.log" 2>&1 & INS=$!
+wait_file "$BASE/download-entered" || bad "安装器未进入下载"
+_download=$(cat "$BASE/download.pid" 2>/dev/null)
+if [ -n "$_download" ] && [ ! -e "/proc/$_download/fd/8" ]; then ok "下载进程未继承安装锁 FD"; else bad "下载进程继承了锁 FD"; fi
+if lock_available; then bad "下载时未持有安装锁"; else ok "下载中确实持锁"; fi
+kill -TERM "$INS" 2>/dev/null
+wait "$INS" 2>/dev/null; _rc=$?
+[ "$_rc" -eq 143 ] && ok "TERM 返回 143" || bad "TERM 返回 $_rc"
+lock_available && ok "信号退出后锁可立即重取" || bad "信号退出后仍持锁"
+if [ -n "$_download" ] && ! kill -0 "$_download" 2>/dev/null; then ok "$_download_kind 下载进程被终止并回收"; else bad "$_download_kind 下载进程仍存活"; fi
+[ -f "$BASE/bin/magpie" ] && bad "终止后仍部署本体" || ok "终止后没有部署"
+[ -z "$_download" ] || kill -KILL "$_download" 2>/dev/null || :
+done
 
 rm -rf "$BASE"
 echo
@@ -249,7 +259,7 @@ fi
 rm -rf "$_outside"
 
 step "19 符号链接与缺少公共校验均失败关闭"
-for _link in bin bin/magpie bin/magpie.bak bin/magpie.rejected install-info.txt .install.lock .install.pending .manifest.tmp; do
+for _link in bin bin/magpie bin/magpie.bak bin/magpie.rejected install-info.txt .install.lock .install.flock .install.pending .manifest.tmp; do
   fresh
   _outside="$BASE-outside"; rm -rf "$_outside"; mkdir -p "$_outside" "$BASE/bin"
   [ "$_link" != bin ] || rmdir "$BASE/bin"
@@ -274,45 +284,47 @@ fi
 rm -rf "$BASE"
 
 
-step "20 过期锁回收失败不删除其他进程的当前锁"
-fresh
-mkdir -p "$BASE/.install.lock"
-echo $$ > "$BASE/.install.lock/pid"
-# 先让原锁看似过期，再让 mv 失败；当前锁必须在失败后原样保留。
-_out=$(
-  LOCK="$BASE/.install.lock"; magpie_path="$BASE"; LOCK_HELD=""
-  warn() { :; }; die() { return 1; }
-  mv() { return 1; }
-  . /dev/stdin <<'FUNCS'
-acquire_lock() {
-  mkdir -p "$magpie_path" 2>/dev/null
-  if mkdir "$LOCK" 2>/dev/null; then
-    echo $$ > "$LOCK/pid" 2>/dev/null
-    LOCK_HELD=1
-    return 0
-  fi
-  _p=$(cat "$LOCK/pid" 2>/dev/null)
-  if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
-    die "另一个安装正在进行（PID $_p）。等它结束，或删除 $LOCK"
-  fi
-  warn "发现过期锁，已清理"
-  # mv 是原子的：只有一个进程能把旧锁挪走，另一个会失败。
-  # 直接 rm -rf 会让两个进程都以为清掉了旧锁，然后各自 mkdir 成功、同时部署。
-  _stale="$LOCK.stale.$$"
-  if mv "$LOCK" "$_stale" 2>/dev/null; then
-    rm -rf "$_stale" 2>/dev/null
-  else
-    # 另一个回收者或新安装者已接手，绝不能删除当前的锁。
-    warn "过期锁已被其他进程接手"
-  fi
-  mkdir "$LOCK" 2>/dev/null || die "无法获取安装锁 $LOCK"
-  echo $$ > "$LOCK/pid" 2>/dev/null
-  LOCK_HELD=1
-  return 0
-}
-FUNCS
-) 2>&1
-[ "$(cat "$BASE/.install.lock/pid")" = "$$" ] && ok "mv 失败未 rm 当前锁" || bad "当前锁被误删：$_out"
+step "20 两个 stale/空 owner 安装者不得并行或抢走当前锁"
+for _legacy in stale empty; do
+  fresh
+  mkdir -p "$BASE/.install.lock"
+  [ "$_legacy" != stale ] || echo 999999 > "$BASE/.install.lock/pid"
+  : > "$BASE/.install.flock"
+  _inode=$(stat -c '%d:%i' "$BASE/.install.flock")
+  {
+    printf '. "%s/scripts/lib.sh"\n' "$BASE"
+    # 直接从生产脚本提取当前函数；不存在测试专用的锁实现。
+    sed -n '/^acquire_lock() {/,/^}/p; /^release_lock() {/,/^}/p' "$SRC"
+    cat <<'WORKER'
+magpie_path=$1; LOCK="$1/.install.flock"
+die() { echo "$*" >&2; exit 1; }
+trap ': > "$magpie_path/attempt.$2"; release_lock' EXIT
+trap 'exit 143' TERM
+: > "$magpie_path/ready.$2"
+while [ ! -f "$magpie_path/go" ]; do sleep 0.01; done
+acquire_lock
+mkdir "$magpie_path/critical" 2>/dev/null || : > "$magpie_path/overlap"
+echo "$2" >> "$magpie_path/entries"
+: > "$magpie_path/attempt.$2"
+# 胜者持锁到另一个竞争者确实尝试完毕，避免时序碰巧串行的假通过。
+_i=0
+while [ "$_i" -lt 100 ]; do
+  [ -f "$magpie_path/attempt.a" ] && [ -f "$magpie_path/attempt.b" ] && break
+  sleep 0.02; _i=$((_i + 1))
+done
+[ "$_i" -lt 100 ] || exit 2
+rmdir "$magpie_path/critical" 2>/dev/null || :
+WORKER
+  } > "$BASE/lock-worker.sh"
+  sh "$BASE/lock-worker.sh" "$BASE" a >"$BASE/a.log" 2>&1 & _a=$!
+  sh "$BASE/lock-worker.sh" "$BASE" b >"$BASE/b.log" 2>&1 & _b=$!
+  wait_file "$BASE/ready.a" && wait_file "$BASE/ready.b" || bad "安装锁竞争者未就绪"
+  : > "$BASE/go"
+  wait "$_a"; _ar=$?; wait "$_b"; _br=$?
+  case "$_ar:$_br" in 0:1|1:0) ok "$_legacy owner：恰好一个安装者获锁" ;; *) bad "$_legacy owner：返回码 $_ar:$_br" ;; esac
+  [ ! -e "$BASE/overlap" ] && [ "$(wc -l < "$BASE/entries")" -eq 1 ] && ok "$_legacy owner：无并行临界区" || bad "$_legacy owner：锁被同时持有"
+  [ "$(stat -c '%d:%i' "$BASE/.install.flock")" = "$_inode" ] && lock_available && ok "$_legacy owner：同一持久 inode，结束后可重取" || bad "$_legacy owner：锁文件被换或未释放"
+done
 
 step "21 回退通过同目录临时文件原子替换"
 fresh
@@ -322,27 +334,34 @@ printf backup > "$BASE/bin/magpie.bak"
 _out=$(
   BIN_DIR="$BASE/bin"; BIN="$BASE/bin/magpie"; BAK="$BASE/bin/magpie.bak"
   say() { :; }; die() { return 1; }; probe_version() { echo test; }
-  . /dev/stdin <<'FUNCS'
-rollback() {
-  [ -f "$BAK" ] || die "没有可回退的备份 $BAK"
-  say "回退到备份 ..."
-  _rollback_tmp="$BIN_DIR/.magpie.rollback.$$"
-  rm -f "$_rollback_tmp" 2>/dev/null
-  cp -f "$BAK" "$_rollback_tmp" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
-  chmod 755 "$_rollback_tmp" 2>/dev/null
-  chown 0:0 "$_rollback_tmp" 2>/dev/null
-  mv -f "$_rollback_tmp" "$BIN" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
-  chmod 755 "$BIN" 2>/dev/null
-  chown 0:0 "$BIN" 2>/dev/null
-  _v=$(probe_version "$BIN")
-  say "已回退${_v:+（版本 $_v）}"
-  return 0
-}
-FUNCS
+  eval "$(sed -n '/^rollback() {/,/^}/p' "$SRC")"
   rollback
 )
 [ "$(cat "$BASE/bin/magpie")" = backup ] && ok "rollback 原子路径成功" || bad "rollback 未恢复备份：$_out"
 [ -z "$(find "$BASE/bin" -name '.magpie.rollback.*' -print)" ] && ok "rollback 不留临时文件" || bad "rollback 留下临时文件"
+
+step "22 安装锁 open/flock 半初始化窗口收到 TERM 不会残留锁"
+for _phase in before after; do
+  fresh
+  sed -n '/^magpie_flock() {/,/^}/p' "$HERE/../scripts/lib.sh" | sed '1s/magpie_flock/kernel_flock/' >> "$BASE/scripts/lib.sh"
+  cat >> "$BASE/scripts/lib.sh" <<EOF
+magpie_flock() {
+  if [ "\$1" = -n ] && [ "$_phase" = before ]; then kill -TERM \$\$; fi
+  kernel_flock "\$@"; _kernel_rc=\$?
+  if [ "\$1" = -n ] && [ "$_phase" = after ]; then kill -TERM \$\$; fi
+  return "\$_kernel_rc"
+}
+EOF
+  run install --yes > "$BASE/half.log"; _rc=$?
+  [ "$_rc" -eq 143 ] && ok "$_phase flock 窗口 TERM 返回 143" || bad "$_phase TERM 返回 $_rc"
+  lock_available && [ ! -e "$BASE/bin/magpie" ] && ok "$_phase 半初始化可重取锁且未部署" || bad "$_phase 半初始化死锁或继续部署"
+done
+
+step "23 缺少 flock 时失败关闭"
+fresh
+printf '\nmagpie_pick_flock() { return 1; }\n' >> "$BASE/scripts/lib.sh"
+_out=$(run install --yes); _rc=$?
+case "$_rc:$_out" in 1:*缺少可用的*flock*) ok "没有 flock 时不回退不安全目录锁" ;; *) bad "无 flock 未明确失败：$_rc $_out" ;; esac
 
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

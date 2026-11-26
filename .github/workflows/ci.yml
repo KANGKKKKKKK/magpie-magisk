@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (Node 20，固定 SHA 防供应链篡改)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24，固定 SHA
 
       - name: 全部公共测试（与 Release 同一份）
         # 语法检查 + shellcheck + 断言计数 + JVM 单测 + shell 行为套件。
@@ -45,10 +45,8 @@ jobs:
               "platforms;android-34" >/dev/null 2>&1 || true
           fi
           if [ ! -f "$JAR" ]; then
-            # 装不上时不要误报失败：这一步是加分项，不是发布门槛
-            # （release.yml 打包前会真正构建一次并验签）。
-            echo "::warning::拿不到 android-34，跳过编译检查"
-            exit 0
+            echo "::error::拿不到 android-34，无法确认磁贴能编译"
+            exit 1
           fi
           W=$(mktemp -d)
           # aapt -J 不会自己创建目标目录，缺了会报
@@ -57,10 +55,12 @@ jobs:
           mkdir -p "$W/gen" "$W/classes"
           aapt package -f -m -J "$W/gen" -M tile-app/AndroidManifest.xml \
             -S tile-app/res -I "$JAR"
+          test -s "$W/gen/com/ruin/magpie/tile/R.java"
           # 源码注释是中文，不指定编码时平台默认非 UTF-8 就会一片
           # "unmappable character"。
           # 这里不用 `javac ... | grep ...`：管道会让 $? 变成 grep 的退出码，
           # 编译失败会被当成成功。先落文件、查退出码、再过滤。
+          # shellcheck disable=SC2046  # Java 源文件路径不含空格，刻意展开为 javac 参数
           javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$JAR" \
             -d "$W/classes" \
             $(find tile-app/src "$W/gen" -name '*.java') > "$W/javac.log" 2>&1

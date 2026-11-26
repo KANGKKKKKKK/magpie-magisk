@@ -762,14 +762,16 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 57 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 77 条
 sh tests/test-watchdog.sh                                 # 看门狗 13 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 43 条
-sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 41 条
+sh tests/test-service.sh                                  # 进程、目录、状态输出、会话脱离 57 条
 sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/磁贴入口 237 条
 ```
 
-五个套件共 391 条断言（57 + 13 + 43 + 41 + 237），另有 47 条 JVM 用例（磁贴状态判定 13、自查结论 28、Shell 进程回归 6）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+五个套件共 427 条断言（77 + 13 + 43 + 57 + 237），另有 47 条 JVM 用例（磁贴状态判定 13、自查结论 28、Shell 进程回归 6）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+
+`sh tests/run-all.sh` 还运行 33 个发布 ZIP/磁贴构建回归用例。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 

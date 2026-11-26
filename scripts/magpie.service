@@ -109,66 +109,38 @@ clean_logs() { rotate_log "$LOG"; }
 DNS_SERVERS="$MAGPIE_DNS"
 RESOLV_CONF="$RUN/resolv.conf"
 USER_STOPPED="$RUN/.user_stopped"
-SERVICE_LOCK="$RUN/.service.lock"
-SERVICE_LOCK_HELD=""
+# 与旧目录锁分开；旧 .service.lock 仅为遗留诊断元信息，不读取或回收。
+SERVICE_LOCK="$RUN/.service.flock"
 
-# 启停操作串行执行。停止请求先落盘再等待锁：即使较早的 start 仍在运行，
-# 它也不会把较新的停止意图清掉；stop 获得锁后会做最终收尾。
-
-# /proc/<pid>/starttime 是「这次启动的实例号」，PID 复用后一定会变。
-# 与锁文件里记的 pid 一起比对，能把「PID 恰好被复用」误判成「锁主还活着」
-# 的窗口压到最低（TOCTOU）。
-proc_starttime() {
-  [ -r "/proc/$1/stat" ] || return 1
-  # comm 里可能含空格和右括号（如 ")(worker)"），按最后一个 ')' 切，第 22 列才是 starttime
-  _stat=$(sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null)
-  # shellcheck disable=SC2086  # 故意分词：把 /proc/stat 的字段按空白拆成位置参数
-  set -- $_stat
-  # 去掉前 19 个字段（state..startstack），第 20 个就是原第 22 列 starttime
-  [ "$#" -ge 20 ] || return 1
-  shift 19
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  echo "$1"
-}
-
+# 内核锁不依赖 owner/PID，也没有 mkdir -> HELD 的半初始化窗口。
+# 9 号 FD 在打开前已经有 EXIT trap 兜底，释放时无条件 unlock + close。
 acquire_service_lock() {
-  _i=0
-  while ! mkdir "$SERVICE_LOCK" 2>/dev/null; do
-    _owner=$(cat "$SERVICE_LOCK/pid" 2>/dev/null)
-    _ost=$(cat "$SERVICE_LOCK/starttime" 2>/dev/null)
-    case "$_owner" in ''|*[!0-9]*) _owner="" ;; esac
-    case "$_ost"   in ''|*[!0-9]*) _ost=""   ;; esac
-    _stale=""
-    if [ -z "$_owner" ]; then
-      # 读不到 owner：不是「没有锁主」，是锁目录建了一半。
-      # 交给下一次循环重读；反复读不到就按超时处理，绝不当成「没人」硬抢。
-      :
-    elif ! kill -0 "$_owner" 2>/dev/null; then
-      _stale=1                      # 进程已死
-    elif [ -n "$_ost" ]; then
-      _nowst=$(proc_starttime "$_owner" 2>/dev/null)
-      if [ -n "$_nowst" ] && [ "$_nowst" != "$_ost" ]; then
-        _stale=1                    # starttime 对不上：PID 已被复用
-      fi
-    fi
-    if [ -n "$_stale" ]; then
-      _s="$SERVICE_LOCK.stale.$$"
-      mv "$SERVICE_LOCK" "$_s" 2>/dev/null && rm -rf "$_s" 2>/dev/null
-      continue
-    fi
-    [ "$_i" -lt 150 ] || { log Error "另一个启停操作仍在进行，请稍后重试"; return 1; }
-    sleep 0.1; _i=$((_i + 1))
+  if ! command -v magpie_pick_flock >/dev/null 2>&1 || ! magpie_pick_flock; then
+    log Error "缺少可用的 flock，拒绝不安全地执行启停（请恢复 Root BusyBox / lib.sh）"
+    return 1
+  fi
+  if [ -L "$RUN" ] || [ -L "$SERVICE_LOCK" ] ||
+     { [ -e "$SERVICE_LOCK" ] && [ ! -f "$SERVICE_LOCK" ]; }; then
+    log Error "启停锁路径不是普通文件或是符号链接：$SERVICE_LOCK"
+    return 1
+  fi
+  exec 9>>"$SERVICE_LOCK"
+  # 拒绝检查与 open 之间被换掉的路径；父目录须为可信的私有目录。
+  # shellcheck disable=SC3013  # Android ash/mksh 与 Linux dash 均支持 inode 比较
+  if [ -L "$SERVICE_LOCK" ] || [ ! "$SERVICE_LOCK" -ef /proc/self/fd/9 ]; then
+    log Error "启停锁路径已改变：$SERVICE_LOCK"
+    return 1
+  fi
+  _lock_i=0
+  until magpie_flock -n 9; do
+    [ "$_lock_i" -lt 150 ] || { log Error "另一个启停操作仍在进行，或内核 flock 不可用，请稍后重试"; return 1; }
+    sleep 0.1; _lock_i=$((_lock_i + 1))
   done
-  # 先落盘自己的实例号再记 pid：读方拿到 pid 时 starttime 必然已可核对，
-  # 不会出现「pid 在、starttime 还没写」的中间态被误判成新锁主。
-  proc_starttime $$ > "$SERVICE_LOCK/starttime" 2>/dev/null
-  echo $$ > "$SERVICE_LOCK/pid" 2>/dev/null
-  SERVICE_LOCK_HELD=1
 }
 release_service_lock() {
-  [ -n "$SERVICE_LOCK_HELD" ] || return 0
-  SERVICE_LOCK_HELD=""
-  rm -rf "$SERVICE_LOCK" 2>/dev/null
+  # 即使信号落在 open/flock 与下一条 shell 语句之间，也不能漏掉 FD。
+  magpie_flock -u 9 2>/dev/null || :
+  exec 9>&-
 }
 has_stop_request() {
   for _r in "$RUN"/.stop-request.*; do
@@ -439,7 +411,7 @@ start() {
   _new_session=""
   if command -v setsid >/dev/null 2>&1; then _new_session="setsid"; fi
   # shellcheck disable=SC2086  # $_new_session 要么空、要么是两个词，故意分词
-  ( cd "$magpie_path/data" && exec $_new_session "$BIN" serve --web="$WEB_HOST" ) >>"$LOG" 2>&1 &
+  ( exec 9>&-; cd "$magpie_path/data" && exec $_new_session "$BIN" serve --web="$WEB_HOST" ) >>"$LOG" 2>&1 &
   _web_url_tmp="$RUN/.web.url.$$"
   ( umask 077; printf '%s\n' "$WEB_URL" > "$_web_url_tmp" ) 2>/dev/null && \
     mv -f "$_web_url_tmp" "$RUN/web.url" 2>/dev/null
@@ -524,22 +496,28 @@ cleanup_lifecycle() {
   STOP_REQUEST_FILE=""
 }
 
+# 信号处理只退出，由 EXIT 统一清理；绝不释放锁后继续临界区。
+# 必须先装 trap，再建停止标记或打开锁 FD。
+exec 9>&-  # 预留本脚本的 FD，不解锁调用者可能传入的同号 FD。
+trap cleanup_lifecycle EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 case "$1" in
   # 退出码要带出 start 的结果，否则失败也返回 0
   start)
-    acquire_service_lock || exit 1; trap cleanup_lifecycle EXIT INT TERM HUP
+    acquire_service_lock || exit 1
     start; _rc=$?; sync_status; exit $_rc ;;
   stop)
     : > "$USER_STOPPED" 2>/dev/null
     STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
-    acquire_service_lock || { _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; exit $_rc; }
-    trap cleanup_lifecycle EXIT INT TERM HUP
+    acquire_service_lock || { _rc=$?; exit $_rc; }
     stop; _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; sync_status; exit $_rc ;;
   restart)
     : > "$USER_STOPPED" 2>/dev/null
     STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
-    acquire_service_lock || { _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; exit $_rc; }
-    trap cleanup_lifecycle EXIT INT TERM HUP
+    acquire_service_lock || { _rc=$?; exit $_rc; }
     stop; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; start; _rc=$?; sync_status; exit $_rc ;;
   status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
 
@@ -548,7 +526,7 @@ case "$1" in
   # start() 会清掉那个标记。
   # 输出一行结果，方便调用方（磁贴、Tasker）直接展示。
   toggle)
-    acquire_service_lock || exit 1; trap cleanup_lifecycle EXIT INT TERM HUP
+    acquire_service_lock || exit 1
     if pid=$(running); then
       STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
       stop

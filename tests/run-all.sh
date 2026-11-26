@@ -14,8 +14,25 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 cd "$ROOT"
 
+# 所有本轮临时产物都归一个私有目录；只回收本脚本启动的夹具服务 PID。
+W=$(mktemp -d)
+SRV_PID=
+cleanup() {
+  if [ -n "$SRV_PID" ]; then
+    kill "$SRV_PID" 2>/dev/null || true
+    wait "$SRV_PID" 2>/dev/null || true
+  fi
+  rm -rf "$W"
+}
+trap cleanup EXIT
+# 信号只负责退出，EXIT 统一清理，不能清理后又继续执行后续测试。
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 echo "== 1 语法检查"
-for f in service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh tests/*.sh; do
+for f in service.sh action.sh uninstall.sh customize.sh build.sh tile-app/build.sh \
+  scripts/magpie.service scripts/*.sh scripts/ci/*.sh tests/*.sh; do
   sh -n "$f"
 done
 echo "语法检查通过"
@@ -25,7 +42,8 @@ echo "== 2 shellcheck（只查生产脚本）"
 # 只查生产脚本：测试文件里大量 `a && b || c` 是刻意写法，查出来全是风格噪音。
 # SC1090/SC1091：动态 source（先判断 lib.sh 在不在），刻意如此。
 shellcheck -s sh -e SC1090,SC1091 \
-  service.sh action.sh uninstall.sh customize.sh scripts/magpie.service scripts/*.sh
+  service.sh action.sh uninstall.sh customize.sh build.sh tile-app/build.sh \
+  scripts/magpie.service scripts/*.sh scripts/ci/*.sh
 echo "shellcheck 通过"
 
 echo
@@ -34,17 +52,17 @@ sh tests/check-counts.sh
 
 echo
 echo "== 4 磁贴状态判定 / 自查 / Shell 执行（纯 JVM，不依赖 Android SDK）"
-W=$(mktemp -d)
-javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W"
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W" ClassifyTest
+mkdir -p "$W/classify" "$W/self-check"
+javac -encoding UTF-8 tests/jvm/ClassifyTest.java -d "$W/classify"
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W/classify" ClassifyTest
 
-W2=$(mktemp -d)
+W2=$W/self-check
 javac -encoding UTF-8 tile-app/src/com/ruin/magpie/tile/SelfCheck.java \
   tests/jvm/SelfCheckTest.java -d "$W2"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$W2" \
   com.ruin.magpie.tile.SelfCheckTest
 
-W3=$(mktemp -d)
+W3=$W/shell-jvm
 mkdir -p "$W3/stubs/android/os" "$W3/classes"
 cat > "$W3/stubs/android/os/Looper.java" <<'JAVA'
 package android.os; public class Looper { public static Looper getMainLooper() { return new Looper(); } }
@@ -58,17 +76,41 @@ java -cp "$W3/classes" com.ruin.magpie.tile.ShellTest
 
 echo
 echo "== 5 shell 行为套件（夹具 + 静态服务）"
-python3 tests/make-fixtures.py /tmp/fx
-( cd /tmp/fx && exec python3 -m http.server 8899 --bind 127.0.0.1 ) &
+python3 tests/make-fixtures.py "$W/fixtures"
+# 端口保留 8899 与历史夹具兼容，但绝不清理占用端口的别的进程。
+# 只有本轮服务成功 bind 后才写 ready，避免误用其他进程提供的 HTTP 服务。
+python3 - "$W/fixtures" "$W/server.ready" >"$W/server.log" 2>&1 <<'PY' &
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import sys
+handler = partial(SimpleHTTPRequestHandler, directory=sys.argv[1])
+with ThreadingHTTPServer(("127.0.0.1", 8899), handler) as server:
+    server.daemon_threads = True
+    Path(sys.argv[2]).touch()
+    server.serve_forever()
+PY
 SRV_PID=$!
-trap 'kill "$SRV_PID" 2>/dev/null || true' EXIT
-sleep 1
+_tries=0
+while [ ! -f "$W/server.ready" ]; do
+  if ! kill -0 "$SRV_PID" 2>/dev/null || [ "$_tries" -ge 50 ]; then
+    cat "$W/server.log" >&2
+    echo "夹具服务未就绪（端口 8899 可能已被占用），拒绝继续" >&2
+    exit 1
+  fi
+  _tries=$((_tries + 1))
+  sleep 0.1
+done
 
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 sh tests/test-watchdog.sh
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
 sh tests/test-service.sh
 sh tests/test-lib.sh
+
+echo
+echo "== 6 Release ZIP / tile build 回归（独立计数，不加入原五套 Shell 断言）"
+python3 tests/test-release-zip.py
 
 echo
 echo "全部公共测试通过"
