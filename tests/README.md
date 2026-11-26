@@ -188,3 +188,9 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 - 信号用例依赖 `python3` 起一个只连不应答的服务器；没有 `python3` 的环境会跳过这一条。
 - 安装器用例在 x86_64 的 CI 上靠 `MAGPIE_ALLOW_ANY_ARCH=1` 绕过架构闸门（闸门本身
   只在真机上被验证过）；被绕过的只是 `uname -m` 那一句，其他逻辑照常测。
+
+## 发布中断恢复
+
+正式发布不覆盖任何已有资产。若 Actions 已上传草稿但尚未公开，在 `main` 手动运行 `release`，指定原 tag 并开启 `finalize_draft`：仅下载、验签和核对来源 commit，全部通过后才公开原草稿，不重建、不上传。若正式 Release 已成功、只是更新通道同步失败，则改用 `recovery_sync_only`，只修复 `update.json`。两种模式不能同时开启；缺少新校验清单或磁贴 APK 的历史版本（如 v1.2.4）不支持此恢复流程。
+
+草稿元数据必须从认证的 Release 列表/ID 取得，不能依赖只按 tag 读取的端点。实际中断恢复验证也必须核对资产 ID 与摘要未改变。

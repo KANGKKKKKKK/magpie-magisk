@@ -17,6 +17,10 @@ on:
         description: '正式发布后同步管理器更新通道'
         type: boolean
         default: true
+      finalize_draft:
+        description: '仅核验并发布已有 draft（不重建、不覆盖资产）'
+        type: boolean
+        default: false
       recovery_sync_only:
         description: '仅恢复已通过新签名/校验门槛的正式 Release 的 update.json'
         type: boolean
@@ -41,6 +45,7 @@ jobs:
       INPUT_TAG: ${{ inputs.tag }}
       PRERELEASE: ${{ inputs.prerelease || false }}
       RECOVERY: ${{ inputs.recovery_sync_only || false }}
+      FINALIZE_DRAFT: ${{ inputs.finalize_draft || false }}
       SYNC_UPDATE: ${{ github.event_name == 'push' || inputs.sync_update_json }}
     steps:
       - name: 检出受信 workflow 源码（恢复不使用历史 tag 的校验工具）
@@ -58,6 +63,9 @@ jobs:
           is_valid_release_tag "$TAG" || { echo '::error::非法 tag'; exit 1; }
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
             echo '::error::手动发布/恢复必须从 main 工作流触发'; exit 1
+          fi
+          if [ "$RECOVERY" = true ] && [ "$FINALIZE_DRAFT" = true ]; then
+            echo '::error::恢复更新通道与发布草稿不能同时选择'; exit 1
           fi
           if [ "$RECOVERY" = true ] && [ "$PRERELEASE" = true ]; then
             echo '::error::恢复只支持正式 Release'; exit 1
@@ -84,8 +92,13 @@ jobs:
           EXISTING=$(jq --arg t "$TAG" '[.[] | select(.tag_name == $t)] | length' "$RUNNER_TEMP/releases.json")
           if [ "$RECOVERY" = true ]; then
             jq -e --arg t "$TAG" '.[] | select(.tag_name == $t and .draft == false and .prerelease == false)' "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/release.json"
+          elif [ "$FINALIZE_DRAFT" = true ]; then
+            [ "$EXISTING" = 1 ] || { echo '::error::必须存在唯一同名 draft'; exit 1; }
+            jq -e --arg t "$TAG" '.[] | select(.tag_name == $t and .draft == true)' "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/release.json"
           else
-            [ "$EXISTING" = 0 ] || { echo '::error::同名 Release 已存在，禁止覆盖；请用恢复模式修更新元数据'; exit 1; }
+            [ "$EXISTING" = 0 ] || { echo '::error::同名 Release 已存在，禁止覆盖；草稿请用 finalize_draft，正式版请用 recovery_sync_only'; exit 1; }
+          fi
+          if [ "$RECOVERY" != true ]; then
             BASE_CODE=$(git show "$COMMIT^:module.prop" | sed -n 's/^versionCode=//p' | tr -d '\r')
             case "$BASE_CODE" in ''|*[!0-9]*) echo '::error::父提交 versionCode 无效'; exit 1 ;; esac
             [ "$CODE" -gt "$BASE_CODE" ] || { echo '::error::发布提交必须递增 versionCode'; exit 1; }
@@ -111,19 +124,19 @@ jobs:
           set -eu
           sudo apt-get update -qq
           sudo apt-get install -y -qq aapt zipalign apksigner shellcheck
-          if [ "$RECOVERY" != true ] && [ ! -f "$ANDROID_HOME/platforms/android-34/android.jar" ]; then
+          if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ] && [ ! -f "$ANDROID_HOME/platforms/android-34/android.jar" ]; then
             "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-34'
           fi
-          if [ "$RECOVERY" != true ]; then
+          if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ]; then
             test -s "$ANDROID_HOME/platforms/android-34/android.jar"
           fi
 
       - name: 全部公共测试（与 CI 同一份）
-        if: env.RECOVERY != 'true'
+        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
         run: sh tests/run-all.sh
 
       - name: 必须以既有签名密钥构建磁贴（不轮换、不静默降级）
-        if: env.RECOVERY != 'true'
+        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
         env:
           KEYSTORE_B64: ${{ secrets.MAGPIE_KEYSTORE_B64 }}
           MAGPIE_KS_PASS: ${{ secrets.MAGPIE_KS_PASS }}
@@ -140,7 +153,7 @@ jobs:
           sh build.sh dist
 
       - name: 校验安装包并生成 SHA256SUMS
-        if: env.RECOVERY != 'true'
+        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
         run: |
           set -eu
           SOURCE_ROOT="$GITHUB_WORKSPACE" EXPECTED_CERT_FILE="$RUNNER_TEMP/trusted-release-verifier/tile-cert-sha256.txt" \
@@ -149,7 +162,7 @@ jobs:
 
       - name: 为 zip 和 SHA256SUMS 生成 provenance
         id: attest
-        if: env.RECOVERY != 'true'
+        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
@@ -157,7 +170,7 @@ jobs:
             dist/SHA256SUMS
 
       - name: 创建 draft（核验后才公开，绝不覆盖已有 Release）
-        if: env.RECOVERY != 'true'
+        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
         env:
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
@@ -174,7 +187,10 @@ jobs:
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" "dist/magpie-$VER.zip" dist/SHA256SUMS dist/provenance.sigstore.json \
             --repo "$REPO" --verify-tag --draft --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
-          gh api "repos/$REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          # GitHub 的 /releases/tags/:tag 对 draft 返回 404；从认证列表取得 ID。
+          gh api "repos/$REPO/releases?per_page=100" > "$RUNNER_TEMP/releases-after-create.json"
+          jq -e --arg t "$TAG" '[.[] | select(.tag_name == $t and .draft == true)] | if length == 1 then .[0] else error("missing-or-ambiguous draft") end' \
+            "$RUNNER_TEMP/releases-after-create.json" > "$RUNNER_TEMP/release.json"
 
       - name: 按 asset ID 回读并核对 digest、校验清单、APK 和 attestation
         run: |
@@ -187,7 +203,7 @@ jobs:
             HASH=$(sha256sum "$RUNNER_TEMP/verify-release/$NAME" | awk '{print $1}')
             DIGEST=$(jq -r --arg n "$NAME" '.assets[] | select(.name == $n) | .digest // empty' "$RUNNER_TEMP/release.json")
             [ "$DIGEST" = "sha256:$HASH" ] || { echo "::error::GitHub asset digest 不符/缺失: $NAME"; exit 1; }
-            if [ "$RECOVERY" != true ]; then
+            if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ]; then
               cmp "dist/$NAME" "$RUNNER_TEMP/verify-release/$NAME"
             fi
           done
@@ -203,10 +219,12 @@ jobs:
             sh "$RUNNER_TEMP/trusted-release-verifier/verify-release-zip.sh" "$RUNNER_TEMP/verify-release/magpie-$VER.zip" "$TAG"
           ZIP_CODE=$(unzip -p "$RUNNER_TEMP/verify-release/magpie-$VER.zip" module.prop | sed -n 's/^versionCode=//p' | tr -d '\r')
           [ "$ZIP_CODE" = "$CODE" ] || { echo "::error::zip versionCode 与 tag 源码不符"; exit 1; }
-          gh attestation verify "$RUNNER_TEMP/verify-release/magpie-$VER.zip" --repo "$REPO"
-          gh attestation verify "$RUNNER_TEMP/verify-release/SHA256SUMS" --repo "$REPO"
+          gh attestation verify "$RUNNER_TEMP/verify-release/magpie-$VER.zip" --repo "$REPO" \
+            --source-digest "$RELEASE_COMMIT" --source-ref "refs/tags/$TAG" --signer-workflow "$REPO/.github/workflows/release.yml"
+          gh attestation verify "$RUNNER_TEMP/verify-release/SHA256SUMS" --repo "$REPO" \
+            --source-digest "$RELEASE_COMMIT" --source-ref "refs/tags/$TAG" --signer-workflow "$REPO/.github/workflows/release.yml"
           # 恢复时 dist 从已经独立校验的远端生成，不接受本地旧产物。
-          if [ "$RECOVERY" = true ]; then
+          if [ "$RECOVERY" = true ] || [ "$FINALIZE_DRAFT" = true ]; then
             cp "$RUNNER_TEMP/verify-release/magpie-$VER.zip" dist/
             cp "$RUNNER_TEMP/verify-release/SHA256SUMS" dist/
           fi
@@ -215,8 +233,11 @@ jobs:
         if: env.RECOVERY != 'true'
         run: |
           set -eu
-          gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease="$PRERELEASE"
-          gh api "repos/$REPO/releases/tags/$TAG" --jq '{tag_name,draft,prerelease,assets:[.assets[].name]}'
+          ID=$(jq -r .id "$RUNNER_TEMP/release.json")
+          case "$ID" in ''|*[!0-9]*) echo '::error::无效 Release ID'; exit 1 ;; esac
+          gh api --method PATCH "repos/$REPO/releases/$ID" -F draft=false -F prerelease="$PRERELEASE" > "$RUNNER_TEMP/published-release.json"
+          jq -e --arg t "$TAG" '.tag_name == $t and .draft == false' "$RUNNER_TEMP/published-release.json"
+          jq '{tag_name,draft,prerelease,assets:[.assets[].name]}' "$RUNNER_TEMP/published-release.json"
 
       - name: 公开下载复核后同步 update.json（可独立恢复）
         if: env.RECOVERY == 'true' || (env.SYNC_UPDATE == 'true' && env.PRERELEASE != 'true')
