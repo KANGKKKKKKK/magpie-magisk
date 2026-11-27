@@ -5,6 +5,7 @@
 Turn [magpie](https://github.com/yetone/magpie) into a persistent Android service: starts on boot, comes back when killed, start/stop from the `[Action]` menu.
 
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/KANGKKKKKKK/magpie-magisk/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/KANGKKKKKKK/magpie-magisk/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
 [![Magisk](https://img.shields.io/badge/Magisk-20.4%2B-00af9c?style=flat-square)](https://github.com/topjohnwu/Magisk)
 [![Platform](https://img.shields.io/badge/platform-arm64-blue?style=flat-square)](#requirements)
@@ -22,8 +23,20 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 > The module only keeps magpie running on this phone. Providers, models, quotas and accounts are
 > magpie's own business, not this module's.
 
+## TL;DR
+
+If you already know your way around Magisk modules, this is all you need; each step is explained in [Quick start](#quick-start).
+
+1. Download `magpie-v*.zip` from [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) and flash it in your manager.
+2. Tap the module's `[Action]`: the first tap shows the install plan, the second downloads and installs magpie (skip if you already have it).
+3. Reboot so the DNS overlay applies and the service starts.
+4. Add a provider in magpie's own panel, point your client at `http://127.0.0.1:3425/v1`, and send a message. A real reply means you are done.
+
+When in doubt, run the self-check: `su -c sh /data/adb/modules/magpie/scripts/doctor.sh`.
+
 ## Contents
 
+- [TL;DR](#tldr)
 - [Why this exists](#why-this-exists)
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
@@ -37,9 +50,11 @@ Turn [magpie](https://github.com/yetone/magpie) into a persistent Android servic
 - [File layout](#file-layout)
 - [Uninstall](#uninstall)
 - [Updates](#updates)
+- [Quick Settings tile (optional)](#quick-settings-tile-optional)
 - [Known limitations](#known-limitations)
 - [Development and tests](#development-and-tests)
 - [Credits](#credits)
+- [License](#license)
 
 ## Why this exists
 
@@ -71,11 +86,12 @@ to see the state and clean up after itself.
 | Self-check | `scripts/doctor.sh` runs ten checks and tells you what to fix |
 | CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE` and `MAGPIE_BUN` filled in, and says so when DNS is not set up |
 | Upstream DNS | Ships `system/etc/resolv.conf`, rewritten from `MAGPIE_DNS`; no dnsmasq, no port 53 |
+| Quick Settings tile | Optional ~50 KB companion app that puts start/stop in the pull-down panel; everything works without it |
 | CA bundle | Merges system roots for the Go static PIE, rebuilds when system CAs change |
 | Log rotation | Rotates to `.1` past 5 MB, keeps one generation |
 | Online update | The manager can pull new versions directly |
 | Installs the body | No body yet? Tapping `[Action]` downloads and installs it: sha256 checked, atomic replace, no debris left on failure |
-| Clean uninstall | Stops the service, kills the watchdog, removes `PATH` links, deletes the data dir, then verifies |
+| Clean uninstall | Stops the service, kills the watchdog, removes `PATH` links and verifies; the data dir is **kept by default** so providers and keys are never wiped by accident |
 
 ## Quick start
 
@@ -526,6 +542,29 @@ current exposure plainly.
 | `MAGPIE_DL_TIMEOUT` | `1800` | Total time limit for the binary download, in seconds |
 | `MAGPIE_DL_STALL` | `60` | Stall timeout: give up after this many seconds without any data |
 
+The default config file only lists the first five; add a line for the others when you need them,
+e.g. `MAGPIE_WATCH_INTERVAL="60"`.
+
+<details>
+<summary>Advanced installer overrides (mirrors, custom curl / CA — rarely needed)</summary>
+
+These are usually set inline for a single run:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MAGPIE_CONF` | empty | Explicit config file, for diagnostics and tests |
+| `MAGPIE_MANIFEST_URL` | `https://usemagpie.ai/api/latest` | Binary update manifest; point it at your mirror |
+| `MAGPIE_ASSET_KEY` | `magpie-cli-android-arm64` | Which asset to take from the manifest |
+| `MAGPIE_DL` | `curl` found on `PATH` | Absolute path to a trusted curl |
+| `MAGPIE_TLS_CA_BUNDLE` | empty | Extra PEM bundle to trust for downloads |
+| `MAGPIE_CONFIRM_WINDOW` | `600` | Confirmation window between the two `[Action]` taps, in seconds |
+
+```sh
+su -c 'MAGPIE_MANIFEST_URL=https://mirror.example/latest sh /data/adb/modules/magpie/scripts/install.sh plan'
+```
+
+</details>
+
 The scripts look for the config file in order: explicit `MAGPIE_CONF` (diagnostics / tests),
 `/data/adb/magpie/scripts/magpie.config`, then the module's `scripts/magpie.config`. **Edit the one in the data directory** — the module copy is
 replaced on update. If neither exists, built-in defaults apply and everything listens on
@@ -602,6 +641,12 @@ the script then names the likely freezer (NoActive / CZero / system
 
 More detail in [CHANGELOG.md](CHANGELOG.md).
 
+### Reporting a problem
+
+- Module issues (won't start, binary won't install, menu or tile misbehaves): open an [issue](https://github.com/KANGKKKKKKK/magpie-magisk/issues/new/choose) and include the full `doctor.sh` output, the module version, your manager and its version, device model and Android version.
+- Providers, models, quota, accounts or panel features belong to magpie itself: report them [upstream](https://github.com/yetone/magpie/issues).
+- Check logs and screenshots before posting: no gateway keys, panel passwords or `?k=` links.
+
 ## How it works
 
 ```mermaid
@@ -676,14 +721,27 @@ magpie-magisk/
 │   ├── lib.sh                        LAN address, process and body helpers, shared
 │   ├── doctor.sh                     ten self-checks
 │   ├── magpie-cli.sh                 environment wrapper around the binary
+│   ├── tile-app.sh                   tile app install / version check (flash and boot)
+│   ├── tile-check.sh                 tile health check (shared by the app and doctor [9/10])
+│   ├── ci/                           release helpers: version gate, zip verification, release flow
 │   └── magpie.config                 configuration defaults
+├── tile-app/                         tile app source (optional, bundled into the zip at build time)
+├── tests/
+│   ├── run-all.sh                    full suite, shared by CI and release
+│   ├── test-*.sh / test-*.py         shell suites and Python unittests
+│   ├── jvm/                          JVM tests for the tile logic (no Android needed)
+│   ├── check-counts.sh               runs the suites and checks the counts quoted in the docs
+│   └── make-fixtures.py              installer fixtures (--base sets the manifest host)
 ├── webroot/
 │   └── index.html                    the module panel (needs KernelSU WebUI / WebUI-X)
 ├── docs/
+│   ├── release-policy.md             release policy: protected environments, signing, update PR
 │   ├── panel.png                     P2 screenshot (the module panel)
 │   ├── panel-magpie.jpg              P1 screenshot (magpie's own panel)
 │   └── social-preview.png            the repo's social preview image (1280×640)
-├── .github/workflows/release.yml     tag → build → release → update.json
+├── .github/workflows/
+│   ├── ci.yml                        on every push / PR: syntax checks + all suites
+│   └── release.yml                   tag → build → release → update.json PR
 └── META-INF/com/google/android/      Magisk flash scripts
 ```
 
@@ -698,7 +756,9 @@ Generated at runtime, never committed:
 /data/adb/magpie/run/resolv.conf       DNS config currently in effect (for reference)
 /data/adb/magpie/install-info.txt      install record (version, source, digest; mode 600)
 /data/adb/magpie/bin/magpie.bak        previous body, for rollback
-/data/adb/magpie/.install.lock         install mutex
+/data/adb/magpie/.install.flock        install mutex (do not delete while running)
+/data/adb/magpie/run/*.flock           lifecycle / stop-intent mutexes (same)
+/data/adb/magpie/bin/magpie.rejected   candidate binary that failed preflight (only if any)
 /data/adb/magpie/.install.pending      second-tap confirmation marker
 /data/adb/magpie/data/certs/           CA bundle and its fingerprint
 webroot/status.json                    credential-free panel data (mode 600)
@@ -718,18 +778,56 @@ The uninstall script writes a maintenance marker and stops the service first. It
 > [!WARNING]
 > Earlier versions allowed `magpie_path` inside the module directory. **Back up and move such data to `/data/adb/magpie` before removing or updating the module.** The manager may delete its entire module tree and may ignore the script's exit code; the script does not migrate the data for you.
 
+Once you are sure you no longer need it, have a backup, and the module is gone after a reboot,
+delete the data directory by hand:
+
+```sh
+su -c ls /data/adb/magpie            # look first: is this the directory you mean?
+su -c rm -rf /data/adb/magpie        # irreversible: binary, providers, keys and usage records
+```
+
+Use your own path if you changed `magpie_path`.
+
 ## Updates
 
 `module.prop` carries an `updateJson` pointing at [`update.json`](update.json) in this repository.
 
 - The manager compares `versionCode` and offers an update when a new release exists.
+- The binary updates independently: use `su -c magpie update`; no need to reflash the module.
 - Releases are built by GitHub Actions: push a `v*` tag and the workflow packs the zip, verifies
-  its source and signatures, publishes the release and proposes an `update.json` PR.
+  its source and signatures, publishes the release and proposes an `update.json` PR. The manager
+  only sees the update once that PR is merged into `main`.
 - Updating the module **does not** touch `/data/adb/magpie`, so providers, keys and logs survive.
 
-## Known limitations
+## Quick Settings tile (optional)
 
-- Boot and watchdog use `auto-start`, which respects the current boot's manual stop under the lifecycle lock. A legacy empty marker or an unreadable boot ID is conservative until an explicit start. Update the tile and controller together: a new tile never falls back to unconditional `toggle` on an older controller; stale/unknown results only trigger a read.
+While flashing, the volume keys let you install a small companion app that puts Magpie's
+start/stop into the pull-down Quick Settings panel:
+
+```
+  Optional companion app
+- Magpie tile: start/stop from Quick Settings
+  It is not magpie and proxies nothing; it is just a switch that
+  calls this module's control script through root. Skipping it changes nothing.
+
+  Volume up = install, volume down = skip (skips after 15 s)
+```
+
+(The real prompt is in Chinese.) Two more steps after installing:
+
+1. Open the app and tap "grant root" once. The tile runs in the background and cannot show the
+   root prompt itself.
+2. Pull down Quick Settings → edit → drag **Magpie** into place. Android does not let apps add tiles
+   on their own.
+
+The tile shows running / stopped and toggles on tap. Stopping goes through the same `stop` path and
+writes `.user_stopped`, so the watchdog does not bring back a service you stopped on purpose.
+**Long-press the tile** to open the app's settings; the "launcher icon" switch there hides the app
+icon, and long-pressing the tile is how you get back to restore it.
+
+Implementation, fallback commands and build notes: [tile-app/README.md](tile-app/README.md).
+
+## Known limitations
 
 - The installer supports **arm64 only**: the release page has no arm32 / x86_64 Android build, so
   other architectures are refused outright instead of getting a wrong binary.
@@ -752,9 +850,19 @@ The uninstall script writes a maintenance marker and stops the service first. It
   installing or updating the module needs a reboot. Afterwards a service restart rewrites the
   overlay; if doctor still shows the old upstream, reboot once more.
 - **A tile Shell timeout is not confirmed cancellation of root descendants**: toggle is never automatically replayed, and incomplete/timeout results stay unknown. Root-side cancellation still needs isolated testing across Magisk/KernelSU/APatch; destroying the client Process does not prove the whole root task ended.
+- **Conservative stop intent across versions**: boot and watchdog use `auto-start`, which respects the current boot's manual stop under the lifecycle lock. A legacy empty marker or an unreadable boot ID is conservative until an explicit start. Update the tile and controller together: a new tile never falls back to unconditional `toggle` on an older controller; stale/unknown results only trigger a read.
 - **Tiles and custom data paths**: start/stop and panel lookup both use the module controller and its current configuration. The launcher-hidden marker still uses `/data/adb/magpie/run/.tile_launcher_hidden`. If root manager or SELinux access prevents socket ownership checks, the listener shows as unknown and the tile does not open the panel automatically.
 
 ## Development and tests
+
+One command covers everything, and it is what CI and the release workflow run:
+
+```sh
+sh tests/run-all.sh   # syntax checks + shellcheck + count check + JVM tests + all suites
+```
+
+It needs `python3` (fixture server), `javac`/`java` (JVM tests) and `shellcheck`, and runs entirely
+in temp directories. To run a single suite:
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
@@ -774,7 +882,7 @@ the suites; they do not mean every test has been run on a real device. When usin
 wrong port and you get a pile of fake failures. Details and known gaps in
 [tests/README.md](tests/README.md).
 
-`sh tests/run-all.sh` also runs 106 Python unittests: 34 release/build, 9 tile-version gate, 18 tile lifecycle, 3 launcher, 25 doctor-tile, 11 release policy and 6 installer TLS. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
+`run-all.sh` also runs 106 Python unittests: 34 release/build, 9 tile-version gate, 18 tile lifecycle, 3 launcher, 25 doctor-tile, 11 release policy and 6 installer TLS. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
 
 Before releasing, configure the [release policy](docs/release-policy.md): protected environments, a policy commit SHA, immutable releases and tag rules. Bump the module and tile independently where appropriate, wait for CI on that exact `main` commit, then push the matching annotated tag. Building without release secrets, signing, public release and proposing the manager update are separate jobs. The update becomes visible only when its PR is merged into `main`. A dispatch on `main` verifies an existing draft or release; it does not create a new tag attestation.
 

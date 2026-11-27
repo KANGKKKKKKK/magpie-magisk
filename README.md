@@ -5,6 +5,7 @@
 把 [magpie](https://github.com/yetone/magpie) 变成 Android 上的常驻服务：开机自启，被杀自动拉回，`[执行]` 菜单里启停。
 
 [![Release](https://img.shields.io/github/v/release/KANGKKKKKKK/magpie-magisk?style=flat-square&label=release)](https://github.com/KANGKKKKKKK/magpie-magisk/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/KANGKKKKKKK/magpie-magisk/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/KANGKKKKKKK/magpie-magisk/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/KANGKKKKKKK/magpie-magisk?style=flat-square)](LICENSE)
 [![Magisk](https://img.shields.io/badge/Magisk-20.4%2B-00af9c?style=flat-square)](https://github.com/topjohnwu/Magisk)
 [![Platform](https://img.shields.io/badge/platform-arm64-blue?style=flat-square)](#前置条件)
@@ -19,8 +20,20 @@
 >
 > 模块只负责让 magpie 在这台手机上稳定运行；provider、模型、额度、账号这些属于 magpie 本体，不在本模块范围内。
 
+## 一分钟上手
+
+已经熟悉 Magisk 模块的话，下面四步就够了；每一步的细节在[快速开始](#快速开始)。
+
+1. 从 [Releases](https://github.com/KANGKKKKKKK/magpie-magisk/releases) 下载 `magpie-v*.zip`，在管理器里刷入。
+2. 点模块的 `[执行]`：第一次只显示安装方案，再点一次下载并安装 magpie 本体（已有本体可跳过）。
+3. 重启手机，让 DNS 覆盖生效、服务自动拉起。
+4. 在 magpie 本体面板里配好供应商，客户端填 `http://127.0.0.1:3425/v1`，发一条消息收到回复即完成。
+
+不确定哪里出了问题时，先跑一次自检：`su -c sh /data/adb/modules/magpie/scripts/doctor.sh`。
+
 ## 目录
 
+- [一分钟上手](#一分钟上手)
 - [为什么需要它](#为什么需要它)
 - [能做什么](#能做什么)
 - [快速开始](#快速开始)
@@ -61,14 +74,14 @@
 | 音量键菜单 | 点 `[执行]` 开菜单：切网关、看接入信息、启停、重启、开面板，音量键选、不用打字 |
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
 | 自检 | `scripts/doctor.sh` 十项检查，直接告诉你哪里不对、下一步做什么 |
-| 控制中心磁贴 | 可选装一个 40 KB 的 App，把启动/停止放进下拉栏；不装也不影响任何功能 |
+| 控制中心磁贴 | 可选装一个约 50 KB 的小 App，把启动/停止放进下拉栏；不装也不影响任何功能 |
 | 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
 | DNS 上游 | 模块自带 `system/etc/resolv.conf`，按 `MAGPIE_DNS` 重写；不启 dnsmasq，不占 53 端口 |
 | CA 证书 | 合并系统根证书供 Go 静态 PIE 使用，系统 CA 变化时自动重建 |
 | 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份 |
 | 在线更新 | 管理器里可直接收到新版本 |
 | 安装本体 | 本体没装时，点 `[执行]` 就能下载并装好：sha256 校验、原子替换、失败不留残骸 |
-| 彻底卸载 | 停服务、收守护进程、清 PATH 链接、删数据目录，并复查残留 |
+| 干净卸载 | 停服务、收守护进程、清 PATH 链接并复查残留；**默认保留**数据目录，供应商与密钥不会被误删 |
 
 ## 快速开始
 
@@ -504,6 +517,28 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 | `MAGPIE_DL_TIMEOUT` | `1800` | 下载本体的**总**时限（秒） |
 | `MAGPIE_DL_STALL` | `60` | 下载的停滞超时（秒）：这么久没有任何数据就放弃 |
 
+默认配置文件里只写了前五项；后三项需要时自己加一行，例如 `MAGPIE_WATCH_INTERVAL="60"`。
+
+<details>
+<summary>安装器的高级覆盖项（换源、自定义 curl / CA，一般用不到）</summary>
+
+这些通常临时放在命令前面，只影响这一次运行：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MAGPIE_CONF` | 空 | 显式指定配置文件，排障与测试用 |
+| `MAGPIE_MANIFEST_URL` | `https://usemagpie.ai/api/latest` | 本体更新清单；自建镜像时改它 |
+| `MAGPIE_ASSET_KEY` | `magpie-cli-android-arm64` | 清单里取哪个资产 |
+| `MAGPIE_DL` | 自动在 PATH 里找 `curl` | 可信 curl 的绝对路径 |
+| `MAGPIE_TLS_CA_BUNDLE` | 空 | 下载时额外信任的 PEM 证书包 |
+| `MAGPIE_CONFIRM_WINDOW` | `600` | 两次点按 `[执行]` 之间的确认窗口（秒） |
+
+```sh
+su -c 'MAGPIE_MANIFEST_URL=https://mirror.example/latest sh /data/adb/modules/magpie/scripts/install.sh plan'
+```
+
+</details>
+
 关于监听地址的三条硬规则，写错了会直接被拦下来，不会「装成没事」：
 
 - **端口必须写**。`MAGPIE_ADDR=127.0.0.1`（漏端口）会让 `magpie.service start` 直接拒绝启动，
@@ -577,6 +612,12 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 更多细节见 [CHANGELOG.md](CHANGELOG.md)。
 
+### 反馈问题
+
+- 模块本身的问题（起不来、装不上本体、菜单/磁贴异常）：到 [Issues](https://github.com/KANGKKKKKKK/magpie-magisk/issues/new/choose) 选「问题反馈」，附上 `doctor.sh` 的完整输出、模块版本、管理器及其版本、机型与 Android 版本。
+- 供应商、模型、额度、账号、面板功能这类本体行为：请到 [magpie 上游](https://github.com/yetone/magpie/issues) 反馈。
+- 贴日志或截图前检查一遍：不要带出网关 key、面板密码或带 `?k=` 的链接。
+
 ## 工作原理
 
 ```mermaid
@@ -634,6 +675,8 @@ magpie-magisk/
 │   ├── lib.sh                        地址解析 + 局域网地址 + 进程识别 + DNS/IP 校验，各脚本共用
 │   ├── magpie-cli.sh                 补环境变量后调用 magpie 本体
 │   ├── tile-app.sh                   磁贴 App 的安装/版本比较（刷机与开机共用）
+│   ├── tile-check.sh                 磁贴体检（磁贴 App 自查与 doctor [9/10] 共用）
+│   ├── ci/                           发版工具：版本门槛、ZIP 校验、发布流程
 │   └── magpie.config                 配置（默认值）
 ├── tile-app/                         磁贴 App 源码（可选组件，构建时打进 zip）
 │   ├── AndroidManifest.xml           包名 com.ruin.magpie.tile
@@ -642,14 +685,18 @@ magpie-magisk/
 │   ├── build.sh                      产出已签名的 magpie-tile.apk
 │   └── README.md                     为什么需要它、怎么构建、密钥怎么管
 ├── tests/
+│   ├── run-all.sh                    CI 与发版共用的全套入口
 │   ├── test-lib.sh                   lib.sh 纯函数：地址/路径/IP/JSON/tag/CA
 │   ├── test-install.sh / test-service.sh / test-action.sh / test-watchdog.sh
 │   ├── jvm/ClassifyTest.java         磁贴状态判定的 JVM 单测（不需要 Android）
+│   ├── test-tile-check.sh            磁贴体检脚本
+│   ├── test-*.py                     发布 ZIP、磁贴生命周期、安装 TLS 等 Python 用例
 │   ├── check-counts.sh               实测各套件并核对文档里的数字
 │   └── make-fixtures.py             生成安装器夹具（--base 指定清单里的服务地址）
 ├── webroot/
 │   └── index.html                    模块自带的面板（需 KernelSU WebUI / WebUI-X）
 ├── docs/
+│   ├── release-policy.md             发布策略：受保护环境、签名与更新 PR
 │   ├── panel.png                     README 里的 P2 截图（webroot 面板）
 │   ├── panel-magpie.jpg              README 里的 P1 截图（magpie 本体界面）
 │   └── social-preview.png            仓库 Social preview 用图（1280×640）
@@ -670,7 +717,9 @@ magpie-magisk/
 /data/adb/magpie/run/resolv.conf       本次生效的 DNS 配置（参照用）
 /data/adb/magpie/install-info.txt      安装记录（版本、来源、摘要，权限 600）
 /data/adb/magpie/bin/magpie.bak        旧本体备份，回退用
-/data/adb/magpie/.install.lock         安装互斥锁
+/data/adb/magpie/.install.flock        安装互斥锁（运行中别删）
+/data/adb/magpie/run/*.flock           启停与停止意图的互斥锁（同上）
+/data/adb/magpie/bin/magpie.rejected   预检失败的候选本体样本（有才会生成）
 /data/adb/magpie/.install.pending      二次确认的待办标记
 /data/adb/magpie/data/certs/           CA 证书包与指纹
 webroot/status.json                    面板数据（不含密钥，权限 600）
@@ -686,6 +735,15 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 ```
 
 脚本写入卸载标记并先停止服务。停止失败或确认仍有服务进程时，脚本中止清理。默认不删除持久数据目录，其中的本体、设置、供应商、密钥、用量记录和日志仍在；如需清除，请先备份再手动核对路径。
+
+确认不再需要、且已经备份后，模块移除并重启完成，再手动删除数据目录：
+
+```sh
+su -c ls /data/adb/magpie            # 先看一眼，确认是要删的目录
+su -c rm -rf /data/adb/magpie        # 不可恢复：本体、供应商、密钥、用量记录全部删除
+```
+
+改过 `magpie_path` 的，换成你自己的路径。
 
 > [!WARNING]
 > 旧版若把 `magpie_path` 放在模块目录里，**必须在点移除或更新前备份并迁到 `/data/adb/magpie`**。卸载脚本会提示，但不能替管理器保证该目录不被整棵删除，也不会自动移动数据。
@@ -727,8 +785,6 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 
 ## 已知限制
 
-- 看门狗和开机都通过 `auto-start`；同一 boot 的停止意图会在锁内重新检查。旧版无 boot ID 的空标记、或 boot ID 无法读取时，保守地保留停止意图，可显式启动一次解除。磁贴须与控制器一起更新：新版磁贴不向旧控制器回退到无条件 `toggle`，画面失配或结果不明时只刷新。
-
 - 安装器**只支持 arm64**：发布页里没有 arm32 / x86_64 的 Android 构建，非 arm64 设备会直接拒绝，而不是装错架构。
 - 安装器默认用于首次安装；已有可用本体时，不带 `--yes` 不会覆盖。显式 `install --yes` 会按当前清单重新部署，常规升级仍建议用 `magpie update`。
 - 摘要来自 usemagpie.ai 的清单，未做 GPG 签名验证；见[安装本体](#安装本体让模块来做)。
@@ -742,9 +798,18 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
 - **DNS 覆盖要重启一次手机才生效**：`system/etc/resolv.conf` 由 Magisk 在开机时挂载，装或更新模块后得重启；之后改 `MAGPIE_DNS` 重启服务即可重写覆盖文件，若 doctor 里上游还是旧的，再重启一次手机。
 - **磁贴 Shell 超时不代表 root 后代任务已取消**：保留不自动重放 toggle；超时显示未知，不把部分输出当作成功。跨 Magisk/KernelSU/APatch 的 root 控制任务取消尚待独立环境验证，不能把客户端 Process 清理等同于整棵 root 任务终止。
+- **停止意图跨版本的保守处理**：看门狗和开机都通过 `auto-start`，同一 boot 的停止意图会在锁内重新检查。旧版无 boot ID 的空标记、或 boot ID 无法读取时，保守地保留停止意图，显式启动一次即可解除。磁贴须与控制器一起更新：新版磁贴不向旧控制器回退到无条件 `toggle`，画面失配或结果不明时只刷新。
 - **磁贴与自定义数据目录**：启停与面板地址都通过模块控制器，使用当前配置。只有桌面图标隐藏标记仍固定在 `/data/adb/magpie/run/.tile_launcher_hidden`。受 Root 管理器或 SELinux 限制而无法读取 TCP 表或进程 FD 时，监听范围会报告未知，磁贴不会自动打开面板。
 
 ## 开发与测试
+
+日常只需要一条命令，CI 与发版跑的也是它：
+
+```sh
+sh tests/run-all.sh   # 语法检查 + shellcheck + 断言计数 + JVM 单测 + 全部套件
+```
+
+依赖 `python3`（夹具静态服务）、`javac`/`java`（JVM 单测）和 `shellcheck`；全程在临时目录运行，不碰真实服务。想单独跑某一套：
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
@@ -759,7 +824,7 @@ sh tests/test-tile-check.sh                               # 自查取数、未�
 
 六个套件共 727 条断言（77 + 15 + 56 + 182 + 275 + 122），另有 434 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 
-`sh tests/run-all.sh` 还运行 106 个 Python unittest（发布 ZIP/构建 34、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 TLS 6）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
+`run-all.sh` 还运行 106 个 Python unittest（发布 ZIP/构建 34、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 TLS 6）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 
