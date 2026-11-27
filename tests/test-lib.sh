@@ -342,14 +342,9 @@ done
 _n=$(magpie_norm_path "/data///") ; [ "$_n" = "/data" ] && ok "归一化 /data/// → /data" || bad "归一化结果不对：$_n"
 _n=$(magpie_norm_path "///") ; [ "$_n" = "/" ] && ok "归一化 /// → /" || bad "归一化结果不对：$_n"
 
-# 直接从 uninstall.sh 原文抽 cleanable 来跑：脚本与测试不会各改各的
-_un="$HERE/../uninstall.sh"
-if [ -f "$_un" ]; then
-  eval "$(sed -n '/^cleanable()/,/^}/p' "$_un")"
-  # 抽出来的 cleanable 依赖 lib.sh 里的实现（上面已 source），应能拦住 /data/
-  if cleanable "/data/"; then bad "uninstall.sh 的 cleanable 放行了 /data/"; else ok "uninstall.sh 的 cleanable 拦住 /data/"; fi
-  if cleanable "/data/adb/magpie"; then ok "uninstall.sh 的 cleanable 放行正常目标"; else bad "uninstall.sh 拦了正常目标"; fi
-fi
+# 卸载前识别会随管理器删除的旧目录，不影响持久数据根。
+if magpie_path_in_module_tree /data/adb/magpie /data/adb/modules/magpie; then bad "默认数据被误认成模块内数据"; else ok "默认数据不在模块树"; fi
+if magpie_path_in_module_tree /data/adb/modules_update/magpie/data /data/adb/modules/magpie; then ok "待激活的模块树也不应存持久数据"; else bad "漏识别 modules_update"; fi
 
 # 同一份危险/正常路径表同时检验安装与清理；不可只测沙箱改过的 helper。
 for _path in /data/adb/magisk /data/adb/magisk/bin /data/adb/ksu /data/adb/ap \
@@ -364,12 +359,14 @@ for _path in /data/adb/magisk /data/adb/magisk/bin /data/adb/ksu /data/adb/ap \
     ok "安装/清理策略均拒绝 $_path"
   fi
 done
-for _path in /data/adb/magpie /data/adb/magpie/data /data/adb/modules/magpie \
-             /data/adb/modules/magpie/files; do
-  if magpie_path_installable "$_path" && magpie_path_cleanable "$_path"; then
-    ok "安装/清理策略均放行 $_path"
+for _path in /data/adb/magpie /data/adb/magpie/data; do
+  if magpie_path_installable "$_path"; then ok "允许安装到持久目录 $_path"; else bad "误拒绝 $_path"; fi
+done
+for _path in /data/adb/modules/magpie /data/adb/modules/magpie/files; do
+  if magpie_path_installable "$_path" || ! magpie_path_in_module_tree "$_path" /data/adb/modules/magpie; then
+    bad "模块目录未正确标记为禁止安装的旧布局：$_path"
   else
-    bad "安装/清理策略误拒绝 $_path"
+    ok "旧模块目录可识别，但拒绝新的部署：$_path"
   fi
 done
 
@@ -693,6 +690,43 @@ proc_reject '只有已经消失的候选时 MCP 枚举返回非零' custom mcps
 rm -rf "$_pt"
 
 echo
+# 只读合成的 /proc 夹具，不接触真实网络、进程或权限。
+_netfx=$(mktemp -d "${TMPDIR:-/tmp}/magpie-net-test.XXXXXX") || exit 1
+mkdir -p "$_netfx/proc/self/net" "$_netfx/proc/self/ns" "$_netfx/proc/101/ns" "$_netfx/proc/101/fd"
+ln -s 'net:[101]' "$_netfx/proc/self/ns/net"
+ln -s 'net:[101]' "$_netfx/proc/101/ns/net"
+ln -s 'socket:[501]' "$_netfx/proc/101/fd/5"
+ln -s 'socket:[502]' "$_netfx/proc/101/fd/6"
+_net4="$_netfx/proc/self/net/tcp"; _net6="$_netfx/proc/self/net/tcp6"
+net_header() { echo ' sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode'; }
+net_row() { printf ' 0: %s:%s 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 %s\n' "$1" "$2" "$3"; }
+sed "s#/proc/#$_netfx/proc/#g" "$HERE/../scripts/lib.sh" > "$_netfx/probe.sh"
+cat >> "$_netfx/probe.sh" <<'NET_FIXTURE'
+magpie_pid_command() { [ "$1:$2" = 101:serve ]; }
+magpie_command_pids() { printf '%s\n' "${FIXTURE_PID:-101}"; }
+magpie_port_observation "$(magpie_listener_pid)" 3430
+NET_FIXTURE
+{ net_header; net_row 0102177F 0D66 501; } > "$_net4"
+net_header > "$_net6"
+[ "$(sh "$_netfx/probe.sh")" = 'local 127.23.2.1' ] && ok "内核快照只接受归属已确认的 IPv4 回环监听" || bad "未识别实际 IPv4 监听"
+net_header > "$_net4"
+{ net_header; net_row 00000000000000000000000001000000 0D66 502; } > "$_net6"
+[ "$(sh "$_netfx/probe.sh")" = 'local [::1]' ] && ok "IPv6-only 保留实际回环地址" || bad "未识别 IPv6 回环"
+{ net_header; net_row 00000000 0D66 501; } > "$_net4"
+[ "$(sh "$_netfx/probe.sh")" = nonlocal ] && ok "存在非回环监听时不报告仅本机" || bad "漏掉非回环监听"
+net_row 0200007F 0D66 999 >> "$_net4"
+[ "$(sh "$_netfx/probe.sh")" = unknown ] && ok "同端口有未确认的 socket 时不认领" || bad "未拒绝未知归属"
+net_header > "$_net4"
+[ "$(FIXTURE_PID='101 102' sh "$_netfx/probe.sh")" = unknown ] && ok "多个候选进程时报告未知" || bad "从多个进程中猜测归属"
+rm "$_netfx/proc/101/ns/net"
+ln -s 'net:[102]' "$_netfx/proc/101/ns/net"
+[ "$(sh "$_netfx/probe.sh")" = unknown ] && ok "不同网络命名空间不认领回环地址" || bad "跨命名空间误判"
+net_header > "$_net6"
+[ "$(sh "$_netfx/probe.sh")" = closed ] && ok "两张可读内核表都没有监听才报告端口关闭" || bad "空监听表判断不对"
+rm "$_net6"
+[ "$(sh "$_netfx/probe.sh")" = unknown ] && ok "内核表不可读时不能当作端口关闭" || bad "把不可读误报为关闭"
+rm -rf "$_netfx"
+
 echo "结果： PASS $PASS ， FAIL $FAIL"
 
 [ "$FAIL" = "0" ] || exit 1

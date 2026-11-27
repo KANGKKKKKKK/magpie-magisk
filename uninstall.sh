@@ -1,10 +1,9 @@
 #!/system/bin/sh
-# Magpie for Android - 卸载：彻底停服务并清掉所有产物
+# Magpie for Android - 卸载：停服务并移除模块自有产物；默认保留配置和用户数据
 
-MODDIR=${0%/*}
+MODDIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || exit 1
 
-# 数据目录跟着配置走，否则自定义 magpie_path 的用户卸载后会留下一整套
-# 二进制、配置、密钥和用量记录。查找顺序与其它脚本一致。
+# 数据目录跟着配置走。卸载模块默认保留上游本体、配置、密钥、证书、用量记录和日志。
 [ -f "$MODDIR/scripts/lib.sh" ] && . "$MODDIR/scripts/lib.sh" 2>/dev/null
 command -v magpie_resolve_conf >/dev/null 2>&1 || magpie_resolve_conf() { return 1; }
 magpie_path=/data/adb/magpie
@@ -12,25 +11,47 @@ _CONF=$(magpie_resolve_conf "$MODDIR" 2>/dev/null)
 [ -n "$_CONF" ] && . "$_CONF" 2>/dev/null
 DATA=${magpie_path:-/data/adb/magpie}
 
-# rm -rf 之前先确认路径像话：配置写错一个字都不能变成删系统目录
-# 能不能删这个路径。实现在 lib.sh（与 install.sh 共用同一份判断），
-# 这里只做「lib.sh 缺失时的保守兜底」：一律不删。
-# 宁可留下垃圾，也不能在缺库时 rm -rf 一个没校验过的路径。
-cleanable() {
-  if command -v magpie_path_cleanable >/dev/null 2>&1; then
-    magpie_path_cleanable "$1"
-    return $?
-  fi
-  echo "! lib.sh 缺失，拒绝删除任何路径（$1）" >&2
-  return 1
-}
+if ! command -v magpie_path_in_module_tree >/dev/null 2>&1; then
+  echo "! 缺少路径核验工具，卸载脚本不执行清理"
+  exit 1
+fi
+_DATA_IN_MODULE=0
+if [ -d "$DATA" ] && magpie_path_in_module_tree "$DATA" "$MODDIR"; then
+  _DATA_IN_MODULE=1
+  echo "! 用户数据位于可被管理器删除的模块目录：$DATA"
+  echo "! 不能保证数据保留；请在移除模块前备份并迁移至 /data/adb/magpie。"
+fi
 
-# 先立标记，service.sh 的看门狗看到就不再把服务拉回来
-: > "$MODDIR/.uninstalling" 2>/dev/null
+# 先立标记，service.sh 看门狗和 magpie.service 的新 start 都会拒绝恢复。
+: > "$MODDIR/.uninstalling" 2>/dev/null || { echo "! 无法创建卸载维护标记，停止卸载"; exit 1; }
 
-# 1) 正常停服务（会写 .user_stopped）
-[ -f "$MODDIR/scripts/magpie.service" ] && \
-  sh "$MODDIR/scripts/magpie.service" stop >/dev/null 2>&1
+# 1) 正常停服务。不能确认停净时立刻失败关闭，不继续清理或删除数据。
+if [ ! -f "$MODDIR/scripts/magpie.service" ]; then
+  echo "! 找不到服务控制器，无法确认服务已停止；保留所有数据并中止卸载"
+  exit 1
+fi
+sh "$MODDIR/scripts/magpie.service" stop >/dev/null 2>&1
+_STOP_RC=$?
+if [ "$_STOP_RC" -ne 0 ]; then
+  echo "! 服务停止失败（退出码 $_STOP_RC）；保留用户数据并中止清理"
+  exit 1
+fi
+if command -v magpie_command_pids >/dev/null 2>&1; then
+  _LEFT_SERVE=$(magpie_command_pids serve 2>/dev/null)
+  _LEFT_MCP=$(magpie_mcp_pids 2>/dev/null)
+else
+  echo "! 无法验证服务进程身份；保留用户数据并中止清理"
+  exit 1
+fi
+if [ -n "$_LEFT_SERVE$_LEFT_MCP" ]; then
+  echo "! 服务仍有残留进程（serve: ${_LEFT_SERVE:-无}; mcp: ${_LEFT_MCP:-无}）；保留用户数据并中止清理"
+  exit 1
+fi
+
+if [ "$_DATA_IN_MODULE" = 1 ]; then
+  echo "! 已停止服务；为避免误报数据已保留，不继续清理。"
+  exit 1
+fi
 
 # 2) 收掉看门狗子 shell：它是 sh 跑 service.sh 的常驻循环，杀 magpie 杀不到它
 for _d in /proc/[0-9]*; do
@@ -44,28 +65,8 @@ for _d in /proc/[0-9]*; do
   esac
 done
 
-# 3) 兜底收尾。每次发信号前重新核对 exe/argv，避免 pidof 与 kill 之间
-# PID 被复用而误杀无关进程；MCP 子进程也属于本模块。
-kill_if_magpie() {
-  _kp=$1; _ksig=${2:--15}
-  case "$_kp" in ''|*[!0-9]*) return 1 ;; esac
-  [ -r "/proc/$_kp/cmdline" ] || return 1
-  _kc=$(tr '\0' ' ' < "/proc/$_kp/cmdline" 2>/dev/null)
-  _ke=$(readlink "/proc/$_kp/exe" 2>/dev/null)
-  case "$_ke" in
-    "$DATA/bin/magpie"|/data/adb/magpie/bin/magpie)
-      case "$_kc" in *" serve "*|*" mcp "*) kill "$_ksig" "$_kp" 2>/dev/null ;; *) return 1 ;; esac ;;
-    */magpie-bun) kill "$_ksig" "$_kp" 2>/dev/null ;;
-    *) return 1 ;;
-  esac
-}
-_pid=$(pidof magpie 2>/dev/null)
-for _kp in $_pid; do kill_if_magpie "$_kp"; done
-sleep 1
-_pid="$(pidof magpie 2>/dev/null) $(pidof magpie-bun 2>/dev/null)"
-for _kp in $_pid; do
-  kill_if_magpie "$_kp" -9
-done
+# 服务控制器已验证 serve/MCP 均退出，不再按名称或模糊命令行兜底发信号。
+# 卸载不能为了清理残留而扩大进程匹配范围。
 
 # 3.5) 顺手卸掉磁贴 App（它只是本模块的配件，留着没有意义）。
 #
@@ -110,25 +111,12 @@ for _p in /data/adb/ksu/bin /data/adb/magisk /data/adb/ap/bin; do
   [ -L "$_p/magpie" ] && rm -f "$_p/magpie" 2>/dev/null && echo "- 已移除 $_p/magpie"
 done
 
-# 6) 数据目录：设置、供应商、网关 key、用量记录、证书、日志、Bun 缓存全在里面
-#    自定义过 magpie_path 的话，默认目录里可能还有更早的残留，两个都清。
-_seen=""
-for _dir in "$DATA" /data/adb/magpie; do
-  case " $_seen " in *" $_dir "*) continue ;; esac
-  _seen="$_seen $_dir"
-  [ -d "$_dir" ] || continue
-  if ! cleanable "$_dir"; then
-    echo "- 跳过可疑路径 $_dir, 请手动确认"
-    continue
-  fi
-  _sz=$(du -sh "$_dir" 2>/dev/null | awk '{print $1}')
-  rm -rf "$_dir"
-  if [ -d "$_dir" ]; then
-    echo "- 清理 $_dir 失败, 请手动删除"
-  else
-    echo "- 已清理 $_dir${_sz:+ ($_sz)}"
-  fi
-done
+# 6) 用户数据默认保留。包括上游本体、配置、供应商、网关 key、用量记录、证书和日志。
+if [ -d "$DATA" ]; then
+  echo "- 卸载脚本未删除用户数据：$DATA（如需清除，请先备份并手动核对路径）"
+fi
+[ "$DATA" = "/data/adb/magpie" ] || [ ! -d "/data/adb/magpie" ] || \
+  echo "- 卸载脚本未删除旧默认数据：/data/adb/magpie"
 
 # 7) 面板文件里有网关 key，模块目录若残留也一并清掉
 rm -f "$MODDIR/webroot/status.json" "$MODDIR/webroot/lastlog.txt" 2>/dev/null
@@ -136,9 +124,8 @@ rm -f "$MODDIR/webroot/status.json" "$MODDIR/webroot/lastlog.txt" 2>/dev/null
 # 8) 复查
 _left=""
 pidof magpie >/dev/null 2>&1 && _left="$_left magpie进程"
-[ -d "$DATA" ] && _left="$_left $DATA"
 if [ -n "$_left" ]; then
-  echo "- 仍有残留:$_left"
+  echo "- 模块已清理，但仍有进程需人工检查:$_left"
 else
-  echo "- 卸载完成, 无残留"
+  echo "- 模块卸载脚本清理完成；未删除用户数据"
 fi

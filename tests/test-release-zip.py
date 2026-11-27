@@ -201,7 +201,7 @@ exit "${MOCK_AAPT_RC:-0}"
                       omit=("magpie-tile.apk", "tile-version"))
         # The hard gate must fire even when the old source has no tile manifest.
         self.manifest.unlink()
-        self.run_verifier(False, "v1.2.4", tag="v1.2.4")
+        self.run_verifier(False, "历史无 APK", tag="v1.2.4")
 
     def test_missing_required_files_or_tile_pair_is_rejected(self):
         for name in (*REQUIRED, "module.prop", "magpie-tile.apk", "tile-version"):
@@ -366,8 +366,8 @@ elif name == "apksigner":
         for key in ("MOCK_NO_R", "MOCK_JAVAC_RC", "MOCK_D8_RC", "MOCK_SIGN_RC", "MOCK_BUILD_VERIFY_RC"):
             self.env.pop(key, None)
 
-    def run_build(self, success=True, message=None):
-        result = subprocess.run(["sh", str(self.tile / "build.sh"), str(self.base / "out")],
+    def run_build(self, success=True, message=None, mode=None):
+        result = subprocess.run(["sh", str(self.tile / "build.sh"), *([mode] if mode else []), str(self.base / "out")],
                                 cwd=self.base, env=self.env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
         self.assertEqual(result.returncode == 0, success, result.stdout)
@@ -376,6 +376,14 @@ elif name == "apksigner":
         self.assertNotIn(self.fake_password, result.stdout)
         return result
 
+    def test_unsigned_build_has_no_signing_calls_or_key_requirement(self):
+        self.env.pop("MAGPIE_KEYSTORE")
+        self.env.pop("MAGPIE_KS_PASS")
+        self.run_build(mode="--unsigned")
+        self.assertFalse(self.calls.exists())
+        self.assertTrue((self.base / "out/magpie-tile-unsigned.apk").is_file())
+        self.assertFalse((self.base / "out/magpie-tile.apk").exists())
+
     def test_sign_uses_environment_references_not_password_arguments(self):
         self.run_build()
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
@@ -383,7 +391,8 @@ elif name == "apksigner":
         for flag in ("--ks-pass", "--key-pass"):
             self.assertEqual(calls[0][calls[0].index(flag) + 1], "env:MAGPIE_KS_PASS")
         self.assertNotIn(self.fake_password, self.calls.read_text())
-        self.assertTrue((self.base / "out/work/gen/com/ruin/magpie/tile/R.java").is_file())
+        self.assertTrue((self.base / "out/magpie-tile.apk").is_file())
+        self.assertFalse(list((self.base / "out").glob(".tile-build.*")))
 
     def test_sign_nonzero_with_artifact_does_not_reach_verify(self):
         self.env["MOCK_SIGN_RC"] = "42"

@@ -2,7 +2,7 @@
 # Magpie for Android - 开机自启 + 看门狗
 
 MODDIR=${0%/*}
-[ -f "$MODDIR/disable" ] && exit 0
+[ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/.uninstalling" ] || exit 0
 
 LOG_MAX_BYTES=5242880
 # 配置查找顺序与 magpie.service / status.sh / action.sh / doctor.sh 保持一致
@@ -30,6 +30,8 @@ else
   lan_ip() { return 1; }
   magpie_running() { pidof magpie >/dev/null 2>&1; }
   magpie_bin_usable() { [ -x "$1" ]; }
+  # lib.sh 不可用时，有停止标记就不尝试恢复。
+  magpie_stop_intent_current() { [ -e "$1" ]; }
 fi
 
 # 超过 5MB 归档为 .1，必须在进程打开日志 fd 之前调用。
@@ -113,7 +115,7 @@ seed_user_config() {
 (
   wait_boot_completed
   # 等待期间模块可能被禁用（开机那几分钟足够点一下）
-  [ -f "$MODDIR/disable" ] && exit 0
+  [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/.uninstalling" ] || exit 0
   seed_user_config
   install_pending_tile_app
   # 用户隐藏过桌面图标的话，在这里重新落实（组件状态会被系统重置）
@@ -124,8 +126,7 @@ seed_user_config() {
   fi
   rotate_log "$MP/run/magpie.log"
   # 启动日志留在看门狗日志里，否则开机时 stdout 直接丢弃
-  sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1
-  sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+  sh "$MODDIR/scripts/magpie.service" auto-start >>"$WATCH_LOG" 2>&1
 ) &
 
 # 巡检间隔。改这里就够，下面的退避也从它起算。
@@ -181,12 +182,16 @@ WATCH_INTERVAL=${MAGPIE_WATCH_INTERVAL:-30}
       _fail=0
     fi
 
-    # 存在 .user_stopped 表示用户主动停止，不要拉回
-    if [ ! -f "$MP/run/.user_stopped" ] && ! magpie_running; then
-      wlog "magpie 未运行, 重新拉起"
-      if sh "$MODDIR/scripts/magpie.service" start >>"$WATCH_LOG" 2>&1; then
+    # 这是节流预判，不是启动授权；最终判断始终由控制器持锁重做。
+    if ! magpie_running && ! magpie_stop_intent_current "$MP/run/.user_stopped"; then
+      sh "$MODDIR/scripts/magpie.service" auto-start >>"$WATCH_LOG" 2>&1
+      _watch_start_rc=$?
+      if [ "$_watch_start_rc" -eq 0 ]; then
         _fail=0
-        sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+        wlog "magpie 未运行, 已尝试重新拉起"
+      elif [ "$_watch_start_rc" -eq 2 ]; then
+        # 用户停止，不是启动故障；不刷失败日志、不增加退避。
+        _fail=0
       else
         # 拉起失败时指数退避，最长 10 分钟一次，避免一直刷日志
         _fail=$((_fail + 1))

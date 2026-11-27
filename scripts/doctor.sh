@@ -33,8 +33,7 @@ MAGPIE_WEB_ADDR=""
 # 端口按 1..65535 校验；非法时留空，由 [2/10] 直接报错，不静默退回默认值
 API_PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
 # 面板地址留空是默认用法：与 magpie.service 一致，用「网关主机 + 3430」推出来
-WEB_ADDR=${MAGPIE_WEB_ADDR:-}
-[ -n "$WEB_ADDR" ] || WEB_ADDR="$(addr_host "$MAGPIE_ADDR"):3430"
+WEB_ADDR=${MAGPIE_WEB_ADDR:-"${MAGPIE_ADDR%:*}:3430"}
 WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
 ADDR_ERROR=""
 if [ -z "$API_PORT" ]; then
@@ -50,63 +49,46 @@ ok()   { OK=$((OK + 1));    echo "  ✓ $1"; }
 bad()  { BAD=$((BAD + 1));  echo "  ✗ $1"; [ -n "$2" ] && echo "      → $2"; }
 warn() { WARN=$((WARN + 1)); echo "  ! $1"; [ -n "$2" ] && echo "      → $2"; }
 
-# 端口有没有在监听。
-# ss 不是哪儿都有（精简系统、部分 Root 方案的 busybox 没带这个 applet），
-# 所以依次退到 netstat、/proc/net/tcp(6)：宁可多查一处，也不要报假红。
-port_listening() {
-  _want=$1
-  case "$_want" in ''|0|*[!0-9]*) return 1 ;; esac
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | grep -q "[:.]$_want " && return 0
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -ltn 2>/dev/null | grep -q "[:.]$_want " && return 0
-  fi
-  _hex=$(printf '%04X' "$_want" 2>/dev/null) || return 1
-  for _f in /proc/net/tcp /proc/net/tcp6; do
-    [ -r "$_f" ] || continue
-    awk -v hex="$_hex" '
-      NR > 1 && $4 == "0A" { n = split($2, a, ":"); if (a[n] == hex) { found = 1; exit } }
-      END { exit !found }
-    ' "$_f" 2>/dev/null && return 0
-  done
-  return 1
+# 仅对已核验归属的本机回环地址作有界无凭据请求。curl -q 忽略用户配置，
+# 不用环境代理、不跟随跳转。工具不满足这些约束时，保留 socket 核验结果。
+probe_local_http() (
+  command -v curl >/dev/null 2>&1 || exit 2
+  _http=$(curl -q --noproxy '*' --proto '=http' --max-time 5 --max-redirs 0 \
+    -s -o /dev/null -w '%{http_code}' "http://$1:$2/" 2>/dev/null) || exit 1
+  case "$_http" in [1-5][0-9][0-9]) printf '%s\n' "$_http" ;; *) exit 1 ;; esac
+)
+
+report_listener() {
+  case "$3" in
+    'local '*) ok "$1 $2：已核验由 Magpie 监听在回环 ${3#local }" ;;
+    nonlocal) ok "$1 $2：已核验由 Magpie 监听，包含非回环地址" ;;
+    closed) bad "$1 $2：端口未监听" "检查服务是否运行，或查看启动日志" ;;
+    *) warn "$1 $2：监听归属未知" "未能读取内核监听/进程资料，或端口由其它进程监听" ;;
+  esac
 }
 
-# 取 HTTP 状态码；连不上则输出空。
-# 注意不能直接调 `wget`：这条路在很多机型上根本不存在（系统没有 wget，
-# 而 Root 方案的 busybox 也不一定带 applet 软链），以前会导致
-# 「进程在跑、端口在听、但自检说网关无响应」的假报警。用 curl > busybox > wget 兜住。
-DL_BB=""
-for _b in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
-  [ -x "$_b" ] && { DL_BB="$_b"; break; }
-done
-
-# 把一次请求的**整条**状态码链打出来，一行一个。
-# 面板带密码访问时会 303 跳到 /（用 cookie 记住），而 wget/curl 都会跟跳转，
-# 于是最终看到的是第二跳的 401——只看最后一个码会把「密码正确」误判成「密码不对」。
-http_codes() {
-  _u="$1"; _t="${2:-5}"
-  if command -v curl >/dev/null 2>&1; then
-    curl -s -o /dev/null -m "$_t" -w '%{http_code}\n' "$_u" 2>/dev/null
-    return 0
-  fi
-  if [ -n "$DL_BB" ]; then
-    "$DL_BB" wget -S -O /dev/null -T "$_t" "$_u" 2>&1
-  else
-    wget -S -O /dev/null -T "$_t" "$_u" 2>&1
-  fi | sed -n 's/.*HTTP\/1\.[01] \([0-9]\{3\}\).*/\1/p'
-}
-
-# 只看最后一个状态码（网关根路径这种不跳转的用）
-http_code() {
-  http_codes "$1" "$2" | tail -1
+report_scope() {
+  _scope_goal=nonlocal
+  is_loopback_host "$(addr_host "$2")" && _scope_goal=local
+  case "$_scope_goal" in local) _scope_label='仅回环' ;; *) _scope_label='含非回环' ;; esac
+  echo "    $1 配置目标：$2（$_scope_label）"
+  case "$3" in
+    'local '*)
+      if [ "$_scope_goal" = local ]; then ok "$1 实际监听仅在回环，与配置目标一致"
+      else warn "$1 实际仅在回环，与非回环配置不一致"; fi ;;
+    nonlocal)
+      if [ "$_scope_goal" = local ]; then
+        bad "$1 仍有非回环监听，配置未生效" "不要认为局域网已关闭；先检查启停结果"
+      else warn "$1 有实际非回环监听（是否能从别的设备连接仍取决于网卡与防火墙）"; fi ;;
+    closed) warn "$1 配置端口目前未监听，不代表配置已经生效" ;;
+    *) warn "$1 实际监听范围未知，不能由配置推断是否对外开放" ;;
+  esac
 }
 
 echo "Magpie AI 网关 · 自检"
 echo "  模块   $MODDIR"
 echo "  配置   $CONF"
-echo "  监听   网关 $MAGPIE_ADDR  面板 $WEB_ADDR"
+echo "  监听配置   网关 $MAGPIE_ADDR  面板 $WEB_ADDR"
 echo
 
 echo "[1/10] 本体与进程"
@@ -143,44 +125,45 @@ else
 fi
 
 echo "[2/10] 端口监听"
+_api_bind=unknown; _web_bind=unknown
 if [ -n "$ADDR_ERROR" ]; then
   bad "监听地址配置有误" "$ADDR_ERROR"
 else
-  for _p in "$API_PORT:网关" "$WEB_PORT:面板"; do
-    _port=${_p%%:*}; _name=${_p##*:}
-    if port_listening "$_port"; then
-      ok "$_name 端口 $_port 在监听"
-    else
-      bad "$_name 端口 $_port 没有监听" "看 $magpie_path/run/magpie.log 的启动报错"
-    fi
-  done
+  if command -v magpie_listener_report >/dev/null 2>&1; then
+    _binds=$(magpie_listener_report "$API_PORT" "$WEB_PORT")
+    _api_bind=$(printf '%s\n' "$_binds" | sed -n 's/^api=//p')
+    _web_bind=$(printf '%s\n' "$_binds" | sed -n 's/^web=//p')
+  fi
+  report_listener 网关 "$API_PORT" "$_api_bind"
+  report_listener 面板 "$WEB_PORT" "$_web_bind"
 fi
 
 echo "[3/10] 本机可用性"
-_c=$(http_code "http://127.0.0.1:$API_PORT/" 5)
-if [ "$_c" = "200" ]; then
-  ok "网关响应正常（HTTP $_c）"
-elif [ -n "$_c" ]; then
-  warn "网关返回 HTTP $_c（预期 200）"
-else
-  bad "网关无响应" "进程在但端口不通，通常是还没启动完或端口被占"
-fi
+case "$_api_bind" in
+  'local '*)
+    _c=$(probe_local_http "${_api_bind#local }" "$API_PORT"); _http_rc=$?
+    if [ "$_http_rc" = 2 ]; then
+      warn "没有支持直连探测的 curl，未做 HTTP 检查"
+    elif [ "$_c" = 200 ]; then
+      ok "本机网关响应正常（HTTP $_c）"
+    elif [ -n "$_c" ]; then
+      warn "本机网关返回 HTTP $_c（预期 200）"
+    else
+      warn "已核验回环监听，但网关未在时限内返回 HTTP 响应"
+    fi ;;
+  *) warn "未核验到明确归属的回环监听，跳过本机 HTTP 探测" ;;
+esac
 
 echo "[4/10] 面板与访问密码"
-WEB_KEY=$(cat "$magpie_path/data/web.key" 2>/dev/null)
-if [ -n "$WEB_KEY" ]; then
-  ok "访问密码存在（${#WEB_KEY} 位）"
-  # 看第一跳：303 就说明密码被接受了（后面跟着的 401 是没带 cookie 的第二跳）
-  _c=$(http_codes "http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY" 5 | head -1)
-  case "$_c" in
-    200|303) ok "带密码可访问面板（HTTP $_c）" ;;
-    "")      bad "面板无响应" "检查 $WEB_PORT 是否被占" ;;
-    401)     warn "面板没有接受这把密码（HTTP 401）" "浏览器里能打开就忽略这条；打不开则重启服务重建 data/web.key" ;;
-    *)       warn "面板返回 HTTP $_c" ;;
-  esac
+if [ -s "$magpie_path/data/web.key" ]; then
+  ok "访问密码存在（未读取或发送）"
 else
   warn "没有 data/web.key" "首次启动服务时会自动生成"
 fi
+case "$_web_bind" in
+  'local '*) ok "已核验面板回环监听；未发送或验证访问密码" ;;
+  *) warn "未核验到本模块的面板回环监听，不建议在未核实的页面输入密码" ;;
+esac
 
 echo "[5/10] 网关密钥"
 if [ -x "$magpie_path/bin/magpie" ]; then
@@ -204,27 +187,14 @@ else
 fi
 
 echo "[7/10] 局域网暴露"
-# 判定统一走 is_loopback_host：配 ::1 / [::1]:3425 时也算「仅本机」
-if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then
-  ok "网关只监听本机，局域网不可达"
-else
-  warn "网关已对局域网开放"
-  # 实时算，不读 run/lan.url —— 那是启动时的快照，WiFi 换过就过期了
-  _lan=$(lan_ip)
-  if [ -n "$_lan" ]; then
-    echo "      → 现在可用的地址 http://$_lan:$API_PORT/v1"
-    echo "      → 别的设备要带一把已启用的网关密钥"
-  else
-    echo "      → 当前没有可用局域网地址（未连 WiFi / 热点未开，或只有移动数据）"
-  fi
-fi
-# 用推出来的 WEB_ADDR：MAGPIE_WEB_ADDR 留空时会跟着网关主机走，
-# 网关开在 0.0.0.0 上时面板同样是暴露的，不能因为「没显式配」就跳过
-if ! is_loopback_host "$(addr_host "$WEB_ADDR")"; then
-  warn "面板已对局域网开放" "不知道访问密码的人会看到 401，但密码泄露等于网关密钥也泄露"
-fi
+report_scope 网关 "$MAGPIE_ADDR" "$_api_bind"
+report_scope 面板 "$WEB_ADDR" "$_web_bind"
 
 echo "[8/10] DNS 解析"
+DL_BB=''
+for _b in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
+  [ -x "$_b" ] && { DL_BB="$_b"; break; }
+done
 # magpie 是不链接 libc 的 Go 静态 PIE，解析域名只走 /etc/resolv.conf。
 # 这个文件不存在时 Go 会去问 127.0.0.1:53 / [::1]:53，安卓上没人监听，
 # 于是原生通道全部 `connection refused`——所以先看文件在不在，再看上游答不答。

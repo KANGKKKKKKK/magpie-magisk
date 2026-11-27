@@ -33,7 +33,8 @@ step() { echo; echo "== $1"; }
 # 每个用例一个干净沙箱
 fresh() {
   rm -rf "$BASE"; mkdir -p "$BASE/scripts"
-  sed "s#^CONF=.*#CONF=$BASE/cfg#" "$SRC" > "$BASE/scripts/install.sh"
+  # Only the test copy relaxes its scheme for localhost fixtures.
+  sed -e "s#^CONF=.*#CONF=$BASE/cfg#" -e "s/^DL_SCHEME=https$/DL_SCHEME=${SRV%%:*}/" "$SRC" > "$BASE/scripts/install.sh"
   printf 'magpie_path="%s"\n' "$BASE" > "$BASE/cfg"
   chmod 755 "$BASE/scripts/install.sh"
   # install.sh 的 MODDIR 由脚本位置推导（scripts/ 的上一级），
@@ -137,13 +138,45 @@ out=$(run status)
 case "$out" in state=broken*) ok "识别为 broken" ;; *) bad "状态不对：$out" ;; esac
 out=$(run install --yes)
 case "$out" in *"已安装 magpie 9.9.9"*) ok "重装成功" ;; *) bad "重装失败" ;; esac
-[ -f "$BASE/bin/magpie.bak" ] && ok "留下了备份" || bad "没有备份"
+[ -f "$BASE/bin/magpie.bak" ] && bad "不能把损坏旧本体保存成备份" || ok "损坏旧本体未覆盖可用备份"
 
-step "11 rollback 能退回去"
+step "11 rollback 只允许切到验证过的可用备份"
+# 手工建立已验证旧版本；当前新版本必须保持可用且回退后状态仍可用。
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "magpie 8.8.8"; exit 0; }\nexit 0\n' > "$BASE/bin/magpie.bak"
+chmod 755 "$BASE/bin/magpie.bak"
 out=$(run rollback)
-case "$out" in *"已回退"*) ok "回退命令可用" ;; *) bad "回退失败：$out" ;; esac
+case "$out" in *"已回退（版本 8.8.8）"*) ok "回退命令只在自检通过后成功" ;; *) bad "回退失败：$out" ;; esac
 out=$(run status)
-case "$out" in state=broken*) ok "回退后确实变回损坏状态" ;; *) bad "回退没生效：$out" ;; esac
+case "$out" in state=ready*version=8.8.8*) ok "回退后版本和状态读回正确" ;; *) bad "回退没生效：$out" ;; esac
+
+step "11a 输出合法版本但非零退出的坏备份不得覆盖当前可用本体"
+cat > "$BASE/bin/magpie.bak" <<'BAD_BACKUP'
+#!/bin/sh
+printf 'magpie 1.0\n'
+exit 7
+BAD_BACKUP
+out=$(run rollback 2>&1); _rollback_rc=$?
+[ "$_rollback_rc" -ne 0 ] && [ "$(sh "$BASE/bin/magpie" --version)" = "magpie 8.8.8" ] && ok "合法版本输出不能掩盖非零退出" || bad "坏备份影响了当前本体：$out"
+
+step "11b 正式路径自检失败必须恢复切换前本体和元数据"
+# 暂存路径成功，仅正式路径自检返回非零；全程在测试沙箱，不启动服务。
+cat > "$BASE/bin/magpie.bak" <<'STAGED_BACKUP'
+#!/bin/sh
+[ "$1" = --version ] || exit 1
+printf 'magpie 7.7.7\n'
+case "$0" in */bin/magpie) exit 7 ;; *) exit 0 ;; esac
+STAGED_BACKUP
+cp "$BASE/install-info.txt" "$BASE/info.before"
+_rollback_inode=$(stat -c '%d:%i' "$BASE/bin/magpie")
+out=$(run rollback 2>&1); _rollback_rc=$?
+case "$_rollback_rc:$out" in
+  0:*) bad "后置自检失败却报成功" ;;
+  *已恢复切换前状态*) ok "正式路径失败返回非零并报告恢复" ;;
+  *) bad "没有确认恢复：$out" ;;
+esac
+[ "$(stat -c '%d:%i' "$BASE/bin/magpie")" = "$_rollback_inode" ] && [ "$(sh "$BASE/bin/magpie" --version)" = "magpie 8.8.8" ] && ok "恢复原 inode 和可用版本" || bad "切换前本体未恢复"
+cmp -s "$BASE/install-info.txt" "$BASE/info.before" && ok "失败回退不篡改安装信息" || bad "失败回退改动安装信息"
+[ -z "$(find "$BASE/bin" -name '.magpie.swap.*' -print)" ] && lock_available && ok "恢复成功后回收暂存并释放锁" || bad "回退恢复后留有暂存或锁"
 
 step "12 拒绝装到共享存储"
 fresh
@@ -175,40 +208,27 @@ out=$(run install --yes)
 [ "$(cat "$BASE/.install.lock/pid")" = 999999 ] && ok "旧目录保持原样，不做 ABA 回收" || bad "旧目录被改动"
 case "$out" in *"已安装 magpie 9.9.9"*) ok "遗留目录不阻止新内核锁下的安装" ;; *) bad "安装失败：$out" ;; esac
 
-step "16 找不到下载器时的行为"
+step "16 没有能限制协议的 curl 时失败，不改用 wget"
 fresh
-# 造一个「有常用工具但没有 wget/curl」的 PATH，逼它走兜底
 mkdir -p "$BASE/nodl"
-for t in sh awk sed grep mkdir rm stat df cut tr head sleep date sha256sum od cmp dirname basename uname cat ls; do
+for t in sh awk sed grep mkdir rm stat df cut tr head sleep date sha256sum od cmp dirname basename uname cat ls wc mktemp rmdir; do
   p=$(command -v "$t" 2>/dev/null) || continue
   ln -sf "$p" "$BASE/nodl/$t" 2>/dev/null
 done
-out=$(env PATH="$BASE/nodl" sh "$BASE/scripts/install.sh" plan 2>&1)
-if [ -x /data/adb/magisk/busybox ]; then
-  # Android：兜底应该能靠 Root 方案自带的 busybox 成功
-  case "$out" in
-    *"将安装 magpie 9.9.9"*) ok "没有 wget 时用 busybox 兜底成功" ;;
-    *) bad "busybox 兜底没生效：$out" ;;
-  esac
-else
-  # 桌面：没有 busybox 也没有 curl，应该给出可读的失败提示而不是静默
-  case "$out" in
-    *"下载器"*|*"取不到更新清单"*) ok "明确报告拿不到清单/没有下载器" ;;
-    *) bad "失败信息不可读：$out" ;;
-  esac
-fi
+printf '#!/bin/sh\nprintf touched > "%s/unexpected-wget"\n' "$BASE" > "$BASE/nodl/wget"
+chmod 755 "$BASE/nodl/wget"
+out=$(env PATH="$BASE/nodl" sh "$BASE/scripts/install.sh" plan 2>&1); _rc=$?
+case "$_rc:$out" in
+  0:*) bad "没有 curl 时仍报成功" ;;
+  *HTTPS\ curl*) [ ! -e "$BASE/unexpected-wget" ] && ok "没有 curl 给出 HTTPS 说明且不降级" || bad "降级到了 wget" ;;
+  *) bad "失败信息不可读：$out" ;;
+esac
 
-step "17 TERM 退出 143：杀掉下载进程并释放锁，不继续部署"
-for _download_kind in curl wget; do
+step "17 TERM 退出 143：杀掉 curl 下载进程并释放锁，不继续部署"
 fresh
-# 确定性阻塞下载桩：自身 exec 成 sleep，不依赖端口、网络或固定 sleep 猜时序。
 printf '#!%s\necho $$ > "%s/download.pid"\n: > "%s/download-entered"\nexec sleep 120\n' \
   "$(command -v sh)" "$BASE" "$BASE" > "$BASE/slow-download"
 chmod 755 "$BASE/slow-download"
-if [ "$_download_kind" = wget ]; then
-  # 覆盖选择器，不覆盖 dl_fetch：同时回归 timeout -> wget 的信号转发。
-  printf '\npick_downloader() { DL_KIND=wget; DL_CMD="%s/slow-download"; }\n' "$BASE" >> "$BASE/scripts/lib.sh"
-fi
 MAGPIE_DL="$BASE/slow-download" sh "$BASE/scripts/install.sh" install --yes >"$BASE/signal.log" 2>&1 & INS=$!
 wait_file "$BASE/download-entered" || bad "安装器未进入下载"
 _download=$(cat "$BASE/download.pid" 2>/dev/null)
@@ -218,10 +238,9 @@ kill -TERM "$INS" 2>/dev/null
 wait "$INS" 2>/dev/null; _rc=$?
 [ "$_rc" -eq 143 ] && ok "TERM 返回 143" || bad "TERM 返回 $_rc"
 lock_available && ok "信号退出后锁可立即重取" || bad "信号退出后仍持锁"
-if [ -n "$_download" ] && ! kill -0 "$_download" 2>/dev/null; then ok "$_download_kind 下载进程被终止并回收"; else bad "$_download_kind 下载进程仍存活"; fi
+if [ -n "$_download" ] && ! kill -0 "$_download" 2>/dev/null; then ok "curl 下载进程被终止并回收"; else bad "下载进程仍存活"; fi
 [ -f "$BASE/bin/magpie" ] && bad "终止后仍部署本体" || ok "终止后没有部署"
 [ -z "$_download" ] || kill -KILL "$_download" 2>/dev/null || :
-done
 
 rm -rf "$BASE"
 echo
@@ -326,19 +345,21 @@ WORKER
   [ "$(stat -c '%d:%i' "$BASE/.install.flock")" = "$_inode" ] && lock_available && ok "$_legacy owner：同一持久 inode，结束后可重取" || bad "$_legacy owner：锁文件被换或未释放"
 done
 
-step "21 回退通过同目录临时文件原子替换"
+step "21 回退通过私有暂存原子替换并读回安装记录"
 fresh
 mkdir -p "$BASE/bin"
-printf old > "$BASE/bin/magpie"
-printf backup > "$BASE/bin/magpie.bak"
-_out=$(
-  BIN_DIR="$BASE/bin"; BIN="$BASE/bin/magpie"; BAK="$BASE/bin/magpie.bak"
-  say() { :; }; die() { return 1; }; probe_version() { echo test; }
-  eval "$(sed -n '/^rollback() {/,/^}/p' "$SRC")"
-  rollback
-)
-[ "$(cat "$BASE/bin/magpie")" = backup ] && ok "rollback 原子路径成功" || bad "rollback 未恢复备份：$_out"
-[ -z "$(find "$BASE/bin" -name '.magpie.rollback.*' -print)" ] && ok "rollback 不留临时文件" || bad "rollback 留下临时文件"
+printf '#!/bin/sh\nprintf "magpie 3.1.0\\n"\n' > "$BASE/bin/magpie"
+printf '#!/bin/sh\nprintf "magpie 3.0.0\\n"\n' > "$BASE/bin/magpie.bak"
+chmod 755 "$BASE/bin/magpie" "$BASE/bin/magpie.bak"
+_out=$(run rollback); _rc=$?
+[ "$_rc" -eq 0 ] && cmp -s "$BASE/bin/magpie" "$BASE/bin/magpie.bak" && ok "rollback 成功切换成备份的确切字节" || bad "rollback 未恢复备份：$_out"
+[ -z "$(find "$BASE/bin" -name '.magpie.swap.*' -print)" ] && ok "rollback 不留临时文件" || bad "rollback 留下临时文件"
+_expected_sum=$(sha256sum "$BASE/bin/magpie" | awk '{print $1}')
+if grep -qx 'version=3.0.0' "$BASE/install-info.txt" && grep -qx "sha256=$_expected_sum" "$BASE/install-info.txt"; then
+  ok "更新安装记录为回退的版本与摘要"
+else
+  bad "回退记录缺失或仍指向旧本体"
+fi
 
 step "22 安装锁 open/flock 半初始化窗口收到 TERM 不会残留锁"
 for _phase in before after; do

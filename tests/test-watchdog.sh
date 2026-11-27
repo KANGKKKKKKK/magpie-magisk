@@ -127,6 +127,15 @@ sh "$WD/loop.sh" >/dev/null 2>&1
 n=$(logtext | grep -c "重新拉起")
 [ "$n" = "0" ] && ok "尊重停止标记" || bad "无视标记，拉起 $n 次"
 
+echo "== 5 锁内发现更新停止意图时，不计失败或成功且仅走自动入口"
+build 3
+put_elf
+fake_running 'return 1'
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/verbs"\nexit 2\n' "$WD" > "$WD/scripts/magpie.service"
+sh "$WD/loop.sh"
+[ "$(grep -cx auto-start "$WD/verbs")" = 3 ] && ok "看门狗只执行锁内自动入口" || bad "自动入口未覆盖三轮"
+if logtext | grep -qE '重新拉起|拉起失败'; then bad "把取消当成启动结果"; else ok "锁内取消既不是成功也不增加失败退避"; fi
+
 rm -rf "$WD"
 echo
 echo "结果： PASS $PASS ， FAIL $FAIL"

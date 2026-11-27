@@ -45,10 +45,36 @@ final class Shell {
                 + " status; else echo " + NO_MODULE + "; fi";
     }
 
-    /** 一条命令同时回答「模块在不在」与「切换结果」。 */
-    static String toggleCommand() {
+    /** 不使用旧 toggle 的参数扩展：旧控制器会忽略参数并实际反转。 */
+    static String toggleIfCommand(String expected) {
+        final String operation;
+        if ("running".equals(expected)) operation = "toggle-if running";
+        else if ("stopped".equals(expected)) operation = "toggle-if stopped";
+        else throw new IllegalArgumentException("unknown expected tile state");
         return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
-                + " toggle; else echo " + NO_MODULE + "; fi";
+                + " " + operation + "; else echo " + NO_MODULE + "; fi";
+    }
+
+    static String panelUrlCommand() {
+        return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
+                + " panel-url; else echo " + NO_MODULE + "; fi";
+    }
+
+    // Accept only a successful controller response with one local, credential-free HTTP URL.
+    private static final java.util.regex.Pattern PANEL_URL = java.util.regex.Pattern.compile(
+            "http://(127(?:\\.[0-9]{1,3}){3}|\\[::1\\]):([1-9][0-9]{0,4})/");
+
+    static String verifiedPanelUrl(Result result) {
+        if (result == null || !result.ok) return null;
+        String url = result.trimmed();
+        java.util.regex.Matcher match = PANEL_URL.matcher(url);
+        if (!match.matches() || Integer.parseInt(match.group(2)) > 65535) return null;
+        if (match.group(1).startsWith("127.")) {
+            for (String octet : match.group(1).split("\\.")) {
+                if ((octet.length() > 1 && octet.startsWith("0")) || Integer.parseInt(octet) > 255) return null;
+            }
+        }
+        return url;
     }
 
     private static final String[] SU_CANDIDATES = {

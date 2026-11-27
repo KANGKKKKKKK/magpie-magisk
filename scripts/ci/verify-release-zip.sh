@@ -13,7 +13,7 @@ fail() { printf '::error::%s\n' "$*" >&2; exit 1; }
 [ -n "$2" ] || fail "tag 不能为空"
 command -v python3 >/dev/null 2>&1 || fail "需要 python3 校验 ZIP 与元数据"
 # 必须在任何 cd 之前解析调用者提供的相对 ZIP 路径。
-ZIP=$(python3 - "$1" <<'PY'
+ZIP=$(python3 -I - "$1" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]).resolve(strict=True)
@@ -46,7 +46,7 @@ trap 'exit 143' TERM
 
 echo "== ZIP 安全、完整性与源码元数据"
 # 不使用按行解析 unzip -Z1：换行、NUL、重复目录、Unix symlink 等必须按 ZIP 条目检查。
-python3 - "$ZIP" "$TAG" "$ROOT" "$CERT_FILE" "$W" <<'PY'
+python3 -I - "$ZIP" "$TAG" "$ROOT" "$CERT_FILE" "$W" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -110,12 +110,12 @@ try:
         for name in required:
             if name not in entries or entries[name].is_dir():
                 fail(f"ZIP 缺少根目录必需文件：{name}")
-        if any(name in entries for name in ("README.md", "LICENSE", "CHANGELOG.md", "update.json", "build.sh")):
+        if any(name in entries for name in ("README.md", "CHANGELOG.md", "update.json", "build.sh")):
             fail("ZIP 里混进了仓库文件")
         for name in ("magpie-tile.apk", "tile-version"):
             if name not in entries or entries[name].is_dir():
                 fail("正式 Release 必须同时包含 magpie-tile.apk 与 tile-version；"
-                     "历史无 APK 的版本（例如 v1.2.4）不支持正式 Release 恢复，不能绕过磁贴硬门槛")
+                     "历史无 APK 的版本不支持正式 Release 恢复，不能绕过磁贴硬门槛")
         props = {}
         for line in z.read("module.prop").decode("utf-8").splitlines():
             if not line or line.startswith("#"):
@@ -170,7 +170,7 @@ fi
 if ! "$APKSIGNER" verify --print-certs "$W/magpie-tile.apk" >"$W/certs.log" 2>"$W/verify.err"; then
   fail "apksigner verify 失败（即使输出了预期指纹也不能通过）"
 fi
-python3 - "$W" <<'PY'
+python3 -I - "$W" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -197,7 +197,7 @@ echo "== APK 包名 / versionCode / min / target"
 if ! aapt dump badging "$W/magpie-tile.apk" >"$W/badging.log" 2>"$W/aapt.err"; then
   fail "aapt dump badging 失败"
 fi
-python3 - "$W" <<'PY'
+python3 -I - "$W" <<'PY'
 import json
 from pathlib import Path
 import re

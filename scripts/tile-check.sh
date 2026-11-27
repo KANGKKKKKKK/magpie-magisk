@@ -83,12 +83,48 @@ echo "inqs=$_inqs"
 
 # ---- 画的是什么 ----
 # 取 secondaryLabel 而不是 tile.state：后者会把多个故障压成同一个状态。
-_painted=unknown
-if _dump=$(dumpsys activity service com.android.systemui 2>/dev/null); then
-  _painted=$(printf '%s\n' "$_dump" \
-    | grep -o 'spec=custom(com\.ruin\.magpie\.tile[^)]*)[^]]*' \
-    | sed -n 's/.*,secondaryLabel=\([^,]*\),.*/\1/p' | head -1)
-fi
+# dumpsys 可达数 MiB，绝不能先捕获正文再 printf：Android 的外部 printf
+# 会碰到单个 argv 的 128 KiB 上限。只流式保留首个合法目标 label。
+# 生产端最后附短小退出哨兵，awk 必须读到 EOF，不能用 head / exit 提前停读
+# 或只看管道退出码，否则「先输出标签、后失败」也会被误报为检测成功。
+_painted=$(
+  {
+    if dumpsys activity service com.android.systemui 2>/dev/null; then
+      printf '\n__MAGPIE_DUMP_RC__=0\n'
+    else
+      printf '\n__MAGPIE_DUMP_RC__=1\n'
+    fi
+  } | awk '
+    /^__MAGPIE_DUMP_RC__=[01]$/ {
+      complete = ($0 == "__MAGPIE_DUMP_RC__=0")
+      next
+    }
+    {
+      complete = 0
+      if (found) next
+      rest = $0
+      # 同一行也可能有多条 tile；只接受本包的精确组件，兼容类名全写。
+      while (match(rest, /spec=custom\(com\.ruin\.magpie\.tile\/(\.MagpieTileService|com\.ruin\.magpie\.tile\.MagpieTileService)\),[^]]*\]/)) {
+        tile = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (!match(tile, /,secondaryLabel=[^,]*,/)) continue
+        start = RSTART + length(",secondaryLabel=")
+        size = RLENGTH - length(",secondaryLabel=") - 1
+        # 自查是单行小字段协议；畸形超长/控制字符标签不是「尚未绘制」。
+        if (size > 1024) continue
+        value = substr(tile, start, size)
+        if (value ~ /[[:cntrl:]]/) continue
+        label = value
+        found = 1
+        break
+      }
+    }
+    END {
+      if (complete && found) print label
+      else print "unknown"
+    }
+  '
+) || _painted=unknown
 echo "painted=$_painted"
 
 # ---- 进程与冻结 ----

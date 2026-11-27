@@ -77,7 +77,8 @@ public class Handler {
     "android/os/SystemClock.java": r'''
 package android.os;
 public class SystemClock {
-    public static long elapsedRealtime() { return 10000L; }
+    public static long now = 10000L;
+    public static long elapsedRealtime() { return now; }
 }
 ''',
     "android/service/quicksettings/Tile.java": r'''
@@ -143,7 +144,8 @@ final class Shell {
     static final class Result {
         final boolean ok;
         final String out, err;
-        Result(String state) { ok = true; out = state; err = ""; }
+        Result(String state) { this(true, state, ""); }
+        Result(boolean success, String state, String error) { ok = success; out = state; err = error; }
     }
     private static final class Pending {
         final String command;
@@ -153,9 +155,12 @@ final class Shell {
     }
     private static final List<Pending> REQUESTS = new ArrayList<>();
     static String statusCommand() { return "in-memory-status"; }
-    static String toggleCommand() { return "in-memory-toggle"; }
+    static String toggleIfCommand(String state) { return "in-memory-toggle-if " + state; }
+    static boolean toggles(String command) {
+        return command.equals(toggleIfCommand("running")) || command.equals(toggleIfCommand("stopped"));
+    }
     static void run(String command, Callback<Result> callback) {
-        if (!command.equals(statusCommand()) && !command.equals(toggleCommand())) {
+        if (!command.equals(statusCommand()) && !toggles(command)) {
             throw new AssertionError("unexpected command: " + command);
         }
         REQUESTS.add(new Pending(command, callback));
@@ -165,11 +170,12 @@ final class Shell {
         for (Pending request : REQUESTS) if (request.command.equals(command)) ++count;
         return count;
     }
-    static void complete(String command, String state) {
+    static void complete(String command, String state) { complete(command, new Result(state)); }
+    static void complete(String command, Result result) {
         for (Pending request : REQUESTS) {
-            if (!request.completed && request.command.equals(command)) {
+            if (!request.completed && (request.command.equals(command) || (command.equals("toggle") && toggles(request.command)))) {
                 request.completed = true;
-                request.callback.onResult(new Result(state));
+                request.callback.onResult(result);
                 return;
             }
         }
@@ -187,6 +193,7 @@ package com.ruin.magpie.tile;
 
 import android.os.Build;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.service.quicksettings.Tile;
 
 public final class TileLifecycleHarness {
@@ -212,10 +219,11 @@ public final class TileLifecycleHarness {
     }
     private static void counts(int reads, int toggles) {
         check(Shell.count(Shell.statusCommand()) == reads, "duplicate or missing status read");
-        check(Shell.count(Shell.toggleCommand()) == toggles, "duplicate or missing toggle");
+        check(Shell.count(Shell.toggleIfCommand("running")) + Shell.count(Shell.toggleIfCommand("stopped")) == toggles,
+                "duplicate or missing conditional toggle");
     }
     private static void finishRead(String state) { Shell.complete(Shell.statusCommand(), state); }
-    private static void finishToggle(String state) { Shell.complete(Shell.toggleCommand(), state); }
+    private static void finishToggle(String state) { Shell.complete("toggle", state); }
     private static MagpieTileService running() {
         MagpieTileService service = listening();
         finishRead("running");
@@ -389,11 +397,14 @@ public final class TileLifecycleHarness {
                 MagpieTileService old = listening();
                 MagpieTileService current = listening();
                 current.onClick();
+                counts(1, 0);
                 old.onDestroy();
                 finishRead("running");
-                expect(current, "working");
+                expect(current, "running");
                 current.onClick();
                 counts(1, 1);
+                Shell.repeatFirst("running");
+                expect(current, "working");
                 finishToggle("stopped");
                 expect(current, "stopped");
                 counts(1, 1);
@@ -435,6 +446,51 @@ public final class TileLifecycleHarness {
                 finishToggle("stopped");
                 expect(current, "stopped");
                 check(old.tile.updates == updates, "removed instance rendered completion");
+                break;
+            }
+            case "different_state_only_refreshes": {
+                MagpieTileService service = running();
+                service.onClick();
+                check(Shell.count(Shell.toggleIfCommand("running")) == 1, "painted running was not sent");
+                Shell.complete("toggle", new Shell.Result(false, "stale stopped", ""));
+                counts(2, 1);
+                finishRead("stopped");
+                expect(service, "stopped");
+                service.onClick();
+                check(Shell.count(Shell.toggleIfCommand("stopped")) == 1, "painted stopped was not sent");
+                Shell.complete("toggle", new Shell.Result(false, "usage: old controller", ""));
+                counts(3, 2);
+                finishRead("stopped");
+                break;
+            }
+            case "expired_cache_does_not_control": {
+                MagpieTileService service = running();
+                SystemClock.now += 5001L;
+                service.onClick();
+                counts(2, 0);
+                finishRead("stopped");
+                expect(service, "stopped");
+                break;
+            }
+            case "timed_out_action_never_replays": {
+                MagpieTileService service = running();
+                service.onClick();
+                Shell.complete("toggle", new Shell.Result(false, "running", "timed out"));
+                counts(2, 1);
+                finishRead("running");
+                expect(service, "running");
+                counts(2, 1);
+                break;
+            }
+            case "old_unlock_same_instance": {
+                MagpieTileService service = running();
+                service.deferUnlock = true;
+                service.onClick();
+                service.onStopListening();
+                service.onStartListening();
+                service.finishUnlocks();
+                counts(1, 0);
+                expect(service, "running");
                 break;
             }
             default: throw new AssertionError("unknown scenario " + args[0]);
@@ -522,6 +578,18 @@ class TileLifecycleTest(unittest.TestCase):
 
     def test_removal_preserves_inflight_toggle_busy(self):
         self.run_scenario("tile_removed_keeps_busy")
+
+    def test_different_state_and_old_controller_only_refresh(self):
+        self.run_scenario("different_state_only_refreshes")
+
+    def test_expired_cached_paint_refreshes_without_control(self):
+        self.run_scenario("expired_cache_does_not_control")
+
+    def test_ambiguous_timeout_never_replays(self):
+        self.run_scenario("timed_out_action_never_replays")
+
+    def test_deferred_unlock_from_previous_epoch_is_ignored(self):
+        self.run_scenario("old_unlock_same_instance")
 
 
 if __name__ == "__main__":

@@ -100,7 +100,7 @@ num_field() {
   awk -v k="\"$1\":" '
     { i = index($0, k); if (i == 0) next
       t = substr($0, i + length(k))
-      if (match(t, /^[0-9]+/)) { print substr(t, 1, RLENGTH); exit } }'
+      if (match(t, /^[0-9]+([,}]|$)/)) { value = substr(t, 1, RLENGTH); sub(/[,}]$/, "", value); print value; exit } }'
 }
 
 # 从压缩后的清单里切出目标资产的那一段对象
@@ -122,98 +122,58 @@ extract_asset() {
 }
 
 # ---------- 下载器 ----------
-# 模块脚本不能假定 wget 在 PATH 上。实测：同样调用 `sh 脚本`，有的上下文里
-# `command -v wget` 是空的（模块被管理器/服务拉起时更明显），于是下载全失败。
-# 这里按 环境变量 → PATH 里的 wget → 三大 Root 方案自带的 busybox → curl 依次找。
-
-DL_CMD=""
-DL_KIND=""
-
-pick_downloader() {
-  [ -n "$DL_KIND" ] && return 0
-  if [ -n "${MAGPIE_DL:-}" ]; then
-    DL_CMD="$MAGPIE_DL"; DL_KIND=curl
-    return 0
-  fi
-  if command -v wget >/dev/null 2>&1; then
-    DL_CMD="wget"; DL_KIND=wget
-    return 0
-  fi
-  for _bb in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox; do
-    if [ -x "$_bb" ] && "$_bb" wget --help >/dev/null 2>&1; then
-      DL_CMD="$_bb"; DL_KIND=busybox
-      return 0
-    fi
-  done
-  if command -v busybox >/dev/null 2>&1 && busybox wget --help >/dev/null 2>&1; then
-    DL_CMD="busybox"; DL_KIND=busybox
-    return 0
-  fi
-  if command -v curl >/dev/null 2>&1; then
-    DL_CMD="curl"; DL_KIND=curl
-    return 0
-  fi
-  return 1
-}
-
-# 下载超时分两种，不能合成一个数：
-#   DL_STALL  多久没有任何数据就放弃（连接超时 / 传输停滞）。默认 60 秒。
-#   DL_TOTAL  整次下载的总上限。默认 30 分钟。
-# 以前 wget 只给了 -T 60（那是停滞超时，不是总时限），curl 只给了 --max-time 600
-# （那是总时限）：大文件在慢网下可能正常传输十几分钟，不能拿读超时误充总时限；
-# 而 wget 那侧一旦服务器长期不响应，也没有总上限兜底。
+# 只选能同时执行证书校验与 HTTPS 重定向限制的 curl。BusyBox wget 的 TLS 能力、
+# 证书默认值与重定向选项因构建不同，不让 root 安装链静默降级。
+DL_SCHEME=https
+DL_CMD=''
 DL_STALL=${MAGPIE_DL_STALL:-60}
 DL_TOTAL=${MAGPIE_DL_TIMEOUT:-1800}
 
-# 有 timeout 就用它给 wget 补一个总上限（wget 自己没有总时限参数）。
-# 没有就直接跑：停滞超时还在，不会永远挂着 —— 只是少一层保险。
-have_timeout() { command -v timeout >/dev/null 2>&1; }
-
-# 下载 $1 到 $2。成功返回 0。
-dl_fetch() {
-  _url="$1"; _out="$2"
-  pick_downloader || return 127
-  # 后台 wait 可被信号打断。下载进程先关闭安装锁 FD，SIGKILL 安装器也不留锁。
-  DL_STARTING=1
-  (
-    exec 8>&-
-    case "$DL_KIND" in
-      wget|busybox)
-        if [ "$DL_KIND" = busybox ]; then
-          if have_timeout; then
-            exec timeout "$DL_TOTAL" "$DL_CMD" wget -q -O "$_out" -T "$DL_STALL" "$_url"
-          fi
-          exec "$DL_CMD" wget -q -O "$_out" -T "$DL_STALL" "$_url"
-        fi
-        if have_timeout; then
-          exec timeout "$DL_TOTAL" "$DL_CMD" -q -O "$_out" -T "$DL_STALL" "$_url"
-        fi
-        exec "$DL_CMD" -q -O "$_out" -T "$DL_STALL" "$_url"
-        ;;
-      curl)
-        exec "$DL_CMD" -fsSL --connect-timeout "$DL_STALL" \
-          --speed-limit 1024 --speed-time "$DL_STALL" \
-          --max-time "$DL_TOTAL" -o "$_out" "$_url"
-        ;;
-      *) exit 127 ;;
-    esac
-  ) 2>/dev/null &
-  DL_PID=$!
-  DL_STARTING=""
-  [ -z "$DL_SIGNAL" ] || on_signal "$DL_SIGNAL"
-  wait "$DL_PID"
-  _rc=$?
-  DL_PID=""
-  return $_rc
+pick_downloader() {
+  [ -n "$DL_CMD" ] && return 0
+  if [ -n "${MAGPIE_DL:-}" ]; then
+    case "$MAGPIE_DL" in /*) [ -f "$MAGPIE_DL" ] && [ -x "$MAGPIE_DL" ] || return 1 ;; *) return 1 ;; esac
+    DL_CMD=$MAGPIE_DL
+  else
+    DL_CMD=$(command -v curl) || return 1
+  fi
 }
 
-# 下载器的人话名字，用于报错
+valid_download_url() (
+  case "$1" in "$DL_SCHEME"://*) ;; *) exit 1 ;; esac
+  _du_rest=${1#*://}
+  _du_authority=${_du_rest%%[/?#]*}
+  case "$_du_authority" in ''|*@*|*\\*) exit 1 ;; esac
+  case "$1" in *[[:space:][:cntrl:]]*|*\\*) exit 1 ;; esac
+)
+
+dl_fetch() {
+  _dl_url=$1; _dl_out=$2; _dl_limit=$3
+  valid_download_url "$_dl_url" || return 1
+  pick_downloader || return 127
+  # -q 必须是第一项，忽略 curlrc 中的 insecure、代理或跳转选项。
+  # 自定义 CA 仅由设备管理员显式选用；不接受清单提供的证书。
+  set -- -q --fail --silent --show-error --location --max-redirs 5 \
+    --proto "=$DL_SCHEME" --proto-redir "=$DL_SCHEME" --tlsv1.2 \
+    --connect-timeout "$DL_STALL" --speed-limit 1024 --speed-time "$DL_STALL" \
+    --max-time "$DL_TOTAL" --max-filesize "$_dl_limit"
+  if [ -n "${MAGPIE_TLS_CA_BUNDLE:-}" ]; then
+    [ -r "$MAGPIE_TLS_CA_BUNDLE" ] || return 1
+    set -- "$@" --cacert "$MAGPIE_TLS_CA_BUNDLE"
+  fi
+  DL_STARTING=1
+  (exec 8>&-; exec "$DL_CMD" "$@" -o "$_dl_out" -- "$_dl_url") 2>/dev/null &
+  DL_PID=$!
+  DL_STARTING=''
+  [ -z "$DL_SIGNAL" ] || on_signal "$DL_SIGNAL"
+  wait "$DL_PID"
+  _dl_rc=$?
+  DL_PID=''
+  return "$_dl_rc"
+}
+
 dl_name() {
-  pick_downloader || { echo "无"; return 0; }
-  case "$DL_KIND" in
-    busybox) echo "$DL_CMD wget" ;;
-    *)       echo "$DL_CMD" ;;
-  esac
+  pick_downloader && printf '%s\n' "$DL_CMD" || printf '%s\n' '无可用的 HTTPS curl（也可用 MAGPIE_DL 指定可信 curl 的绝对路径）'
 }
 
 fetch_manifest() {
@@ -225,7 +185,7 @@ fetch_manifest() {
   _ok=0
   for _try in 1 2; do
     [ "$_try" = "2" ] && sleep 2
-    if dl_fetch "$MANIFEST_URL" "$_raw" && [ -s "$_raw" ]; then
+    if dl_fetch "$MANIFEST_URL" "$_raw" 1048576 && [ -s "$_raw" ] && [ "$(wc -c < "$_raw")" -le 1048576 ]; then
       _ok=1
       break
     fi
@@ -248,17 +208,17 @@ fetch_manifest() {
 # ---------- 状态检测 ----------
 
 # 把二进制跑起来问版本，带超时；成功则打印版本号
-probe_version() {
-  _f="$1"
-  [ -f "$_f" ] || return 1
-  [ -x "$_f" ] || return 1
-  _v=$(HOME="$magpie_path/data" MAGPIE_HOME="$magpie_path/data" \
-       timeout 60 "$_f" --version 2>/dev/null | head -1)
-  case "$_v" in
-    magpie\ *) echo "${_v#magpie }"; return 0 ;;
+probe_version() (
+  [ -f "$1" ] && [ -x "$1" ] || exit 1
+  _pv_out=$(HOME="$magpie_path/data" MAGPIE_HOME="$magpie_path/data" \
+    timeout 60 "$1" --version 2>/dev/null) || exit 1
+  _pv_first=${_pv_out%%'
+'*}
+  case "$_pv_first" in
+    'magpie '?*) printf '%s\n' "${_pv_first#magpie }" ;;
+    *) exit 1 ;;
   esac
-  return 1
-}
+)
 
 # missing | broken | ready
 bin_state() {
@@ -299,7 +259,7 @@ human_size() {
 
 check_target() {
   # 先归一化：写成 "/data/" 时 case 匹配不上 "/data"，会漏过去。
-  # 判断逻辑在 lib.sh，与 uninstall.sh 共用同一份。
+  # 写入只允许持久数据目录；旧模块内布局仅允许 status 检查，便于停服迁移。
   # lib.sh 缺失时不能「跳过检查就当通过」—— 那等于回到修之前的状态，
   # 而且用户完全看不出来。这种情况直接拒绝，并说明原因。
   if ! command -v magpie_norm_path >/dev/null 2>&1 ||
@@ -313,8 +273,15 @@ check_target() {
     # 报错时直接把解析结果给出来，别让用户猜。
     die "magpie_path 不是规范路径：$magpie_path（解析后是 $_norm，请直接写这个）"
   fi
-  magpie_path_installable "$magpie_path" ||
-    die "拒绝把本体安装到 $magpie_path（只允许 /data/adb/magpie 或 /data/adb/modules/magpie 及其子目录）"
+  if ! magpie_path_installable "$magpie_path"; then
+    if magpie_path_in_module_tree "$magpie_path" "${MODDIR:-/data/adb/modules/magpie}"; then
+      if [ "${1:-}" != status ] || ! magpie_path_cleanable "$magpie_path"; then
+        die "拒绝把本体安装到 $magpie_path：模块更新或移除可能清掉其中的数据，请先备份并迁移到 /data/adb/magpie"
+      fi
+    else
+      die "拒绝把本体安装到 $magpie_path（只允许 /data/adb/magpie 及其子目录）"
+    fi
+  fi
   # 逐级上溯，不允许路径里有符号链接指向别处
   _d="$magpie_path"
   while [ "$_d" != "/" ] && [ -n "$_d" ]; do
@@ -329,6 +296,9 @@ check_target() {
                  "$magpie_path/.manifest.tmp" \
                  "$BIN.rejected" "$BIN_DIR/.magpie.new.$$" "$BIN_DIR/.magpie.rollback.$$"; do
     [ ! -L "$_target" ] || die "$_target 是符号链接，出于安全考虑不接受"
+  done
+  for _target in "$BIN" "$BAK" "$INFO" "$BIN.rejected"; do
+    [ ! -e "$_target" ] || [ -f "$_target" ] || die "$_target 不是普通文件"
   done
   return 0
 }
@@ -389,6 +359,8 @@ stop_download() {
 
 cleanup_install() {
   stop_download
+  clear_manifest_tmp
+  finish_swap || :
   release_lock
 }
 
@@ -415,7 +387,7 @@ download_verified() {
       say "  下载 $_u"
       say "  （约 $(human_size "$_want_size")，视网络可能要几分钟）"
       rm -f "$_tmp" 2>/dev/null
-      if ! dl_fetch "$_u" "$_tmp"; then
+      if ! dl_fetch "$_u" "$_tmp" "$_want_size"; then
         warn "下载失败，换下一个来源"
         continue
       fi
@@ -453,62 +425,112 @@ download_verified() {
   return 1
 }
 
-# ---------- 部署 ----------
+# ---------- 部署（全程持安装锁） ----------
 
-deploy() {
-  _tmp="$1"
-  mkdir -p "$BIN_DIR" 2>/dev/null || die "无法创建 $BIN_DIR"
-  chmod 755 "$BIN_DIR" 2>/dev/null
+SWAP_DIR=''
+SWAP_PENDING=0
+SWAP_INFO_TMP=''
+SWAP_INFO_TOUCHED=0
 
-  if [ -f "$BIN" ]; then
-    say "  备份现有本体到 $BAK"
-    cp -f "$BIN" "$BAK" 2>/dev/null || die "备份失败，已中止"
-    chmod 755 "$BAK" 2>/dev/null
+# 硬链接保留原 inode、模式和上下文；正式位置不可用时原子放回，而不是盲目回旧 .bak。
+restore_swap_file() {
+  if [ -f "$1" ]; then
+    # shellcheck disable=SC3013  # Android ash/mksh 与 Linux dash 支持 inode 比较
+    [ "$1" -ef "$2" ] || mv -f "$1" "$2"
+  else
+    [ ! -e "$2" ] || rm -f "$2"
   fi
-
-  chmod 755 "$_tmp" 2>/dev/null || die "无法设置执行权限"
-  chown 0:0 "$_tmp" 2>/dev/null
-
-  # 同一文件系统内 mv 是原子的：要么旧文件，要么新文件，不会出现半截
-  mv -f "$_tmp" "$BIN" 2>/dev/null || die "替换 $BIN 失败"
-  chmod 755 "$BIN" 2>/dev/null
-  chown 0:0 "$BIN" 2>/dev/null
-  return 0
 }
 
-verify_installed() {
-  _v=$(probe_version "$BIN")
-  [ -n "$_v" ] || return 1
-  echo "$_v"
-  return 0
+finish_swap() {
+  [ -n "$SWAP_DIR" ] || return 0
+  if [ "$SWAP_PENDING" = 1 ]; then
+    if ! restore_swap_file "$SWAP_DIR/previous" "$BIN" ||
+       { [ "$SWAP_INFO_TOUCHED" = 1 ] && ! restore_swap_file "$SWAP_DIR/previous-info" "$INFO"; }; then
+      warn "未能恢复切换前的文件，保留救援目录：$SWAP_DIR" >&2
+      return 1
+    fi
+  fi
+  [ -z "$SWAP_INFO_TMP" ] || rm -f "$SWAP_INFO_TMP" 2>/dev/null
+  rm -f "$SWAP_DIR/previous" "$SWAP_DIR/previous-info" "$SWAP_DIR/candidate" 2>/dev/null
+  rmdir "$SWAP_DIR" 2>/dev/null || :
+  SWAP_DIR=''; SWAP_INFO_TMP=''; SWAP_PENDING=0; SWAP_INFO_TOUCHED=0
+}
+
+begin_swap() {
+  SWAP_DIR=$(mktemp -d "$BIN_DIR/.magpie.swap.XXXXXX") || die "无法创建私有切换目录"
+  if [ -f "$BIN" ]; then
+    ln "$BIN" "$SWAP_DIR/previous" 2>/dev/null || die "无法保留当前本体，未切换"
+  fi
+  if [ -f "$INFO" ]; then
+    ln "$INFO" "$SWAP_DIR/previous-info" 2>/dev/null || die "无法保留当前安装信息，未切换"
+  fi
+}
+
+publish_install_info() {
+  SWAP_INFO_TMP=$(mktemp "$magpie_path/.install-info.XXXXXX") || return 1
+  _info_time=$(date +'%Y-%m-%d %H:%M:%S') || return 1
+  printf 'version=%s\ninstalled=%s\nsource=%s\nsha256=%s\nasset=%s\n' \
+    "$1" "$_info_time" "$2" "$3" "$ASSET_KEY" > "$SWAP_INFO_TMP" 2>/dev/null || return 1
+  chmod 600 "$SWAP_INFO_TMP" 2>/dev/null || return 1
+  SWAP_INFO_TOUCHED=1
+  mv -f "$SWAP_INFO_TMP" "$INFO"
+}
+
+switch_verified_binary() {
+  # 所有权限与暂存自检已经完成；从这里起，失败或正常可捕获的中断由 EXIT 恢复原文件。
+  SWAP_PENDING=1
+  mv -f "$1" "$BIN" 2>/dev/null || die "原子替换失败，取消切换"
+  if ! _sw_version=$(probe_version "$BIN") || [ "$_sw_version" != "$2" ]; then
+    if finish_swap; then die "正式路径自检失败，已恢复切换前状态"; fi
+    die "正式路径自检失败，恢复未确认"
+  fi
+  if ! publish_install_info "$_sw_version" "$3" "$4"; then
+    if finish_swap; then die "安装信息落盘失败，已恢复切换前状态"; fi
+    die "安装信息落盘失败，恢复未确认"
+  fi
+  SWAP_PENDING=0
+  finish_swap
+}
+
+deploy() {
+  chmod 755 "$1" 2>/dev/null || { warn "无法设置候选执行权限"; return 1; }
+  chown 0:0 "$1" 2>/dev/null
+  DEPLOY_VERSION=$(probe_version "$1") || { warn "新本体自检失败（未替换现有文件）"; return 2; }
+  if [ -n "$M_VER" ] && [ "$DEPLOY_VERSION" != "$M_VER" ]; then
+    warn "新本体报告版本 $DEPLOY_VERSION 与清单版本 $M_VER 不符（未替换现有文件）"
+    return 2
+  fi
+
+  begin_swap
+  if [ -f "$SWAP_DIR/previous" ] && _current_version=$(probe_version "$BIN"); then
+    # 持久备份是独立副本，避免以后本体在原 inode 上写入时连备份一起改动。
+    cp -p "$SWAP_DIR/previous" "$SWAP_DIR/candidate" 2>/dev/null || die "暂存当前本体失败，未切换"
+    _bak_version=$(probe_version "$SWAP_DIR/candidate") || die "备份副本自检失败，未切换"
+    [ "$_bak_version" = "$_current_version" ] || die "备份副本版本不一致，未切换"
+    mv -f "$SWAP_DIR/candidate" "$BAK" 2>/dev/null || die "更新可用备份失败，未切换"
+    say "  已保存最后一个可用版本 $_bak_version 到 $BAK"
+  elif [ -f "$BIN" ]; then
+    warn "现有本体不可用；不会把它保存为回退备份"
+  fi
+  switch_verified_binary "$1" "$DEPLOY_VERSION" "$MANIFEST_URL" "$M_SUM"
 }
 
 rollback() {
   [ -f "$BAK" ] || die "没有可回退的备份 $BAK"
-  say "回退到备份 ..."
-  _rollback_tmp="$BIN_DIR/.magpie.rollback.$$"
-  rm -f "$_rollback_tmp" 2>/dev/null
-  cp -f "$BAK" "$_rollback_tmp" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
-  chmod 755 "$_rollback_tmp" 2>/dev/null
+  _backup_version=$(probe_version "$BAK") || die "备份自检失败，拒绝覆盖当前本体"
+  begin_swap
+  _rollback_tmp="$SWAP_DIR/candidate"
+  cp "$BAK" "$_rollback_tmp" 2>/dev/null || die "回退失败：复制备份失败"
+  chmod 755 "$_rollback_tmp" 2>/dev/null || die "回退失败：权限设置失败"
   chown 0:0 "$_rollback_tmp" 2>/dev/null
-  mv -f "$_rollback_tmp" "$BIN" 2>/dev/null || { rm -f "$_rollback_tmp"; die "回退失败"; }
-  chmod 755 "$BIN" 2>/dev/null
-  chown 0:0 "$BIN" 2>/dev/null
-  _v=$(probe_version "$BIN")
-  say "已回退${_v:+（版本 $_v）}"
+  _staged_version=$(probe_version "$_rollback_tmp") || die "回退失败：暂存备份自检失败，当前本体未改动"
+  [ "$_staged_version" = "$_backup_version" ] || die "回退失败：暂存版本不一致，当前本体未改动"
+  _sum=$(sha256sum "$_rollback_tmp" 2>/dev/null) || die "回退失败：无法计算备份摘要"
+  _sum=${_sum%% *}
+  switch_verified_binary "$_rollback_tmp" "$_backup_version" "rollback:$BAK" "$_sum"
+  say "已回退（版本 $_backup_version）；安装信息已更新"
   return 0
-}
-
-record_info() {
-  _v="$1"; _src="$2"; _sum="$3"
-  {
-    echo "version=$_v"
-    echo "installed=$(date +'%Y-%m-%d %H:%M:%S')"
-    echo "source=$_src"
-    echo "sha256=$_sum"
-    echo "asset=$ASSET_KEY"
-  } > "$INFO" 2>/dev/null
-  chmod 600 "$INFO" 2>/dev/null
 }
 
 # ---------- 子命令 ----------
@@ -525,15 +547,8 @@ cmd_status() {
 cmd_check() {
   check_arch || die "本模块只支持 arm64 设备（当前 $(uname -m)）"
   say "查询 $MANIFEST_URL ..."
-  mkdir -p "$magpie_path" 2>/dev/null
-  _mf="$magpie_path/.manifest.tmp"
-  fetch_manifest "$_mf" || { rm -f "$_mf"; die "取不到更新清单（网络不通，或被拦）"; }
-  _seg=$(extract_asset "$_mf")
-  _ver=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$_mf" | head -1)
-  _size=$(printf '%s' "$_seg" | num_field size)
-  _pub=$(str_field published < "$_mf")
-  rm -f "$_mf"
-  [ -n "$_seg" ] || die "清单里没有 $ASSET_KEY"
+  load_manifest || die "取不到更新清单或清单不符合 HTTPS/元数据要求"
+  _ver=$M_VER; _size=$M_SIZE; _pub=$M_PUB
 
   case "$(bin_state)" in
     ready)
@@ -565,19 +580,42 @@ cmd_check() {
 
 # 取回清单里的关键字段，供 plan / install 共用
 # 设置: M_VER M_SIZE M_SUM M_GH M_CDN
+MANIFEST_DIR=''
+clear_manifest_tmp() {
+  [ -n "$MANIFEST_DIR" ] || return 0
+  rm -f "$MANIFEST_DIR/manifest" "$MANIFEST_DIR/manifest.raw" 2>/dev/null
+  rmdir "$MANIFEST_DIR" 2>/dev/null || :
+  MANIFEST_DIR=''
+}
+
 load_manifest() {
-  _mf="$magpie_path/.manifest.tmp"
-  mkdir -p "$magpie_path" 2>/dev/null
-  fetch_manifest "$_mf" || { rm -f "$_mf"; return 1; }
-  _seg=$(extract_asset "$_mf")
-  M_VER=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$_mf" | head -1)
-  M_SIZE=$(printf '%s' "$_seg" | num_field size)
-  M_SUM=$(printf '%s' "$_seg" | str_field sha256)
-  M_GH=$(printf '%s' "$_seg" | str_field github)
-  M_CDN=$(printf '%s' "$_seg" | str_field url)
-  rm -f "$_mf"
-  [ -n "$_seg" ] || return 1
-  return 0
+  if ! valid_download_url "$MANIFEST_URL"; then warn "清单地址必须是 HTTPS 且不能包含用户名或密码"; return 1; fi
+  case "$ASSET_KEY" in ''|*[!a-zA-Z0-9._-]*) warn "资产名不合法"; return 1 ;; esac
+  mkdir -p "$magpie_path" 2>/dev/null || return 1
+  MANIFEST_DIR=$(mktemp -d "$magpie_path/.manifest.XXXXXX") || return 1
+  _manifest_file="$MANIFEST_DIR/manifest"
+  fetch_manifest "$_manifest_file" || { clear_manifest_tmp; return 1; }
+  _seg=$(extract_asset "$_manifest_file")
+  M_VER=$(str_field version < "$_manifest_file")
+  M_PUB=$(str_field published < "$_manifest_file")
+  M_SIZE=$(printf '%s\n' "$_seg" | num_field size)
+  M_SUM=$(printf '%s\n' "$_seg" | str_field sha256)
+  M_GH=$(printf '%s\n' "$_seg" | str_field github)
+  M_CDN=$(printf '%s\n' "$_seg" | str_field url)
+  clear_manifest_tmp
+  if [ -z "$_seg" ] || ! printf '%s\n' "$M_VER" | LC_ALL=C grep -Eq '^[0-9]+(\.[0-9]+){2}([+-][0-9A-Za-z.+-]+)?$'; then
+    warn "清单缺少目标资产或有效版本"; return 1
+  fi
+  case "$M_SIZE" in ''|0*|*[!0-9]*) warn "清单必须声明正整数资产大小"; return 1 ;; esac
+  if [ "${#M_SIZE}" -gt 9 ] || [ "$M_SIZE" -gt 536870912 ]; then warn "清单资产大小超出上限"; return 1; fi
+  if [ "${#M_SUM}" -ne 64 ] || ! printf '%s\n' "$M_SUM" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{64}$'; then
+    warn "清单缺少有效 SHA-256"; return 1
+  fi
+  M_SUM=$(printf '%s' "$M_SUM" | tr A-F a-f)
+  if [ -z "$M_CDN$M_GH" ]; then warn "清单缺少下载地址"; return 1; fi
+  for _asset_url in "$M_CDN" "$M_GH"; do
+    [ -z "$_asset_url" ] || valid_download_url "$_asset_url" || { warn "清单下载地址必须是 HTTPS 且不含用户凭据"; return 1; }
+  done
 }
 
 cmd_plan() {
@@ -647,9 +685,8 @@ cmd_install() {
   say "取更新清单 ..."
   if ! load_manifest; then
     release_lock
-    die "取不到更新清单（$MANIFEST_URL）"
+    die "取不到更新清单（需要 HTTPS），或清单缺少可验证的资产元数据"
   fi
-  [ -n "$M_SUM" ] || { release_lock; die "清单没给 sha256，拒绝安装"; }
 
   check_space "$M_SIZE"
 
@@ -666,35 +703,27 @@ cmd_install() {
   fi
 
   say "部署 ..."
-  if ! deploy "$_tmp"; then
+  deploy "$_tmp"
+  _deploy_rc=$?
+  if [ "$_deploy_rc" -ne 0 ]; then
+    if [ "$_deploy_rc" -eq 2 ] && [ -f "$_tmp" ]; then
+      mv -f "$_tmp" "$BIN.rejected" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+      if [ ! -f "$BIN" ] && [ ! -f "$BAK" ]; then
+        say "  首次安装，无可用备份；失败样本保留在 $BIN.rejected"
+      else
+        say "  原有本体与可用备份保持不变；失败样本保留在 $BIN.rejected"
+      fi
+      release_lock
+      die "新本体跑不起来，未替换当前本体"
+    fi
     rm -f "$_tmp" 2>/dev/null
     release_lock
-    die "部署失败"
+    die "部署失败，现有本体未主动替换"
   fi
 
-  say "启动自检 ..."
-  _got=$(verify_installed)
-  if [ -z "$_got" ]; then
-    if [ -f "$BAK" ]; then
-      warn "新本体跑不起来，回退"
-      rollback || true
-    else
-      # 首次安装没有备份可退：把文件挪开，绝不留一个「看起来已安装」的正式文件
-      warn "新本体跑不起来，已移除（首次安装，无备份可回退）"
-      mv -f "$BIN" "$BIN.rejected" 2>/dev/null || rm -f "$BIN" 2>/dev/null
-      if [ -f "$BIN.rejected" ]; then
-        say "  失败样本留在 $BIN.rejected，确认无用后可直接删"
-        say "  大小 $(stat -c %s "$BIN.rejected" 2>/dev/null) 字节，sha256 $(sha256sum "$BIN.rejected" 2>/dev/null | awk '{print $1}')"
-      fi
-    fi
-    release_lock
-    die "安装失败，本体未生效"
-  fi
-
-  record_info "$_got" "$MANIFEST_URL" "$M_SUM"
   release_lock
 
-  say "✓ 已安装 magpie $_got"
+  say "✓ 已安装 magpie $DEPLOY_VERSION"
   say "  位置  $BIN"
   [ -f "$BAK" ] && say "  备份  $BAK（回退：sh install.sh rollback）"
   say ""
@@ -722,7 +751,7 @@ trap 'on_signal 129' HUP
 # 加锁并覆盖本体；status 会执行本体 --version。它们都不能绕过路径校验。
 # help / 未知命令不触碰目标，仍可在配置损坏时查看用法。
 case "${1:-}" in
-  status|check|plan|install|rollback) check_target ;;
+  status|check|plan|install|rollback) check_target "$1" ;;
 esac
 
 case "${1:-}" in

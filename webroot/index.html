@@ -258,7 +258,7 @@
       <div class="card-h"><span class="dotmark a"></span>API 接入</div>
 
       <div class="f">
-        <div class="f-k">接口地址（OpenAI 兼容）</div>
+        <div class="f-k">接口地址（配置候选）</div>
         <div class="f-v" id="vApiUrl">—</div>
         <div class="f-act"><button class="ic txt" data-copy="vApiUrl" title="复制">复制</button>
         </div>
@@ -266,15 +266,11 @@
 
       <div class="f">
         <div class="f-k">API Key</div>
-        <div class="f-v masked" id="vApiKey">点击「显示」查看</div>
-        <div class="f-act" id="actApiKey">
-          <button class="ic txt" id="btnEyeApi" title="显示/隐藏">显示</button>
-          <button class="ic txt" data-copy="vApiKeyReal" title="复制">复制</button>
-        </div>
+        <div class="f-v masked" id="vApiKey">密钥不通过状态快照暴露；请在本体管理界面管理</div>
       </div>
 
       <div class="f" id="fLanApi" style="display:none">
-        <div class="f-k">局域网地址（其它设备用）</div>
+        <div class="f-k">局域网地址（配置候选）</div>
         <div class="f-v" id="vLanApi">—</div>
         <div class="f-act"><button class="ic txt" data-copy="vLanApi" title="复制">复制</button>
         </div>
@@ -287,23 +283,19 @@
       <div class="card-h"><span class="dotmark b"></span>控制台</div>
 
       <div class="f">
-        <div class="f-k">访问地址</div>
+        <div class="f-k">最近核验的回环地址</div>
         <div class="f-v" id="vWebUrl">—</div>
-        <div class="f-act"><button class="ic txt" data-copy="vWebUrl" title="复制">复制</button>
+        <div class="f-act"><button class="ic txt" id="copyWebUrl" data-copy="vWebUrl" title="复制" disabled>复制</button>
         </div>
       </div>
 
       <div class="f">
         <div class="f-k">访问密码</div>
-        <div class="f-v masked" id="vWebKey">点击「显示」查看</div>
-        <div class="f-act">
-          <button class="ic txt" id="btnEye" title="显示/隐藏">显示</button>
-          <button class="ic txt" data-copy="vWebKeyReal" title="复制">复制</button>
-        </div>
+        <div class="f-v masked" id="vWebKey">访问密码不通过状态快照提供</div>
       </div>
 
-      <a class="btn" id="btnOpen" href="#">一键打开（免输密码）</a>
-      <div class="tip">直接访问地址需输入密码，用按钮可免输入。</div>
+      <span class="btn disabled" id="btnOpen" aria-disabled="true">请在外部浏览器手动打开</span>
+      <div class="tip">此页不跳转、不提供密码；只在确认目标是本机面板后于普通浏览器访问。</div>
     </div>
   </div>
 
@@ -328,16 +320,8 @@
 </div>
 
 <div id="toast"></div>
-<span id="vWebKeyReal" style="display:none"></span>
-<span id="vApiKeyReal" style="display:none"></span>
-
 <script>
 // 纯静态: 数据来自同目录 status.json (由 scripts/status.sh 生成)
-
-var webKey = '';
-var keyVisible = false;
-var apiKey = '';
-var apiKeyVisible = false;
 
 function $(id) { return document.getElementById(id); }
 
@@ -405,44 +389,6 @@ document.addEventListener('click', function (e) {
   setTimeout(function () { t.classList.remove('ok'); }, 1200);
 });
 
-/* ---------- 密码显隐 ---------- */
-var SVG_EYE_OPEN = '显示';
-var SVG_EYE_SHUT = '隐藏';
-
-$('btnEye').addEventListener('click', function () {
-  keyVisible = !keyVisible;
-  this.innerHTML = keyVisible ? SVG_EYE_SHUT : SVG_EYE_OPEN;
-  paintKey();
-});
-
-$('btnEyeApi').addEventListener('click', function () {
-  apiKeyVisible = !apiKeyVisible;
-  this.innerHTML = apiKeyVisible ? SVG_EYE_SHUT : SVG_EYE_OPEN;
-  paintApiKey();
-});
-
-function paintKey() {
-  var el = $('vWebKey');
-  if (keyVisible && webKey) {
-    el.textContent = webKey;
-    el.className = 'f-v';
-  } else {
-    el.textContent = webKey ? '点击「显示」查看' : '未获取到';
-    el.className = 'f-v masked';
-  }
-}
-
-function paintApiKey() {
-  var el = $('vApiKey');
-  if (apiKeyVisible && apiKey) {
-    el.textContent = apiKey;
-    el.className = 'f-v';
-  } else {
-    el.textContent = apiKey ? '点击「显示」查看' : '未创建';
-    el.className = 'f-v masked';
-  }
-}
-
 /* ---------- 数据加载 ---------- */
 function loadStatus() {
   fetch('status.json?t=' + Date.now())
@@ -454,6 +400,9 @@ function loadStatus() {
     .catch(function (e) {
       $('statusText').textContent = '读取失败';
       $('statusDot').className = 'dot';
+      setText('vWebUrl', '');
+      $('copyWebUrl').disabled = true;
+      $('btnOpen').textContent = '无法核验面板地址';
       $('log').textContent = '无法读取 status.json：' + e.message;
     });
 }
@@ -479,34 +428,21 @@ function render(d) {
   setText('vApiUrl', d.apiUrl);
   setText('vLanApi', d.lanApiUrl);
 
-  // API Key: 没创建时不给假值, 直接说明怎么建
-  apiKey = d.apiKey || '';
-  $('vApiKeyReal').textContent = apiKey;
-  if (apiKey) {
-    $('actApiKey').style.display = '';
-  } else {
-    $('actApiKey').style.display = 'none';
-  }
-  paintApiKey();
-
   $('fLanApi').style.display = (d.lanOpen && d.lanApiUrl) ? '' : 'none';
-  $('tipApi').textContent = !d.apiKey
-    ? '还没有 API Key。在终端执行 magpie gateway-key add 名字 创建。'
-    : (d.lanOpen
-      ? '局域网已开放：其它设备用「局域网地址」+ 同一个 Key。'
-      : '仅本机可用。需其它设备访问时把监听地址改成 0.0.0.0。');
+  $('tipApi').textContent = d.lanOpen
+    ? 'API 配置含非回环目标，不表示已对外开放；运行态见自检。'
+    : 'API 配置目标为仅本机，运行态见自检；Key 请在本体管理界面管理。';
 
-  setText('vWebUrl', d.webUrl);
-  webKey = d.webKey || '';
-  $('vWebKeyReal').textContent = webKey;
-  paintKey();
-
+  var webAddress = running && !d.configError ? d.webUrl : '';
+  setText('vWebUrl', webAddress);
+  $('copyWebUrl').disabled = !webAddress;
+  // This WebView may expose a privileged native bridge. Never navigate it to
+  // the gateway panel or attach its long-lived password to a URL. The address
+  // above is for the user to open manually in a separate, ordinary browser.
   var b1 = $('btnOpen');
-  if (running && d.webUrlKey) {
-    b1.href = d.webUrlKey; b1.className = 'btn';
-  } else {
-    b1.href = '#'; b1.className = 'btn disabled';
-  }
+  b1.textContent = webAddress
+    ? '可复制上方地址，在外部浏览器手动打开'
+    : '未核验本机面板监听，地址不可用';
 
   loadLog();
 }

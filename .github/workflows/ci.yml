@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24，固定 SHA
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 磁贴运行时变更必须递增 versionCode
         env:
@@ -36,60 +37,52 @@ jobs:
             python3 scripts/ci/check-tile-version.py
           fi
 
-      - name: 全部公共测试（与 Release 同一份）
-        # 语法检查 + shellcheck + 断言计数 + JVM 单测 + shell 行为套件。
-        # 抽成 tests/run-all.sh：CI 与 Release 共用，新增测试只改一处。
-        run: sh tests/run-all.sh
-
-      - name: 磁贴 App 能编译
+      - name: 安装测试和 Android 构建工具
         run: |
           set -eu
-          # 不需要签名密钥，只验证源码与资源能过编译。
-          # 用了 android-34 的 android.jar：android-37.0 那种 preview 平台
-          # 没有完整属性表，会让 aapt 报一堆 No resource identifier。
-          if ! command -v aapt >/dev/null 2>&1; then
-            echo "安装 aapt"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq aapt
-          fi
-          JAR="$ANDROID_HOME/platforms/android-34/android.jar"
-          if [ ! -f "$JAR" ]; then
-            echo "安装 android-34 平台"
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-              "platforms;android-34" >/dev/null 2>&1 || true
-          fi
-          if [ ! -f "$JAR" ]; then
-            echo "::error::拿不到 android-34，无法确认磁贴能编译"
-            exit 1
-          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt apksigner zipalign shellcheck curl openssl
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-34' 'build-tools;35.0.0'
+
+      - name: 更新索引 PR 不允许降级
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          python3 -I - "$BASE_SHA" <<'PY'
+          import json, pathlib, subprocess, sys
+          previous = json.loads(subprocess.check_output(['git', 'show', sys.argv[1] + ':update.json']))
+          current = json.loads(pathlib.Path('update.json').read_text())
+          if current == previous:
+              sys.exit(0)
+          old = previous['versionCode']
+          new = current['versionCode']
+          if type(old) is not int or type(new) is not int or not old < new <= 2147483647:
+              raise SystemExit('update.json 变更必须递增 versionCode（请在最新 main 上重新核对）')
+          PY
+
+      - name: 全部公共测试（与 Release 共用）
+        run: sh tests/run-all.sh
+
+      - name: 使用临时证书实际构建 APK、打包并核对清单
+        run: |
+          set -eu
+          umask 077
           W=$(mktemp -d)
-          # aapt -J 不会自己创建目标目录，缺了会报
-          # "Unable to open class file .../gen/.../R.java" —— 而它的退出码
-          # 还是 0，光看 $? 发现不了。
-          mkdir -p "$W/gen" "$W/classes"
-          aapt package -f -m -J "$W/gen" -M tile-app/AndroidManifest.xml \
-            -S tile-app/res -I "$JAR"
-          test -s "$W/gen/com/ruin/magpie/tile/R.java"
-          # 源码注释是中文，不指定编码时平台默认非 UTF-8 就会一片
-          # "unmappable character"。
-          # 这里不用 `javac ... | grep ...`：管道会让 $? 变成 grep 的退出码，
-          # 编译失败会被当成成功。先落文件、查退出码、再过滤。
-          # shellcheck disable=SC2046  # Java 源文件路径不含空格，刻意展开为 javac 参数
-          javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$JAR" \
-            -d "$W/classes" \
-            $(find tile-app/src "$W/gen" -name '*.java') > "$W/javac.log" 2>&1
-          _rc=$?
-          grep -vE 'bootstrap class path|source value 8|target value 8|obsolete|Xlint' \
-            "$W/javac.log" || true
-          if [ "$_rc" -ne 0 ]; then
-            echo "::error::磁贴 App 编译失败"
-            exit 1
-          fi
-          # 清单声明的两个组件都必须在，防止「只编出一个类」的假绿
-          for c in MagpieTileService MainActivity LauncherIcon Shell SelfCheck TileState SerialExecutor; do
-            if [ ! -f "$W/classes/com/ruin/magpie/tile/$c.class" ]; then
-              echo "::error::缺少编译产物 $c.class"
-              exit 1
-            fi
-          done
-          echo "磁贴 App 编译通过"
+          trap 'rm -rf "$W"' EXIT
+          MAGPIE_KEYSTORE="$W/test-only.p12"
+          MAGPIE_KS_PASS=$(openssl rand -hex 20)
+          export MAGPIE_KEYSTORE MAGPIE_KS_PASS
+          keytool -genkeypair -storetype PKCS12 -keystore "$MAGPIE_KEYSTORE" -alias magpie \
+            -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=Disposable CI verification' \
+            -storepass:env MAGPIE_KS_PASS -keypass:env MAGPIE_KS_PASS >/dev/null 2>&1
+          MAGPIE_BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0" sh build.sh "$W/dist"
+          V=$(sed -n 's/^version=//p' module.prop)
+          ZIP="$W/dist/magpie-$V.zip"
+          python3 -I scripts/ci/release-artifacts.py verify --source "$PWD" --file "$ZIP" --tag "$V"
+          unzip -p "$ZIP" magpie-tile.apk > "$W/tile.apk"
+          apksigner verify --print-certs "$W/tile.apk" > "$W/cert-details"
+          sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$W/cert-details" > "$W/test-cert.txt"
+          EXPECTED_CERT_FILE="$W/test-cert.txt" sh scripts/ci/verify-release-zip.sh "$ZIP" "$V"
+          zipalign -c 4 "$W/tile.apk"

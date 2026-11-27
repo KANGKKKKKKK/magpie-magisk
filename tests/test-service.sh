@@ -118,7 +118,7 @@ while [ "$i" -lt 20 ] && [ ! -s "$B/calls.log" ]; do
   sleep 0.2; i=$((i + 1))
 done
 [ -d "$B/run" ] && ok "自动建出了 run 目录" || bad "run 目录没建出来"
-if grep -q "STUB service start" "$B/calls.log" 2>/dev/null; then
+if grep -q "STUB service auto-start" "$B/calls.log" 2>/dev/null; then
   ok "服务确实被拉起（重定向没把命令吞掉）"
 else
   bad "服务没被拉起：$(cat "$B/calls.log" 2>/dev/null)"
@@ -153,6 +153,43 @@ if alive "$MAIN"; then bad "主进程还活着"; else ok "主进程已停"; fi
 if alive "$ORPH"; then bad "孤儿还活着"; else ok "孤儿已清"; fi
 
 echo
+echo "== 4a 卸载及禁用标记要阻止所有新启动，不能阻止 stop"
+for _gate in .uninstalling disable; do
+  build
+  printf '#!/bin/sh\nprintf started > "%s/launched"\n' "$B" > "$B/bin/magpie"
+  chmod 755 "$B/bin/magpie"
+  : > "$B/$_gate"
+  for _entry in start restart toggle; do
+    _out=$(sh "$B/scripts/magpie.service" "$_entry" 2>&1); _rc=$?
+    case "$_rc:$_out" in
+      0:*) bad "$_gate 未阻止 $_entry" ;;
+      *拒绝启动*) [ ! -e "$B/launched" ] && ok "$_gate 阻止 $_entry" || bad "$_entry 仍执行了本体" ;;
+      *) bad "$_entry 未报告维护或禁用：$_out" ;;
+    esac
+  done
+  if sh "$B/scripts/magpie.service" stop >/dev/null 2>&1; then ok "$_gate 下仍允许 stop"; else bad "$_gate 阻止了清理"; fi
+done
+
+echo "== 4b 旧数据位于模块树时明确告警，不宣称已保留"
+build
+mkdir -p "$B/legacy-data"
+printf 'magpie_path="%s"\n' "$B/legacy-data" > "$B/cfg"
+printf '#!/bin/sh\n[ "$1" = stop ]\n' > "$B/scripts/magpie.service"
+# 就算守卫失效，模拟脚本也不允许读系统进程、卸载 App 或清理真实目录。
+sed -e "s#/proc/#$B/proc/#g" -e "s#/data/adb/#$B/fake-adb/#g" \
+    "$SRCDIR/uninstall.sh" > "$B/uninstall.sh"
+stub_lib "magpie_resolve_conf() { printf '%s\\n' '$B/cfg'; }
+kill() { : > '$B/unsafe'; return 1; }
+pm() { : > '$B/unsafe'; return 1; }"
+_out=$(sh "$B/uninstall.sh" 2>&1); _rc=$?
+case "$_rc:$_out" in
+  0:*) bad "旧模块内数据布局误报卸载成功" ;;
+  *不能保证数据保留*) [ -d "$B/legacy-data" ] && [ ! -e "$B/unsafe" ] && ok "警告后停止，未清理旧布局" || bad "不应清理旧布局" ;;
+  *) bad "未明确说明管理器可能删除数据：$_out" ;;
+esac
+
+echo
+
 echo "== 4 start：只清 MCP 孤儿，不碰普通 magpie 命令"
 build
 MCP=$(sleeper); CLI=$(sleeper)
@@ -229,6 +266,14 @@ printf 'magpie_path="%s"\nMAGPIE_ADDR="127.0.0.1:3456"\nMAGPIE_WEB_ADDR=""\n' "$
 MAGPIE_CONF="$B/cfg" sh "$B/scripts/status.sh" >/dev/null 2>&1
 if grep -q '"apiPort": 3456,' "$J" 2>/dev/null; then ok "MAGPIE_CONF 生效，端口用的是 3456"
 else bad "配置没生效：$(grep '"apiPort"' "$J" 2>/dev/null)"; fi
+mkdir -p "$B/data" "$B/run"
+printf 'web-password-sentinel-1234567890\n' > "$B/data/web.key"
+printf 'http://127.0.0.1:3430/?k=web-password-sentinel-1234567890\n' > "$B/run/web.url"
+printf 'request ?k=web-password-sentinel-1234567890 Bearer abcdefghijklmnop sk-1234567890secret\n' > "$B/run/magpie.log"
+MAGPIE_CONF="$B/cfg" sh "$B/scripts/status.sh" >/dev/null 2>&1
+if grep -Eq 'apiKey|webKey|webUrlKey|web-password-sentinel|sk-1234567890secret' "$J"; then bad "状态 JSON 含秘密或密码链接"; else ok "状态 JSON 不含长期密钥或带密码 URL"; fi
+if grep -Eq 'web-password-sentinel|sk-1234567890secret|Bearer abcdefghijklmnop' "$B/webroot/lastlog.txt"; then bad "公开日志快照未脱敏"; else ok "WebUI 日志快照遮盖常见 URL/Bearer/API key"; fi
+if grep -Eq 'webUrlKey|d\.webUrlKey|window\.open|href = d\.webUrl' "$SRCDIR/webroot/index.html"; then bad "模块 WebView 仍有面板导航链接"; else ok "模块 WebView 不导航到面板，也不携带密码链接"; fi
 
 echo "== 7 看门狗也要等开机：两条启动路径不会在开机过程中抢着 start"
 # 静态断言：wait_boot_completed 必须出现在看门狗子 shell 里、循环之前。
@@ -261,7 +306,7 @@ i=0
 while [ "$i" -lt 40 ] && [ ! -s "$B/calls.log" ]; do
   sleep 0.2; i=$((i + 1))
 done
-if grep -q "STUB service start" "$B/calls.log" 2>/dev/null; then
+if grep -q "STUB service auto-start" "$B/calls.log" 2>/dev/null; then
   ok "等不到开机完成时超时后仍会启动（不会永远卡住）"
 else
   bad "getprop 不报开机完成时服务一直没启动"
@@ -331,6 +376,10 @@ esac
 _fp=$(cat "$B/fake.pid" 2>/dev/null)
 [ -n "$_fp" ] && ok "确实把进程起来了" || bad "toggle 没有启动进程"
 [ -f "$B/run/.user_stopped" ] && bad "启动后不该留 .user_stopped" || ok "启动清掉了停止标记"
+stub_lib 'magpie_port_rows() { return 1; }'
+_out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && [ -z "$_out" ] && ok "只有进程、没有监听归属证据时不提供地址" || bad "panel-url 根据 PID 猜了地址：$_out"
+[ ! -e "$B/run/web.url" ] && ok "不再创建含访问密钥的 web.url 副本" || bad "旧凭据 URL 缓存仍存在"
 
 # 情形二：在跑 → 应该停，并写下停止标记（进程判定已经是读 fake.pid，无需再打桩）
 _out=$(sh "$B/scripts/magpie.service" toggle 2>&1)
@@ -377,7 +426,7 @@ exec 7>>"$B/run/.service.flock"
 magpie_flock -n 7 || exit 1
 sh "$B/scripts/magpie.service" stop 7>&- >"$B/stop.log" 2>&1 & _stop=$!
 KIDS="$KIDS $_stop"
-wait_file "$B/run/.stop-request.$_stop" || bad "stop 未进入等待"
+wait_file "$B/run/.stop-request.$_stop" && wait_file "$B/run/.user_stopped" || bad "stop 未在锁等待前发布意图"
 [ -f "$B/run/.user_stopped" ] && ok "等待锁时已写入停止标记" || bad "停止意图被锁延迟"
 magpie_flock -u 7; exec 7>&-
 wait "$_stop"
@@ -392,8 +441,14 @@ DATA="$B"; export DATA
 # 抽出的卸载片段只能看到沙箱 PID；没有 fifo 身份时绝不能杀。
 eval "$(sed -n '/^if \[ -f "\$DATA\/run\/dnsmasq.keep.pid" \]/,/^fi$/p' "$SRCDIR/uninstall.sh")"
 if kill -0 "$_kp" 2>/dev/null; then ok "keep.pid 指向普通 sleep 时不误杀"; else bad "普通 sleep 被 keep.pid 误杀"; fi
-eval "$(sed -n '/^kill_if_magpie()/,/^}/p' "$SRCDIR/uninstall.sh")"
-if kill_if_magpie "$$"; then bad "非 magpie 进程通过身份校验"; else ok "非 magpie 进程被拒绝 kill"; fi
+if grep -q '^kill_if_magpie()' "$SRCDIR/uninstall.sh"; then
+  bad "卸载器不应保留模糊兜底进程终止函数"
+else
+  ok "卸载器不再使用模糊兜底进程终止函数"
+fi
+if grep -q 'pidof magpie-bun' "$SRCDIR/uninstall.sh"; then bad "卸载器仍按宽泛 magpie-bun 名称兜底杀进程"; else ok "卸载器不再按宽泛进程名兜底杀进程"; fi
+if grep -Fq 'rm -rf "$DATA"' "$SRCDIR/uninstall.sh" || grep -Fq 'rm -rf "$_dir"' "$SRCDIR/uninstall.sh"; then bad "卸载器仍递归删除用户数据"; else ok "卸载器不递归删除用户数据"; fi
+if grep -q '服务停止失败' "$SRCDIR/uninstall.sh" && grep -q '保留用户数据并中止清理' "$SRCDIR/uninstall.sh"; then ok "停止失败时保留数据并中止清理"; else bad "卸载停止失败未失败关闭"; fi
 
 reap
 echo
@@ -600,6 +655,7 @@ mkdir -p "$B/run"
   cat <<'MOCK'
 RUN=$1; PIDFILE="$RUN/magpie.pid"; USER_STOPPED="$RUN/.user_stopped"
 log() { :; }; cleanup_legacy_dnsmasq() { :; }; sleep() { :; }
+with_stop_intent_lock() { : > "$USER_STOPPED"; }
 magpie_main_pid() { [ ! -f "$RUN/killed.101" ] && echo 101; }
 magpie_all_pids() { echo all >> "$RUN/forbidden"; echo 101 202 303; }
 magpie_command_pids() {
@@ -636,21 +692,23 @@ echo "== 23 toggle 取消 / 启动失败 / 后置退出不能伪报 running"
 build
 {
   extract_service running
+  extract_service start_allowed
   extract_service start
   # 直接抽生产 dispatch 中 toggle 分支，不复制判定算法。
-  sed -n '/^  toggle)/,/^    ;;/p' "$SRCDIR/scripts/magpie.service" | sed '1s/  toggle)/toggle_dispatch() {/' | sed '$s/    ;;/}/'
+  sed -n '/^  toggle|toggle-if)/,/^    ;;/p' "$SRCDIR/scripts/magpie.service" | sed '1s/  toggle|toggle-if)/toggle_dispatch() {/' | sed '$s/    ;;/}/'
   cat <<'MOCK'
-RUN=$1; USER_STOPPED="$RUN/.user_stopped"; PIDFILE="$RUN/magpie.pid"
+RUN=$1; MODDIR=${RUN%/*}; USER_STOPPED="$RUN/.user_stopped"; PIDFILE="$RUN/magpie.pid"
 ADDR_ERROR=""; CONF=unused; BIN="$RUN/no-binary"
 log() { :; }; acquire_service_lock() { :; }; sync_status() { :; }
 magpie_main_pid() { return 1; }; cleanup_legacy_dnsmasq() { :; }
 magpie_mcp_pids() { :; }
+with_stop_intent_lock() { has_stop_request && return 2; return 0; }
 case "$2" in
   cancel) has_stop_request() { return 0; } ;;
   fail) has_stop_request() { return 1; } ;;
   vanished) start() { return 0; } ;;
 esac
-toggle_dispatch
+toggle_dispatch toggle
 MOCK
 } > "$B/toggle-mock.sh"
 mkdir -p "$B/run"
@@ -813,6 +871,101 @@ build_proc_controller
 rm -rf "$B/proc/101" "$B/proc/102" "$B/proc/201"
 _out=$(sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
 [ "$_rc" = 0 ] && [ ! -s "$B/run/signals" ] && [ ! -e "$B/run/magpie.pid" ] && ok "已经停止时直接 stop 幂等成功，不碰仍在运行的普通 CLI" || bad "幂等 stop 不正确：$_rc $_out"
+
+echo "== 27 控制器只返回已核验且仍对应 Web 配置的回环地址"
+build_proc_controller
+printf '101\n' > "$B/candidates"
+printf 'magpie_path="%s"\nMAGPIE_WEB_ADDR="[::1]:3430"\n' "$B" > "$B/cfg"
+proc_candidate 101 "$B/bin/magpie" magpie serve '--web=[::1]:3430'
+mkdir -p "$B/proc/self/net" "$B/proc/self/ns" "$B/proc/101/ns" "$B/proc/101/fd"
+ln -s 'net:[101]' "$B/proc/self/ns/net"
+ln -s 'net:[101]' "$B/proc/101/ns/net"
+ln -s 'socket:[501]' "$B/proc/101/fd/5"
+printf ' sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n' > "$B/proc/self/net/tcp"
+cp "$B/proc/self/net/tcp" "$B/proc/self/net/tcp6"
+printf ' 0: 00000000000000000000000001000000:0D66 0:0 0A 0:0 00:0 0 0 0 501\n' >> "$B/proc/self/net/tcp6"
+_out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?
+[ "$_rc:$_out" = '0:http://[::1]:3430/' ] && ok "真实控制器输出已核验的 IPv6 回环地址" || bad "IPv6 面板地址不正确：$_rc $_out"
+proc_candidate 101 "$B/bin/magpie" magpie serve '--web=[::1]:3440'
+_out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && [ -z "$_out" ] && ok "当前配置未应用到 Web 时不返回地址" || bad "误把其它端口认作面板：$_out"
+proc_candidate 101 "$B/bin/magpie" magpie serve '--web=[::1]:3430'
+rm "$B/proc/101/fd/5"
+_out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && [ -z "$_out" ] && ok "不能确认 Web socket 归属时拒绝提供地址" || bad "误把未知监听认作面板：$_out"
+
+echo "== 28 doctor 把配置目标与实际监听分开"
+_doctor_scope=$(sed -n '/^report_scope() {/,/^}/p' "$SRCDIR/scripts/doctor.sh")
+. "$SRCDIR/scripts/lib.sh"
+_doctor_result=$(
+  eval "$_doctor_scope"
+  ok() { echo "ok:$1"; }; warn() { echo "warn:$1"; }; bad() { echo "bad:$1"; }
+  report_scope 面板 127.0.0.1:3430 nonlocal
+  report_scope 网关 127.0.0.1:3425 unknown
+  report_scope 面板 '[::1]:3430' 'local [::1]'
+)
+if printf '%s\n' "$_doctor_result" | grep -q 'bad:面板.*配置未生效'; then ok "仍有非回环监听时报告不一致"; else bad "doctor 从配置推断局域网已关闭"; fi
+if printf '%s\n' "$_doctor_result" | grep -q 'warn:网关.*未知'; then ok "归属未知时不报告安全状态"; else bad "doctor 把未知当作已核验"; fi
+if printf '%s\n' "$_doctor_result" | grep -q 'ok:面板.*与配置目标一致'; then ok "IPv6 回环核验成功时报告匹配"; else bad "doctor 未正确处理已核验的 IPv6"; fi
+
+echo "== 29 开机与看门狗只接受当前 boot 的停止意图，结束的 stop 不会被撤销"
+build
+mkdir -p "$B/run"
+_current_boot=11111111-2222-3333-4444-555555555555
+_old_boot=11111111-2222-3333-4444-666666666666
+stub_lib "magpie_boot_id() { printf '%s\\n' '$_current_boot'; }
+magpie_main_pid() { [ -e '$B/launched' ] && printf '424242\\n'; }"
+printf '#!/bin/sh\n: > "%s/launched"\n' "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+_out=$(sh "$B/scripts/magpie.service" stop 2>&1); _rc=$?
+[ "$_rc" -eq 0 ] && grep -qx "boot=$_current_boot" "$B/run/.user_stopped" && ok "stop 写入准确的 boot ID" || bad "停止标记缺失：$_out"
+_out=$(sh "$B/scripts/magpie.service" auto-start 2>&1); _rc=$?
+[ "$_rc" -eq 2 ] && [ ! -e "$B/launched" ] && ok "stop 已完成、请求文件已清理时也拒绝自动启动" || bad "自动启动覆盖了已完成 stop：$_out"
+: > "$B/run/.user_stopped"
+_out=$(sh "$B/scripts/magpie.service" auto-start 2>&1); _rc=$?
+[ "$_rc" -eq 2 ] && [ ! -e "$B/launched" ] && ok "无法判定旧空标记代次时保守停止" || bad "旧标记被不安全地忽略：$_out"
+printf 'boot=%s\n' "$_old_boot" > "$B/run/.user_stopped"
+_out=$(sh "$B/scripts/magpie.service" auto-start 2>&1); _rc=$?
+[ "$_rc" -eq 0 ] && [ -e "$B/launched" ] && grep -qx "boot=$_old_boot" "$B/run/.user_stopped" && ok "新 boot 可自启且自动路径不删除标记" || bad "处理上一 boot 标记失败：$_out"
+: > "$B/run/.user_stopped"
+_out=$(sh "$B/scripts/magpie.service" start 2>&1); _rc=$?
+[ "$_rc" -eq 0 ] && [ ! -e "$B/run/.user_stopped" ] && ok "显式启动能清除无代次旧标记" || bad "显式启动未覆盖旧标记：$_out"
+
+echo "== 29b 启动准备期间，较新的 stop 发布后不得再派生服务"
+build
+mkdir -p "$B/run"
+stub_lib "magpie_boot_id() { printf '%s\\n' '$_current_boot'; }
+magpie_ca_fingerprint() { printf 'fixture\\n'; }
+magpie_write_ca_bundle() {
+  : > '$B/preparing'
+  _prep_left=160
+  while [ ! -e '$B/unblock' ] && [ \"\$_prep_left\" -gt 0 ]; do
+    sleep 0.03; _prep_left=\$((_prep_left - 1))
+  done
+  return 1
+}"
+printf '#!/bin/sh\n: > "%s/launched"\n' "$B" > "$B/bin/magpie"
+chmod 755 "$B/bin/magpie"
+sh "$B/scripts/magpie.service" auto-start > "$B/auto.log" 2>&1 & _prep_start=$!
+KIDS="$KIDS $_prep_start"
+wait_file "$B/preparing" || bad "auto-start 未进入准备阶段"
+sh "$B/scripts/magpie.service" stop > "$B/stop.log" 2>&1 & _prep_stop=$!
+KIDS="$KIDS $_prep_stop"
+wait_file "$B/run/.user_stopped" || bad "准备阶段未收到后来的停止意图"
+: > "$B/unblock"
+wait "$_prep_start"; _prep_rc=$?
+wait "$_prep_stop"; _prep_stop_rc=$?
+[ "$_prep_rc:$_prep_stop_rc" = 2:0 ] && [ ! -e "$B/launched" ] && ok "启动前复查能取消待派生的服务" || bad "停止前后返回码不符或已派生：$_prep_rc:$_prep_stop_rc"
+
+echo "== 30 条件切换失配时不发信号、不改变停止意图"
+build_proc_controller
+_out=$(sh "$B/scripts/magpie.service" toggle-if stopped 2>&1); _rc=$?
+[ "$_rc:$_out" = '3:stale running' ] && [ ! -s "$B/run/signals" ] && [ ! -e "$B/run/.user_stopped" ] && ok "磁贴以为停服时不停止实际运行的实例" || bad "错误反转 running：$_rc $_out"
+_out=$(sh "$B/scripts/magpie.service" toggle-if running 2>&1); _rc=$?
+[ "$_rc" -eq 0 ] && [ "$(printf '%s\n' "$_out" | tail -1)" = stopped ] && [ -f "$B/run/.user_stopped" ] && ok "预期运行与实际一致时执行真正 stop" || bad "有效的条件停止失败：$_out"
+_prev=$(cat "$B/run/.user_stopped")
+_out=$(sh "$B/scripts/magpie.service" toggle-if running 2>&1); _rc=$?
+[ "$_rc:$_out" = '3:stale stopped' ] && [ ! -e "$B/run/start-sentinel" ] && [ "$(cat "$B/run/.user_stopped")" = "$_prev" ] && ok "磁贴以为运行时不重新拉起已停止实例" || bad "错误反转 stopped：$_rc $_out"
 
 reap
 

@@ -147,16 +147,14 @@ instead of the static description; the status strings themselves are Chinese.
 
 **5. Open the panel**
 
-Tap `[Action]` → 6 to open the panel in a browser, with the key already in the URL. Or read the
-panel URL yourself:
+Use `[Action]` → 6 to open the panel. The controller checks that the running service owns a loopback listener matching the current Web configuration before handing a credential-free address to an external browser. To query just that address:
 
 ```sh
-su -c cat /data/adb/magpie/run/web.url
-# http://127.0.0.1:3430/?k=<32-char access password>
+su -c sh /data/adb/modules/magpie/scripts/magpie.service panel-url
+# Example: http://127.0.0.1:3430/
 ```
 
-Paste that into the phone's browser. That is magpie's own panel — see
-[the two panels](#two-different-panels) before mixing it up with the module's.
+If it returns no address, run `doctor.sh` to inspect the listener; don't enter passwords into an unconfirmed page. If the verified panel needs sign-in, follow the installed Magpie version's login flow in an ordinary browser. This is Magpie's own panel, not [the module WebUI](#two-different-panels).
 
 > [!TIP]
 > To open the panel from a computer, set `MAGPIE_WEB_ADDR` to `0.0.0.0:3430` (see
@@ -210,11 +208,7 @@ with that value. **Caveat:** that sha256 comes from the same manifest, so the tr
 "usemagpie.ai over TLS" — the same assumption magpie's own updater makes. The release also ships
 `SHA256SUMS.sig`, but this module has no pinned key, so it does **not** claim GPG verification.
 
-**How it is deployed.** Download to a temp file on the same filesystem → verify → atomic `mv`
-(never a half-written binary); the previous body is backed up to `bin/magpie.bak` first. A
-`--version` self-check runs right after install: if it fails, roll back; on a first install with no
-backup the sample is moved to `bin/magpie.rejected` with its sha256 printed, and nothing that "looks
-installed" is left at the real path.
+**How it is deployed.** Verify the download and run the candidate's `--version` before switching atomically. Only a verified previous binary updates `bin/magpie.bak`. If the check at the final path or writing the install record fails, the previous binary and record are restored. A candidate that fails its preliminary check does not replace the body and is retained as `bin/magpie.rejected` when possible.
 
 **What it does not do.** No automatic download, no checking on every boot, no automatic upgrades, no
 overwriting a working body (unless you pass `install --yes`), and no touching `data/`, config,
@@ -230,10 +224,7 @@ su -c magpie update         # download, verify, restart into it
 > terminal, so `customize.sh` only detects and tells you how; the download happens when you confirm it.
 
 > [!NOTE]
-> The installer does not assume `wget` is on `PATH`. Module scripts started by the manager often
-> get a system-only `PATH` with no `wget` in it; the installer prepends each root solution's bin
-> directory and falls back to busybox's own `wget` when needed. Set `MAGPIE_DL=/path/to/curl` to
-> force another downloader.
+> The body installer requires curl with certificate verification and HTTPS redirect restrictions. When the manager's PATH lacks curl, set `MAGPIE_DL` to the absolute path of a **trusted Android-compatible curl**. A trusted PEM can be selected via `MAGPIE_TLS_CA_BUNDLE`. There is no fallback to BusyBox wget with weaker TLS checks. An already installed body and routine service control do not require this downloader.
 
 > [!TIP]
 > To use another source (an internal mirror, a cache):
@@ -268,10 +259,10 @@ The `[Action]` button in the manager opens a **volume-key menu** — no typing, 
 
 | Item | Does |
 | --- | --- |
-| 1 Switch gateway | Toggles both API and panel listeners between `127.0.0.1` (this device only) and `0.0.0.0` (LAN); restarts a running service to apply |
-| 2 Connection info | Lists the local and LAN addresses, plus what to paste into another device |
+| 1 Switch gateway | This device only: both listeners stay on loopback. LAN API: only the API is exposed. A running service is restarted as needed, and its listeners are checked. |
+| 2 Connection info | Lists configured addresses and independently observed listener state |
 | 3 / 4 / 5 | Restart / stop / start |
-| 6 Open panel | Opens the WebUI in a browser, with your key |
+| 6 Open panel | Opens the verified loopback panel in an external browser without credentials |
 | 7 Quit | Closes the `[Action]` window and returns to the module list |
 
 With no body installed (or one that won't run) the button is still the install entry: it prints
@@ -282,10 +273,7 @@ version, size and source first, and only a second tap downloads.
 > address → paste it into magpie on the tablet. Switch back to "this device only" afterwards.
 
 > [!WARNING]
-> Switching to LAN mode changes **both the API and panel listeners** to `0.0.0.0`
-> (ports 3425 / 3430 by default). Both use unencrypted HTTP by default: use trusted networks only,
-> never expose them directly to the public internet. To share only the API, set
-> `MAGPIE_ADDR=0.0.0.0:3425` and keep `MAGPIE_WEB_ADDR=127.0.0.1:3430`, then restart.
+> **LAN API** only exposes the API; the management panel stays on loopback. **This device only** configures both listeners for loopback. The default transport is HTTP: use trusted networks only, never expose it directly to the public internet. Check the observed listener result, not just the saved configuration.
 
 The volume keys do change the media volume on the way; the menu restores the value it found on
 exit. Run from a terminal the menu redraws in place (only the `▸` moves); the manager's text box
@@ -316,15 +304,14 @@ webroot one **P2**, so there is no left/right to get confused about:
 
 **P1**: magpie's own panel, captured on the About page (version, update switches); models,
 providers, quota and keys live here.  
-**P2**: the module's webroot panel. It needs KernelSU WebUI / WebUI-X as a host; the API key
-and access password are collapsed behind a "show" button and are not in the capture.
+**P2**: the module's webroot panel. It needs KernelSU WebUI / WebUI-X as a host. It displays a credential-free snapshot and cannot navigate its host WebView to the body panel. The older capture only illustrates layout.
 
 | | P1: magpie's own panel | P2: the module's webroot panel |
 | --- | --- | --- |
-| URL | `http://<host>:3430/?k=<data/web.key>`; or `[Action]` → 6 | provided by the host, see next column |
+| URL | `panel-url` returns a verified loopback URL without credentials; or `[Action]` → 6 | provided by the host, see next column |
 | Served by | magpie itself (`serve --web=…`) | `webroot/index.html`, which needs **KernelSU WebUI** or Magisk **WebUI-X** |
-| What you see | magpie's full app (Agent / Sessions / Library / Providers / Gateway / Usage / Models / Plugins / Settings) | service state and PID, gateway URL and API key, panel URL and password, log tail |
-| Plain Magisk | ✅ works; URL comes from `run/web.url` | ❌ no host, nothing renders; `webroot/status.json` is still written and readable from scripts |
+| What you see | magpie's full app (Agent / Sessions / Library / Providers / Gateway / Usage / Models / Plugins / Settings) | service state and PID, API config candidates, a verified panel URL if available, and a best-effort redacted log tail |
+| Plain Magisk | ✅ works; the controller verifies the address | ❌ no host, nothing renders; `webroot/status.json` is still written and readable from scripts |
 
 ### CLI
 
@@ -391,8 +378,7 @@ Loopback does not authenticate the key. **This does not apply to LAN calls**; se
    For example: `http://192.168.1.100:3425/v1`. Do not enter `127.0.0.1` or `0.0.0.0` on the other device.
 
 > [!WARNING]
-> LAN mode opens both the API and the management panel, over HTTP by default. Use trusted networks
-> only. To share only the API, configure its listener separately as described above.
+> LAN mode opens only the API, over HTTP by default. Use trusted networks only.
 > The API key is not the panel password from `?k=`.
 
 > [!NOTE]
@@ -487,8 +473,8 @@ a real model call.
 | API returns 401 | LAN calls need a full enabled gateway key, not a panel password, placeholder or mask |
 | `model not found` | Copy the `id` again from `/v1/models`; check enabled models and key permissions |
 | Model list works, messages fail | Read the error and logs; check provider sign-in, quota, upstream network and model capabilities |
-| Panel returns 401 | Use the complete `run/web.url` URL or `[Action]` → 6; do not use its password as an API key |
-| Module panel shows "click to reveal" | Hidden by default; if the value is only a mask, use the full key saved at creation or rotation |
+| Panel returns 401 | Verify the local panel address first, then follow the installed Magpie version’s login flow. Do not use the panel password as an API key. |
+| Module panel does not show the API key | It is not included in the module snapshot; use the full key saved at creation or rotation. |
 
 </details>
 
@@ -512,8 +498,7 @@ after that the browser uses the cookie. So `?k=` is needed only once per browser
 > "Has a key" is not a local security boundary — do not treat it as one.
 
 Magpie's own panel (P1) manages providers, accounts and gateway keys, not just status. The module
-panel's status file (P2) may also contain sensitive values. **Do not share a full `?k=` URL,
-key screenshots or `status.json`**. A collapsed value in the interface is not redaction.
+panel's status JSON (P2) no longer contains keys. Its log tail is only redacted on a best-effort basis. **Do not share a full `?k=` URL or key screenshots**; inspect any logs yourself before posting.
 
 Exposure once you open the LAN listener:
 
@@ -522,8 +507,7 @@ Exposure once you open the LAN listener:
 - `MAGPIE_WEB_ADDR=0.0.0.0:3430` → the panel is exposed; without `?k=` you get 401. If the password
   leaks, someone may enter the management interface and change provider or key settings.
 
-The LAN menu changes both listeners. They use HTTP without TLS by default: use trusted networks
-only and never forward them directly to the public internet.
+The LAN menu changes the API to a non-loopback listener and keeps the management panel on loopback. HTTP is not encrypted: use only trusted networks and never forward these ports to the public internet.
 
 Suggested order: **create a gateway key first, then open the LAN listener**. If you only use the
 phone itself, leave the defaults at `127.0.0.1`. When unsure, run `doctor.sh` — it prints the
@@ -569,22 +553,7 @@ The service script, `status.sh`, `doctor.sh`, `magpie`, and the uninstaller use 
 the config file itself is still read from the fixed locations above. Leave `magpie_path` alone if
 you only need to change listeners or DNS.
 
-The installer and uninstaller use a default-deny path allowlist: only `/data/adb/magpie`,
-`/data/adb/modules/magpie`, and their descendants are allowed. The installer additionally rejects
-symlinks in the target path or relevant descendants, and its `status`, `check`, `plan`, `install`,
-and `rollback` entry points all validate first.
-
-If an older custom `magpie_path` lies outside those roots, an upgrade **will not** migrate or delete
-it, and the service will not move or clean it. In that state:
-
-- running the module's `scripts/magpie.service start|stop|restart|status` directly still works from
-  the existing configuration;
-- the `[Action]` menu and `action.sh start|stop|restart` first call `install.sh status` to decide
-  whether the binary is ready, so the path check blocks them; `action.sh status|gateway|lan|local|panel`
-  do not take that step.
-
-To restore the full feature set, move the data directory back inside the allowed roots: back up,
-stop the service, move the files, update the configuration, then start it again.
+The installer writes only to `/data/adb/magpie` and its descendants and refuses symlinks. For old installations using `/data/adb/modules/magpie`, `install.sh status` can still inspect the existing binary. Before installing, rolling back, updating the module or removing it, back up and move the data outside the module tree. Other unsupported legacy paths require stopping via `magpie.service` before migration. Nothing is moved automatically.
 
 Restart to apply:
 
@@ -598,12 +567,12 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ```
 [1/10] binary and process    installed? runs? version? PID? oom_score_adj?
-[2/10] listeners             is anything on the gateway / panel ports
+[2/10] listeners             verified socket ownership and bind scope
 [3/10] local reachability    does the gateway answer 200
-[4/10] panel and password    is data/web.key there, does it work
+[4/10] panel and password    is the password file present (never read or sent)
 [5/10] gateway keys          how many are enabled
 [6/10] CA bundle             certificate count and permissions
-[7/10] LAN exposure          open to the subnet? what address is advertised?
+[7/10] LAN exposure          configured targets versus observed API / Web listeners
 [8/10] DNS                   is /etc/resolv.conf there, can the upstream resolve
 [9/10] quick tile            installed? root grant? what it paints, matches reality? frozen?
 [10/10] logs and storage     log sizes, data dir writable, free space
@@ -621,7 +590,7 @@ the script then names the likely freezer (NoActive / CZero / system
 | Says the body is not installed | Expected state, not a fault. See [Installing the body](#installing-the-body) |
 | Install: cannot fetch the manifest | No network, or the endpoint is blocked. Try `install.sh check`; use `MAGPIE_MANIFEST_URL` for another source |
 | Install: sha256 mismatch | Something rewrote or truncated the download. Retry on another network; if it persists, do not install — check the release page |
-| Install: runs, then fails the self-check | First install leaves the sample at `bin/magpie.rejected` with its digest; an existing body is rolled back from `bin/magpie.bak` |
+| Install: runs, then fails the self-check | Preflight failure leaves the candidate at `bin/magpie.rejected` when possible; failure at the final path restores the exact previous state |
 | Want the previous body back | `install.sh rollback` |
 | Start fails, log says port in use | Identify the listener with `doctor.sh` or `ss -ltnp`; use `restart` if it is this service. Do not kill all `pidof magpie` results: MCP children may share that name |
 | Panel data never changes | Check "数据 HH:MM:SS": normal polling refreshes about every 2.5 min by default; custom intervals or failed-start backoff can delay it. If stale for a long time, check the watchdog process and startup/error entries in `run/watchdog.log`; it does not log every round |
@@ -629,7 +598,7 @@ the script then names the likely freezer (NoActive / CZero / system
 | Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/10]` in doctor |
 | Process returns after being killed | The watchdog revives unexpected exits. Stop through the menu, tile or `magpie.service stop` instead; `.user_stopped` prevents watchdog restarts during this boot |
 | Edited `magpie.config` but nothing changed | Make sure you edited `/data/adb/magpie/scripts/magpie.config`, then `restart` |
-| No start on boot | Confirm the module is enabled; read startup errors in `run/watchdog.log` and run `doctor.sh`. A manual-stop marker does not prevent the next boot from starting the service; explicit `start` clears it too |
+| No start on boot | Confirm the module is enabled; read startup errors in `run/watchdog.log` and run `doctor.sh`. A boot-ID marker from the previous boot does not block startup. An unversioned legacy marker is conservative and can be cleared by explicit `start`. |
 
 More detail in [CHANGELOG.md](CHANGELOG.md).
 
@@ -723,7 +692,6 @@ Generated at runtime, never committed:
 ```
 /data/adb/magpie/run/magpie.log        service log
 /data/adb/magpie/run/watchdog.log      watchdog log
-/data/adb/magpie/run/web.url           panel URL with password
 /data/adb/magpie/run/lan.url           LAN address (when exposed)
 /data/adb/magpie/run/.user_stopped     marker for a manual stop
 /data/adb/magpie/run/magpie.pid        PID file
@@ -733,8 +701,8 @@ Generated at runtime, never committed:
 /data/adb/magpie/.install.lock         install mutex
 /data/adb/magpie/.install.pending      second-tap confirmation marker
 /data/adb/magpie/data/certs/           CA bundle and its fingerprint
-webroot/status.json                    panel data (contains keys, mode 600)
-webroot/lastlog.txt                    panel log tail (mode 600)
+webroot/status.json                    credential-free panel data (mode 600)
+webroot/lastlog.txt                    best-effort redacted panel log tail (mode 600)
 ```
 
 ## Uninstall
@@ -745,13 +713,10 @@ Remove the module in the manager, or:
 su -c sh /data/adb/modules/magpie/uninstall.sh
 ```
 
-It writes an uninstall marker so the watchdog exits, stops the service, kills the watchdog and the
-plugin host `magpie-bun`, cleans up legacy dnsmasq, removes the `magpie` link from `PATH`, deletes
-all of `/data/adb/magpie` (settings, providers, gateway keys, usage records, certificates, Bun
-cache) and finally verifies nothing is left.
+The uninstall script writes a maintenance marker and stops the service first. It aborts cleanup if stopping fails or verified service processes remain. It does not delete the persistent data root: the binary, settings, providers, keys, usage records, and logs are retained by default. Back up and double-check the path before deleting any of them manually.
 
 > [!WARNING]
-> The data directory is deleted entirely. Back up `/data/adb/magpie/data` first if you want it.
+> Earlier versions allowed `magpie_path` inside the module directory. **Back up and move such data to `/data/adb/magpie` before removing or updating the module.** The manager may delete its entire module tree and may ignore the script's exit code; the script does not migrate the data for you.
 
 ## Updates
 
@@ -759,10 +724,12 @@ cache) and finally verifies nothing is left.
 
 - The manager compares `versionCode` and offers an update when a new release exists.
 - Releases are built by GitHub Actions: push a `v*` tag and the workflow packs the zip, verifies
-  its structure, publishes the release and rewrites `update.json`.
+  its source and signatures, publishes the release and proposes an `update.json` PR.
 - Updating the module **does not** touch `/data/adb/magpie`, so providers, keys and logs survive.
 
 ## Known limitations
+
+- Boot and watchdog use `auto-start`, which respects the current boot's manual stop under the lifecycle lock. A legacy empty marker or an unreadable boot ID is conservative until an explicit start. Update the tile and controller together: a new tile never falls back to unconditional `toggle` on an older controller; stale/unknown results only trigger a read.
 
 - The installer supports **arm64 only**: the release page has no arm32 / x86_64 Android build, so
   other architectures are refused outright instead of getting a wrong binary.
@@ -785,11 +752,7 @@ cache) and finally verifies nothing is left.
   installing or updating the module needs a reboot. Afterwards a service restart rewrites the
   overlay; if doctor still shows the old upstream, reboot once more.
 - **A tile Shell timeout is not confirmed cancellation of root descendants**: toggle is never automatically replayed, and incomplete/timeout results stay unknown. Root-side cancellation still needs isolated testing across Magisk/KernelSU/APatch; destroying the client Process does not prove the whole root task ended.
-- **The optional tile app only partially supports custom data paths**: it reads the panel URL from
-  `/data/adb/magpie/run/web.url`, and the launcher-hidden marker is fixed at
-  `/data/adb/magpie/run/.tile_launcher_hidden`; neither follows a custom `magpie_path`. Tile
-  start/stop goes through the module's `magpie.service`, which continues to use its configured data
-  path. The app's `SERVICE` points to the module scripts, not the data directory.
+- **Tiles and custom data paths**: start/stop and panel lookup both use the module controller and its current configuration. The launcher-hidden marker still uses `/data/adb/magpie/run/.tile_launcher_hidden`. If root manager or SELinux access prevents socket ownership checks, the listener shows as unknown and the tile does not open the panel automatically.
 
 ## Development and tests
 
@@ -797,31 +760,23 @@ cache) and finally verifies nothing is left.
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 77 assertions
-sh tests/test-watchdog.sh                                 # watchdog, 13 assertions
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 43 assertions
-sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 150 assertions
-sh tests/test-lib.sh                                      # pure helpers and process identity: 267 assertions
-sh tests/test-tile-check.sh                               # self-check data and unknown results: 72 assertions
+sh tests/test-watchdog.sh                                 # watchdog, 15 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 56 assertions
+sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 182 assertions
+sh tests/test-lib.sh                                      # pure helpers and process identity: 275 assertions
+sh tests/test-tile-check.sh                               # self-check data, unknown results and large dumps: 122 assertions
 ```
 
-622 assertions total (77 + 13 + 43 + 150 + 267 + 72), plus 424 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 6 Shell process handling, 8 serial-executor assertions). Tests use temp
+727 assertions total (77 + 15 + 56 + 182 + 275 + 122), plus 434 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions). Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
 wrong port and you get a pile of fake failures. Details and known gaps in
 [tests/README.md](tests/README.md).
 
-`sh tests/run-all.sh` also runs 84 Python unittests: 33 release/build, 9 tile-version gate, 14 service-lifecycle, 3 launcher and 25 doctor-tile cases. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
+`sh tests/run-all.sh` also runs 106 Python unittests: 34 release/build, 9 tile-version gate, 18 tile lifecycle, 3 launcher, 25 doctor-tile, 11 release policy and 6 installer TLS. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
 
-Releasing:
-
-1. bump `version` and `versionCode` in `module.prop`; when tile runtime code, resources or manifest change, also increment the independent `versionCode` in `tile-app/AndroidManifest.xml` (CI/Release enforce this against their baseline);
-2. tag the same name (e.g. `v0.8`) and push the tag;
-3. the workflow packs the zip, checks its structure, publishes the release and rewrites
-   `update.json`.
-
-If the tag and `module.prop`'s `version` disagree, the workflow fails on purpose rather than
-shipping a mislabelled build.
+Before releasing, configure the [release policy](docs/release-policy.md): protected environments, a policy commit SHA, immutable releases and tag rules. Bump the module and tile independently where appropriate, wait for CI on that exact `main` commit, then push the matching annotated tag. Building without release secrets, signing, public release and proposing the manager update are separate jobs. The update becomes visible only when its PR is merged into `main`. A dispatch on `main` verifies an existing draft or release; it does not create a new tag attestation.
 
 The social preview image lives at `docs/social-preview.png` (1280×640). GitHub has no API for it —
 upload it by hand under Settings → Social preview.

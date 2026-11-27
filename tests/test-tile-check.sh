@@ -36,7 +36,9 @@ esac
 MOCK
 cat > "$B/bin/dumpsys" <<'MOCK'
 #!/bin/sh
-"$HOST_CAT" "$FIX/dump"
+"$HOST_CAT" "$FIX/dump" || exit $?
+# 若解析器提前退出导致 SIGPIPE，就到不了这里；大输出用例据此确认消费到尾。
+: > "$FIX/dump-consumed"
 exit "$DUMP_RC"
 MOCK
 cat > "$B/magisk.mock" <<'MOCK'
@@ -69,10 +71,29 @@ MOCK
 done
 chmod 755 "$B/bin/"* "$B/magisk.mock"
 # 子进程只看白名单宿主工具与替身，不允许 fallback 到手机上的真实命令。
-for _cmd in cat sed grep head tr; do
+for _cmd in cat sed grep head tr awk; do
   ln -s "$(command -v "$_cmd")" "$B/bin/$_cmd"
 done
 MOCK_PATH="$B/bin"
+
+# Linux sh 的内置 printf 没有 Android 外部 /system/bin/printf 的 argv 上限。
+# 用 shell 函数先拦截单参数 >=128 KiB，不能依赖 PATH 外部桩覆盖内置命令。
+cat > "$B/printf-limit.sh" <<'MOCK'
+printf() {
+  for _printf_arg do
+    if [ "${#_printf_arg}" -ge 131072 ]; then
+      : > "$FIX/printf-arg-too-long"
+      echo 'printf: Argument list too long' >&2
+      return 126
+    fi
+  done
+  command printf "$@"
+}
+MOCK
+cat > "$B/run-check.sh" <<'MOCK'
+. "$1"
+. "$2"
+MOCK
 
 build() {
   rm -rf "$FIX"; mkdir -p "$FIX/modules/magpie/scripts" "$FIX/proc/11" \
@@ -98,8 +119,8 @@ expect() {
   if [ "$(get "$1")" = "$2" ]; then ok "$3"; else bad "$3（$1 应为 $2）"; fi
 }
 run_check() {
-  OUT=$(PATH="$MOCK_PATH" "$HOST_SH" "$B/check.sh" 2>"$B/check.err"); RC=$?
-  if [ "$RC" = 0 ] && [ "$(printf '%s\n' "$OUT" | tail -1)" = done=1 ] && [ "$(get 'done')" = 1 ]; then
+  OUT=$(PATH="$MOCK_PATH" "$HOST_SH" "$B/run-check.sh" "$B/printf-limit.sh" "$B/check.sh" 2>"$B/check.err"); RC=$?
+  if [ "$RC" = 0 ] && [ "$(printf '%s\n' "$OUT" | tail -1)" = done=1 ] && [ "$(get 'done')" = 1 ] && [ ! -e "$FIX/printf-arg-too-long" ]; then
     ok "协议正常结束且最后只有一条 done=1"
   else
     bad "协议未完整结束（rc=$RC）"
@@ -152,6 +173,112 @@ build; rm "$B/bin/magisk"; run_check
 expect magisk unknown "未安装 Magisk 也可完成体检，无重依赖"
 build; : > "$FIX/sql"; run_check
 expect magisk unknown "无策略记录不伪造允许或拒绝"
+
+echo "== dumpsys 流式读取与 Android printf 单参数边界"
+# 先证明边界替身确实生效；超长值只进 shell 函数，绝不传给外部 printf。
+build
+awk 'BEGIN { for (i = 0; i < 131072; i++) printf "x" }' > "$FIX/oversize-arg"
+PATH="$MOCK_PATH" "$HOST_SH" -c '. "$1"; _arg=$(cat "$FIX/oversize-arg"); printf "%s" "$_arg"' sh "$B/printf-limit.sh" > /dev/null 2> "$B/limit.err"
+_LIMIT_RC=$?
+[ "$_LIMIT_RC" = 126 ] && [ -f "$FIX/printf-arg-too-long" ] && grep -q 'Argument list too long' "$B/limit.err" && ok "printf 函数可靠模拟 Android 的 128 KiB 单参数失败" || bad "printf 边界替身未生效"
+
+large_dump() {
+  # 超过 512 KiB，目标在头部；解析器找到 label 也必须继续消费到尾。
+  {
+    printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]\n'
+    awk 'BEGIN { for (i = 0; i < 8192; i++) print "unrelated-systemui-data-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789" }'
+    printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=已停止,more=value]\n'
+  } > "$FIX/dump"
+}
+build; large_dump
+[ "$(wc -c < "$FIX/dump")" -gt 262144 ] && ok "大 dumpsys 夹具确实超过 256 KiB" || bad "大输出夹具不足 256 KiB"
+run_check
+expect painted 运行中 "大输出成功仍返回首个目标 label，不触发外部 printf argv 上限"
+[ -f "$FIX/dump-consumed" ] && [ ! -s "$B/check.err" ] && ok "找到首个目标后仍完整消费大输出且没有 printf 报错" || bad "提前停读或出现参数过长错误"
+build; large_dump; DUMP_RC=7; run_check
+expect painted unknown "大输出带合法 label 但最终非零退出必须 unknown"
+[ -f "$FIX/dump-consumed" ] && ok "失败 dump 的大正文也完整消费到尾再检查退出状态" || bad "失败大输出未完整消费"
+build
+awk 'BEGIN { for (i = 0; i < 8192; i++) print "unrelated-systemui-data-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789" }' > "$FIX/dump"
+printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=已停止,more=value]\n' >> "$FIX/dump"
+run_check
+expect painted 已停止 "目标位于超过 256 KiB 的尾部时仍能找到"
+build
+awk 'BEGIN { for (i = 0; i < 300000; i++) printf "x" }' > "$FIX/dump"
+printf ' spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]\n' >> "$FIX/dump"
+run_check
+expect painted 运行中 "单行超过 256 KiB 也不把整行送进 shell argv"
+
+# 无结尾换行时也不能把退出哨兵粘在最后一条记录上。
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]' > "$FIX/dump"; run_check
+expect painted 运行中 "成功 dump 不带结尾换行仍能解析"
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]' > "$FIX/dump"; DUMP_RC=1; run_check
+expect painted unknown "失败 dump 不带结尾换行仍可靠报告 unknown"
+build; large_dump
+printf '__MAGPIE_DUMP_RC__=0\n' >> "$FIX/dump"
+DUMP_RC=3; run_check
+expect painted unknown "正文中的伪成功哨兵不能覆盖真实退出失败"
+
+echo "== painted 多目标、空标签、无目标与畸形内容"
+build
+printf '%s\n' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=已停止,more=value]' > "$FIX/dump"
+run_check
+expect painted 运行中 "多行多个目标保留首个合法标签"
+build
+printf '%s\n' 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=已停止,more=x] spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=y]' > "$FIX/dump"
+run_check
+expect painted 已停止 "同一行多个目标不贪婪地取到后一个标签"
+build
+printf '%s\n' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=,more=value]' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]' > "$FIX/dump"
+run_check
+expect painted '' "合法空 label 保留为空，不能被后一个标签覆盖"
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=null,more=value]\n' > "$FIX/dump"; run_check
+expect painted null "null label 保留原值供界面判断尚未绘制"
+build; printf 'spec=custom(com.ruin.magpie.tile/com.ruin.magpie.tile.MagpieTileService),secondaryLabel=运行中,more=value]\n' > "$FIX/dump"; run_check
+expect painted 运行中 "同一目标的完整类名写法仍可解析"
+build
+printf '%s\n' \
+  'spec=custom(com.ruin.magpie.tile.extra/.MagpieTileService),secondaryLabel=错误包,more=value]' \
+  'spec=custom(com.ruin.magpie.tile/.OtherService),secondaryLabel=错误类,more=value]' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value]' > "$FIX/dump"
+run_check
+expect painted 运行中 "相似包名与其他组件不能抢占目标标签"
+build
+printf '%s\n' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),label=没有副标签,more=value]' \
+  'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=已停止,more=value]' > "$FIX/dump"
+run_check
+expect painted 已停止 "缺少 secondaryLabel 的记录跳过并继续找合法目标"
+build; : > "$FIX/dump"; run_check
+expect painted unknown "成功空 dump 不是确定的空标签"
+build; printf 'spec=custom(com.example/.Tile),secondaryLabel=运行中,more=value]\n' > "$FIX/dump"; run_check
+expect painted unknown "成功但没有目标时保持 unknown"
+build; printf 'Error: permission denied\n' > "$FIX/dump"; run_check
+expect painted unknown "零退出的错误文本仍不能冒充空标签"
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),label=运行中,more=value]\n' > "$FIX/dump"; run_check
+expect painted unknown "目标缺少 secondaryLabel 时保持 unknown"
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中,more=value\n' > "$FIX/dump"; run_check
+expect painted unknown "目标记录缺少闭合括号时拒绝残缺内容"
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行中]\n' > "$FIX/dump"; run_check
+expect painted unknown "缺少字段结束分隔符时拒绝畸形标签"
+build; printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel=运行\t中,more=value]\n' > "$FIX/dump"; run_check
+expect painted unknown "控制字符标签不能污染单行自查协议"
+build
+{
+  printf 'spec=custom(com.ruin.magpie.tile/.MagpieTileService),secondaryLabel='
+  awk 'BEGIN { for (i = 0; i < 150000; i++) printf "x" }'
+  printf ',more=value]\n'
+} > "$FIX/dump"
+run_check
+expect painted unknown "畸形超长 label 不捕获到 shell，也不会触发 argv 上限"
+# 解析器本身失败也必须 unknown，不能借空输出伪造空 label。
+build; rm "$B/bin/awk"; printf '#!/bin/sh\nexit 4\n' > "$B/bin/awk"; chmod 755 "$B/bin/awk"; run_check
+expect painted unknown "awk 解析失败时可靠回退 unknown"
+rm "$B/bin/awk"; ln -s "$(command -v awk)" "$B/bin/awk"
 
 echo "== proc / cgroup 未知不会变成零"
 build; rm "$FIX/proc/11/cgroup"; run_check

@@ -17,6 +17,8 @@
     <string name="intro_detail">它不含 magpie 本体，也不代理任何流量。启停由模块脚本完成，App 通过 root 权限调用。</string>
     <string name="label_status">当前状态</string>
     <string name="btn_open_panel">打开面板</string>
+    <string name="panel_unverified">未能确认本机面板监听，未打开浏览器。请检查服务状态与监听配置。</string>
+    <string name="panel_browser_unavailable">无法打开外部浏览器，已核验的本机地址：%1$s</string>
     <string name="btn_add_tile">添加到控制中心</string>
     <string name="root_needed">磁贴需要 root 权限才能启停服务。点下面的按钮授权一次即可。</string>
     <string name="btn_grant">授权 root</string>

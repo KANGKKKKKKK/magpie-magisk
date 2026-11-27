@@ -74,7 +74,6 @@ ensure_web_key() {
       return 1
     fi
   fi
-  WEB_URL="http://127.0.0.1:$WEB_PORT/?k=$WEB_KEY"
 }
 
 # 带日期，跨天也能对上时间线
@@ -111,6 +110,7 @@ clean_logs() { rotate_log "$LOG"; }
 DNS_SERVERS="$MAGPIE_DNS"
 RESOLV_CONF="$RUN/resolv.conf"
 USER_STOPPED="$RUN/.user_stopped"
+INTENT_LOCK="$RUN/.stop-intent.flock"
 # 与旧目录锁分开；旧 .service.lock 仅为遗留诊断元信息，不读取或回收。
 SERVICE_LOCK="$RUN/.service.flock"
 
@@ -154,6 +154,52 @@ has_stop_request() {
   done
   return 1
 }
+# 单独的短锁串行化用户停止意图与显式启动清除。它不随服务生命周期持有，
+# 绝不拿着它等 FD 9：stop 在等主锁前就能发布意图。子 shell 自动关闭 FD 6。
+with_stop_intent_lock() (
+  magpie_pick_flock || exit 1
+  if [ -L "$INTENT_LOCK" ] || { [ -e "$INTENT_LOCK" ] && [ ! -f "$INTENT_LOCK" ]; }; then exit 1; fi
+  exec 6>>"$INTENT_LOCK"
+  # shellcheck disable=SC3013  # Android ash/mksh 与 Linux dash 均支持 inode 比较
+  [ ! -L "$INTENT_LOCK" ] && [ "$INTENT_LOCK" -ef /proc/self/fd/6 ] || exit 1
+  _intent_wait=0
+  until magpie_flock -n 6; do
+    [ "$_intent_wait" -lt 50 ] || exit 1
+    sleep 0.02
+    _intent_wait=$((_intent_wait + 1))
+  done
+  "$@"
+)
+
+write_stop_intent() {
+  _intent_boot=$(magpie_boot_id) || _intent_boot=unknown
+  _intent_tmp=$(mktemp "$RUN/.stop-intent.XXXXXX") || return 1
+  if ! printf 'boot=%s\n' "$_intent_boot" > "$_intent_tmp" || ! mv -f "$_intent_tmp" "$USER_STOPPED"; then
+    rm -f "$_intent_tmp" 2>/dev/null
+    return 1
+  fi
+}
+
+clear_manual_stop_intent() {
+  has_stop_request && return 2
+  rm -f "$USER_STOPPED"
+}
+
+begin_stop_request() {
+  # 只属于当前命令；EXIT trap 会回收，自动启动绝不能删掉仍有效的请求。
+  STOP_REQUEST_FILE="$RUN/.stop-request.$$"
+  (umask 077; set -C; : > "$STOP_REQUEST_FILE") 2>/dev/null || {
+    STOP_REQUEST_FILE=''
+    log Error "无法发布停止请求"
+    return 1
+  }
+}
+
+end_stop_request() {
+  [ -z "$STOP_REQUEST_FILE" ] || rm -f "$STOP_REQUEST_FILE" 2>/dev/null || return 1
+  STOP_REQUEST_FILE=''
+}
+
 CA_BUNDLE="$magpie_path/data/certs/ca-bundle.crt"
 CA_STAMP="$CA_BUNDLE.stamp"
 
@@ -383,20 +429,42 @@ ensure_cli() {
   done
 }
 
-start() {
-  # 端口读不出来就不启动：用默认端口跑起来只会让「已启动」和「连不上」同时出现
+# 所有会启动新进程的入口都必须在启停锁内走这一检查。stop 仍然可用。
+start_allowed() {
+  if [ -e "$MODDIR/.uninstalling" ]; then
+    log Error "模块正在卸载，拒绝启动"
+    return 1
+  fi
+  if [ -e "$MODDIR/disable" ]; then
+    log Error "模块已禁用，拒绝启动"
+    return 1
+  fi
   if [ -n "$ADDR_ERROR" ]; then
     log Error "$ADDR_ERROR"
     log Error "配置文件 $CONF"
     return 1
   fi
-  if has_stop_request; then
-    log Info "收到较新的停止请求，取消本次启动"
-    return 2  # 与启动失败（1）区分；调用者不能把取消当成已启动
+}
+
+start() {
+  start_allowed || return 1
+  if [ "${1:-manual}" = auto ]; then
+    # 消耗的是锁内观察的结果，而不是看门狗在锁外看到的旧快照。
+    has_stop_request && return 2
+    magpie_stop_intent_current "$USER_STOPPED" && return 2
+  else
+    with_stop_intent_lock clear_manual_stop_intent
+    _start_intent_rc=$?
+    if [ "$_start_intent_rc" -ne 0 ]; then
+      [ "$_start_intent_rc" -ne 2 ] || log Info "收到停止请求，取消本次启动"
+      return "$_start_intent_rc"
+    fi
   fi
-  rm -f "$USER_STOPPED" 2>/dev/null
   # 清理必须在"已在运行"早退之前，否则覆盖安装后旧 dnsmasq 一直清不掉
   cleanup_legacy_dnsmasq
+  # Remove the credential-bearing cache produced by older releases, including
+  # when this start request finds the service already running.
+  rm -f "$RUN/web.url" "$RUN/.web.url.$$" 2>/dev/null
   if pid=$(running); then
     echo "$pid" > "$PIDFILE" 2>/dev/null
     log Info "已在运行 (PID $pid)"
@@ -443,16 +511,15 @@ start() {
   # 一律不带参数：setsid 的 -c 在 busybox 里是「强制 fork」，在 util-linux
   # 里却是「设置控制终端」，语义相反。误用 -c 会在没有 tty 的环境里
   # 直接失败（Inappropriate ioctl for device），服务根本起不来。
+  start_allowed || return 1
+  if has_stop_request || magpie_stop_intent_current "$USER_STOPPED"; then
+    [ "${1:-manual}" = auto ] || log Info "启动准备期间收到停止请求，取消启动"
+    return 2
+  fi
   _new_session=""
   if command -v setsid >/dev/null 2>&1; then _new_session="setsid"; fi
   # shellcheck disable=SC2086  # $_new_session 要么空、要么是两个词，故意分词
   ( exec 9>&-; cd "$magpie_path/data" && exec $_new_session "$BIN" serve --web="$WEB_HOST" ) >>"$LOG" 2>&1 &
-  _web_url_tmp="$RUN/.web.url.$$"
-  ( umask 077; printf '%s\n' "$WEB_URL" > "$_web_url_tmp" ) 2>/dev/null && \
-    mv -f "$_web_url_tmp" "$RUN/web.url" 2>/dev/null
-  rm -f "$_web_url_tmp" 2>/dev/null
-  chmod 600 "$RUN/web.url" 2>/dev/null
-
   # 等进程就绪，最多 6 秒
   _i=0
   while [ "$_i" -lt 12 ] && ! running >/dev/null; do
@@ -484,10 +551,13 @@ start() {
 }
 
 stop() {
-  # 打标记，免得看门狗又拉起来；失败时仍保留停止意图。
-  : > "$USER_STOPPED" 2>/dev/null
-  cleanup_legacy_dnsmasq
+  # 即使杀不净仍保留意图。写失败也继续尝试停服，但不谎报全部成功。
   _stop_result=0
+  if ! with_stop_intent_lock write_stop_intent; then
+    log Error "无法保存本次开机的停止意图"
+    _stop_result=1
+  fi
+  cleanup_legacy_dnsmasq
   _stop_mains=$(magpie_command_pids serve 2>/dev/null)
   if [ -n "$_stop_mains" ]; then
     for _stop_pid in $_stop_mains; do
@@ -531,8 +601,7 @@ sync_status() {
 STOP_REQUEST_FILE=""
 cleanup_lifecycle() {
   release_service_lock
-  [ -n "$STOP_REQUEST_FILE" ] && rm -f "$STOP_REQUEST_FILE" 2>/dev/null
-  STOP_REQUEST_FILE=""
+  end_stop_request || :
 }
 
 # 信号处理只退出，由 EXIT 统一清理；绝不释放锁后继续临界区。
@@ -545,41 +614,73 @@ trap 'exit 129' HUP
 
 # stop 的停止意图需要在等锁前发布；只为写操作准备 run，不触碰 data。
 case "$1" in
-  start|stop|restart|toggle)
+  toggle-if)
+    case "${2:-}:$#" in running:2|stopped:2) ;; *) echo failed; exit 1 ;; esac ;;
+esac
+case "$1" in
+  auto-start|start|stop|restart|toggle|toggle-if)
     [ ! -L "$RUN" ] && mkdir -p "$RUN" || exit 1 ;;
 esac
 
 case "$1" in
   # 退出码要带出 start 的结果，否则失败也返回 0
+  auto-start)
+    acquire_service_lock || exit 1
+    start auto; _rc=$?
+    if [ "$_rc" -ne 2 ]; then sync_status; fi
+    exit "$_rc" ;;
   start)
     acquire_service_lock || exit 1
-    start; _rc=$?; sync_status; exit $_rc ;;
+    start; _rc=$?; sync_status; exit "$_rc" ;;
   stop)
-    : > "$USER_STOPPED" 2>/dev/null
-    STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
-    acquire_service_lock || { _rc=$?; exit $_rc; }
-    stop; _rc=$?; rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""; sync_status; exit $_rc ;;
-  restart)
-    : > "$USER_STOPPED" 2>/dev/null
-    STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
-    acquire_service_lock || { _rc=$?; exit $_rc; }
-    stop; _rc=$?
-    rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""
-    # 停不干净绝不能继续 start；保留 .user_stopped 和失败退出码。
-    if [ "$_rc" -eq 0 ]; then start; _rc=$?; fi
-    sync_status; exit $_rc ;;
-  status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
-
-  # 在跑就停，没跑就起。给磁贴 / 快捷方式用：一个动作，不用先判断状态。
-  # 停止走的是同一个 stop()，所以 .user_stopped 照样会写，看门狗不会又拉回来；
-  # start() 会清掉那个标记。
-  # 输出一行结果，方便调用方（磁贴、Tasker）直接展示。
-  toggle)
+    begin_stop_request || exit 1
+    # 能在启停锁外发布，不允许一次更新比它早的 start 擦掉这个请求。
+    if ! with_stop_intent_lock write_stop_intent; then
+      log Warn "等待启停锁前未能保存停止标记，取得锁后再尝试"
+    fi
     acquire_service_lock || exit 1
-    if pid=$(running); then
-      STOP_REQUEST_FILE="$RUN/.stop-request.$$"; : > "$STOP_REQUEST_FILE" 2>/dev/null
+    stop; _rc=$?
+    end_stop_request || _rc=1
+    sync_status; exit "$_rc" ;;
+  restart)
+    begin_stop_request || exit 1
+    acquire_service_lock || exit 1
+    # 配置/维护状态不合法时不先停，也不留下永久停止标记。
+    start_allowed || exit 1
+    stop; _rc=$?
+    end_stop_request || _rc=1
+    if [ "$_rc" -eq 0 ]; then start; _rc=$?; fi
+    sync_status; exit "$_rc" ;;
+  status)  pid=$(running) && echo "running (PID $pid)" || echo "stopped" ;;
+  # 给普通前台 App 的外部浏览器提供不带密钥的面板地址；不能把 web.key
+  # 或 ?k=... 放进通用 Intent、剪贴板或状态快照。
+  panel-url)
+    start_allowed >/dev/null || exit 1
+    command -v magpie_listener_pid >/dev/null 2>&1 || exit 1
+    [ "$API_PORT" != "$WEB_PORT" ] || exit 1
+    pid=$(magpie_listener_pid) || exit 1
+    _panel_bind=$(magpie_port_observation "$pid" "$WEB_PORT")
+    # 刚保存但未应用的 Web 配置不能指向同一进程的其它端口。
+    magpie_process_web_binding "$pid" "$WEB_HOST" || exit 1
+    case "$_panel_bind" in
+      'local '*) printf 'http://%s:%s/\n' "${_panel_bind#local }" "$WEB_PORT" ;;
+      *) exit 1 ;;
+    esac
+    exit 0 ;;
+
+  # 旧 toggle 继续给 CLI / 旧磁贴使用。新磁贴必须明确自己看到的状态，
+  # 进锁后若状态已变，只让客户端刷新，绝不把这次点按改成相反动作。
+  toggle|toggle-if)
+    acquire_service_lock || exit 1
+    if pid=$(running); then _toggle_actual=running; else _toggle_actual=stopped; fi
+    if [ "$1" = toggle-if ] && [ "$2" != "$_toggle_actual" ]; then
+      printf 'stale %s\n' "$_toggle_actual"
+      exit 3
+    fi
+    if [ "$_toggle_actual" = running ]; then
+      begin_stop_request || { echo failed; exit 1; }
       stop; _rc=$?
-      rm -f "$STOP_REQUEST_FILE"; STOP_REQUEST_FILE=""
+      end_stop_request || _rc=1
       sync_status
       if [ "$_rc" -ne 0 ] || running >/dev/null; then
         echo "failed"; _rc=1
@@ -604,5 +705,5 @@ case "$1" in
     exit $_rc
     ;;
 
-  *)       echo "用法: $0 {start|stop|restart|status|toggle}"; exit 1 ;;
+  *)       echo "用法: $0 {start|stop|restart|status|panel-url|auto-start|toggle|toggle-if <running|stopped>}"; exit 1 ;;
 esac

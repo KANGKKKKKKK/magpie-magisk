@@ -127,11 +127,15 @@ su 的路径不写死：按 `su`、`/system/bin/su`、`/system/xbin/su`、`/sbin
 `/debug_ramdisk/su`、`/data/adb/ksu/bin/su`、`/data/adb/ap/bin/su` 的顺序试，
 哪个能跑通就用哪个。
 
-**自定义数据目录的支持范围**：`SERVICE` 指向模块脚本目录中的 `magpie.service`，不是 magpie 数据目录；磁贴通过该服务启停，服务仍会按 `magpie.config` 中的 `magpie_path` 工作。磁贴 App 的面板 URL 读取固定使用 `/data/adb/magpie/run/web.url`，桌面图标隐藏标记固定使用 `/data/adb/magpie/run/.tile_launcher_hidden`，因此这两项对自定义 `magpie_path` 支持不完整。这属于数据目录支持范围，不是 `SERVICE` 路径错误。
+**自定义数据目录的支持范围**：启停和查面板地址都通过模块的 `magpie.service`，使用当前配置。控制器不能核验监听归属时，App 不打开浏览器；能核验时只传无凭据的回环地址（IPv4 或 IPv6）。桌面图标隐藏标记仍固定为 `/data/adb/magpie/run/.tile_launcher_hidden`，这一个设置不跟随自定义数据目录。
+
+## 点按与兼容性
+
+磁贴只携带点按时实际画出的 `running` / `stopped`，由控制器在持锁状态下比较。画面过期、真实状态不符或旧控制器不认识新命令时，只重新查询，不调用旧的无条件 `toggle`。模块和磁贴请配套更新。
 
 ## 超时边界
 
-Shell 保留 20 秒客户端等待上限、双流并发消费和每流 64 KiB 输出上限，不自动重放 toggle。
+Shell 保留 20 秒客户端等待上限、双流并发消费和每流 64 KiB 输出上限，不自动重放条件启停。
 销毁 su 客户端不保证某些 root 实现下的后代任务已经终止；本版不引入未经隔离验证的进程组强杀。
 桌面图标的模块标记按串行队列提交，避免正常完成时的异步乱序；这不等于已解决 root 后代超时逃逸。
 
