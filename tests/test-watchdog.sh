@@ -65,7 +65,10 @@ build() {
   printf '#!/bin/sh\nexit 1\n' > "$WD/scripts/magpie.service"; chmod 755 "$WD/scripts/magpie.service"
 }
 
-fake_running() { printf '\nmagpie_running() { %s; }\n' "$1" >> "$WD/scripts/lib.sh"; }
+# 看门狗每轮只调一次 magpie_main_pid（输出 PID 即视为在跑），两者一起桩掉。
+fake_running() {
+  printf '\nmagpie_running() { %s; }\nmagpie_main_pid() { magpie_running && echo 4242; }\n' "$1" >> "$WD/scripts/lib.sh"
+}
 put_elf()      { mkdir -p "$WD/bin"; printf '\177ELF\002\001\001' > "$WD/bin/magpie"; chmod 755 "$WD/bin/magpie"; }
 logtext()      { cat "$WD/run/watchdog.log" 2>/dev/null; }
 
@@ -135,6 +138,17 @@ printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/verbs"\nexit 2\n' "$WD" > "$WD/sc
 sh "$WD/loop.sh"
 [ "$(grep -cx auto-start "$WD/verbs")" = 3 ] && ok "看门狗只执行锁内自动入口" || bad "自动入口未覆盖三轮"
 if logtext | grep -qE '重新拉起|拉起失败'; then bad "把取消当成启动结果"; else ok "锁内取消既不是成功也不增加失败退避"; fi
+
+echo "== 6 拉起成功但进程随即退出：按失败退避，不每轮重拉"
+build 4
+put_elf
+printf '#!/bin/sh\nexit 0\n' > "$WD/scripts/magpie.service"; chmod 755 "$WD/scripts/magpie.service"
+fake_running 'return 1'
+sh "$WD/loop.sh" >/dev/null 2>&1
+n=$(logtext | grep -c "很快退出")
+[ "$n" -ge 2 ] && ok "识别出起来就崩（$n 次）" || bad "没有识别崩溃循环：$(logtext)"
+seq=$(logtext | sed -n 's/.*很快退出.*，\([0-9]*\) 秒后再试.*/\1/p' | tr '\n' ' ')
+case "$seq" in "$INTERVAL $((INTERVAL * 2)) "*) ok "崩溃循环按 $INTERVAL/$((INTERVAL * 2)) 退避" ;; *) bad "崩溃循环退避不对：$seq" ;; esac
 
 rm -rf "$WD"
 echo

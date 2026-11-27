@@ -9,9 +9,10 @@ TILE_PKG=com.ruin.magpie.tile
 TILE_APK_NAME=magpie-tile.apk
 
 # 已装版本号；没装则输出空
+# pm list 只查一个包，约 30 ms；pm dump 要吐整份包信息，实测约 1 秒。
 tile_installed_code() {
-  pm dump "$TILE_PKG" 2>/dev/null \
-    | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' \
+  pm list packages --show-versioncode "$TILE_PKG" 2>/dev/null \
+    | sed -n "s/^package:$TILE_PKG versionCode:\([0-9][0-9]*\).*/\1/p" \
     | head -1
 }
 

@@ -220,9 +220,36 @@ chmod 755 "$BASE/nodl/wget"
 out=$(env PATH="$BASE/nodl" sh "$BASE/scripts/install.sh" plan 2>&1); _rc=$?
 case "$_rc:$out" in
   0:*) bad "没有 curl 时仍报成功" ;;
-  *HTTPS\ curl*) [ ! -e "$BASE/unexpected-wget" ] && ok "没有 curl 给出 HTTPS 说明且不降级" || bad "降级到了 wget" ;;
+  *校验证书的\ HTTPS\ 下载器*MAGPIE_DL*) [ ! -e "$BASE/unexpected-wget" ] && ok "没有 curl 给出 HTTPS 说明且不降级" || bad "降级到了 wget" ;;
   *) bad "失败信息不可读：$out" ;;
 esac
+
+step "16b 没有 curl 但有 app_process：改用 Java TLS 下载器，参数与限制原样传入"
+fresh
+mkdir -p "$BASE/nodl"
+for t in sh awk sed grep mkdir rm stat df cut tr head sleep date sha256sum od cmp dirname basename uname cat ls wc mktemp rmdir kill; do
+  p=$(command -v "$t" 2>/dev/null) || continue
+  ln -sf "$p" "$BASE/nodl/$t" 2>/dev/null
+done
+printf '#!/bin/sh\nprintf touched > "%s/unexpected-wget"\n' "$BASE" > "$BASE/nodl/wget"
+chmod 755 "$BASE/nodl/wget"
+printf 'apk' > "$BASE/magpie-tile.apk"
+cat > "$BASE/nodl/app_process" <<APP
+#!/bin/sh
+printf '%s\n' "\$CLASSPATH" "\$@" > "$BASE/app-args"
+exit 1
+APP
+chmod 755 "$BASE/nodl/app_process"
+out=$(env PATH="$BASE/nodl" sh "$BASE/scripts/install.sh" plan 2>&1); _rc=$?
+_args=$(tr '\n' ' ' < "$BASE/app-args" 2>/dev/null)
+case "$_args" in
+  "$BASE/magpie-tile.apk / com.ruin.magpie.tile.Fetch $SRV/"*" 1048576 60 1800 ")
+    ok "走 Java 下载器：APK、类名、大小上限与时限都传对了" ;;
+  *) bad "Java 下载器参数不对：$_args（输出：$out）" ;;
+esac
+[ "$_rc" -ne 0 ] && ok "Java 下载失败时如实失败" || bad "下载失败却报成功"
+[ ! -e "$BASE/unexpected-wget" ] && ok "Java 路径也不降级到 wget" || bad "降级到了 wget"
+rm -f "$BASE/nodl/app_process"
 
 step "17 TERM 退出 143：杀掉 curl 下载进程并释放锁，不继续部署"
 fresh

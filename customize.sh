@@ -13,12 +13,19 @@ for f in action.sh service.sh uninstall.sh customize.sh; do
 done
 set_perm_recursive "$MODPATH/scripts" 0 0 0755 0755
 set_perm "$MODPATH/scripts/magpie.config" 0 0 0600
+[ -f "$MODPATH/system/bin/magpie" ] && set_perm "$MODPATH/system/bin/magpie" 0 0 0755
 
 # 本模块只负责调度，不含 magpie 本体
 # 路径按配置读，自定义过 magpie_path 的用户也能看到正确的结果
 _CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$_CONF" ] || _CONF="$MODPATH/scripts/magpie.config"
-[ -f "$_CONF" ] && . "$_CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$_CONF" ] && ! sh -n "$_CONF" >/dev/null 2>&1; then
+  ui_print "! 配置文件有语法错误，本次按默认值处理：$_CONF"
+  ui_print "  修好后重启服务即可：sh -n $_CONF 可定位出错行"
+else
+  [ -f "$_CONF" ] && . "$_CONF" 2>/dev/null
+fi
 magpie_path=${magpie_path:-/data/adb/magpie}
 
 # DNS：magpie 是不链接 libc 的 Go 静态 PIE，只认 /etc/resolv.conf。

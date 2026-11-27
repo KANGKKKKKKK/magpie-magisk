@@ -22,6 +22,14 @@ App 声明，模块只能往系统里放文件。所以磁贴只能做成一个�
 | 「检查磁贴状态」自查 | 不常驻后台、不监听任何事件 |
 | 可隐藏桌面图标（只留磁贴） | 不做电池优化相关的任何事 |
 
+## 兼作安装器的 HTTPS 下载器
+
+APK 里还有一个与磁贴无关的 `Fetch` 类：设备上没有 curl 时，模块的
+`scripts/install.sh` 用 `CLASSPATH=magpie-tile.apk app_process / com.ruin.magpie.tile.Fetch …`
+直接运行它来下载本体。这走的是系统自带的 HttpsURLConnection（Conscrypt + 系统 CA），
+默认校验证书与主机名；只允许 HTTPS、跳转同样必须是 HTTPS（最多 5 次）、有大小与时间上限。
+它只用 `java.*`，不需要安装 App、不需要任何权限；单测见 `tests/jvm/FetchTest.java`。
+
 ## 安装方式
 
 **推荐**：刷模块时选装。`customize.sh` 会用音量键问一次：

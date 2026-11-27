@@ -75,10 +75,11 @@
 | 状态可见 | 管理器那一行直接显示状态和可用地址（[示例](#执行按钮)），不用点按钮 |
 | 自检 | `scripts/doctor.sh` 十项检查，直接告诉你哪里不对、下一步做什么 |
 | 控制中心磁贴 | 可选装一个约 50 KB 的小 App，把启动/停止放进下拉栏；不装也不影响任何功能 |
-| 命令行 | `magpie` 自动进 PATH，补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
+| 命令行 | `magpie` 挂到 `/system/bin`（`su -c magpie …` 在各 Root 方案下都能用），补齐 `HOME`、`SSL_CERT_FILE`、`MAGPIE_BUN`，并在 DNS 没配好时直说 |
 | DNS 上游 | 模块自带 `system/etc/resolv.conf`，按 `MAGPIE_DNS` 重写；不启 dnsmasq，不占 53 端口 |
 | CA 证书 | 合并系统根证书供 Go 静态 PIE 使用，系统 CA 变化时自动重建 |
-| 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份 |
+| 日志轮转 | 超过 5 MB 归档为 `.1`，只留一份；服务运行期间也会轮转 |
+| 配置容错 | 配置有语法错误时按默认值（仅本机）运行，并在日志、自检和管理器描述里点名，不会让服务静默起不来 |
 | 在线更新 | 管理器里可直接收到新版本 |
 | 安装本体 | 本体没装时，点 `[执行]` 就能下载并装好：sha256 校验、原子替换、失败不留残骸 |
 | 干净卸载 | 停服务、收守护进程、清 PATH 链接并复查残留；**默认保留**数据目录，供应商与密钥不会被误删 |
@@ -219,7 +220,7 @@ su -c magpie update         # 下载、校验、重启进新版本
 > 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，因此 `customize.sh` 只做检测并告诉你怎么装，真正下载由你确认后触发。
 
 > [!NOTE]
-> 本体安装器只用支持证书校验和 HTTPS 跳转限制的 `curl`。如果管理器的 PATH 中没有 curl，可把 `MAGPIE_DL` 设为一个**可信且可在 Android 上执行**的 curl 绝对路径；需要自定义 CA 时，用 `MAGPIE_TLS_CA_BUNDLE` 指定可信 PEM。找不到合适工具会停止，不回退到无法保证校验的 BusyBox wget。已有本体和常规启停不依赖这项安装功能。
+> 本体安装器只用会校验证书、并能把跳转限制在 HTTPS 的下载器：优先 PATH 里的 `curl`（或 `MAGPIE_DL` 指定的绝对路径）；没有 curl 时（原版 Android 就没有），自动用系统自带的 Java TLS——`app_process` 直接运行模块里磁贴 APK 中的下载类，**不需要安装磁贴 App**，证书按系统 CA 校验。`MAGPIE_TLS_CA_BUNDLE` 只对 curl 生效。不会回退到 BusyBox wget：Magisk 自带的那份实测不校验证书。已有本体和常规启停不依赖这项安装功能。
 
 > [!TIP]
 > 想换源（自建镜像、内网缓存）：
@@ -529,7 +530,7 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 | `MAGPIE_CONF` | 空 | 显式指定配置文件，排障与测试用 |
 | `MAGPIE_MANIFEST_URL` | `https://usemagpie.ai/api/latest` | 本体更新清单；自建镜像时改它 |
 | `MAGPIE_ASSET_KEY` | `magpie-cli-android-arm64` | 清单里取哪个资产 |
-| `MAGPIE_DL` | 自动在 PATH 里找 `curl` | 可信 curl 的绝对路径 |
+| `MAGPIE_DL` | 自动在 PATH 里找 `curl`，没有则用系统 Java TLS | 可信 curl 的绝对路径 |
 | `MAGPIE_TLS_CA_BUNDLE` | 空 | 下载时额外信任的 PEM 证书包 |
 | `MAGPIE_CONFIRM_WINDOW` | `600` | 两次点按 `[执行]` 之间的确认窗口（秒） |
 
@@ -608,6 +609,8 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | 原生通道报 `lookup ... on [::1]:53: connection refused` | Go 没有可用上游。`cat /etc/resolv.conf` 看覆盖在不在；不在就重启一次手机，再跑 doctor 的 `[8/10] DNS 解析` |
 | 杀掉进程后又自己起来 | 意外退出会被看门狗拉回；要主动停止，请用菜单、磁贴或 `magpie.service stop`，它们会写 `.user_stopped` 标记，本次开机期间不会被看门狗拉回 |
 | 改了 `magpie.config` 没生效 | 确认改的是 `/data/adb/magpie/scripts/magpie.config`，然后 `restart` |
+| 自检提示「配置文件有语法错误」 | 多半是引号没配对。`sh -n /data/adb/magpie/scripts/magpie.config` 会指出出错行；修好前服务按默认值（仅本机）运行 |
+| 安装提示「没有能校验证书的 HTTPS 下载器」 | 模块包不完整（缺 `magpie-tile.apk`）或系统没有 `app_process`。重刷完整 zip，或装 curl 后用 `MAGPIE_DL` 指定 |
 | 开机没自启 | 确认模块已启用，再看 `run/watchdog.log` 的启动错误及 `doctor.sh` 输出。主动停止标记不阻止下次开机启动；显式 `start` 也会清除它 |
 
 更多细节见 [CHANGELOG.md](CHANGELOG.md)。
@@ -664,6 +667,7 @@ magpie-magisk/
 ├── service.sh                        开机自启 + 看门狗
 ├── action.sh                         管理器 [执行] 按钮
 ├── uninstall.sh                      卸载清理
+├── system/bin/magpie                 命令入口，开机挂到 /system/bin（转交 scripts/magpie-cli.sh）
 ├── system/etc/resolv.conf            DNS 覆盖：给 Go 静态 PIE 提供上游（按 MAGPIE_DNS 生成）
 ├── update.json                       在线更新用的清单
 ├── build.sh                          打包成可刷入的 zip
@@ -814,15 +818,15 @@ sh tests/run-all.sh   # 语法检查 + shellcheck + 断言计数 + JVM 单测 + 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 77 条
-sh tests/test-watchdog.sh                                 # 看门狗 15 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 80 条
+sh tests/test-watchdog.sh                                 # 看门狗 17 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 56 条
-sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 182 条
+sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 190 条
 sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 275 条
 sh tests/test-tile-check.sh                               # 自查取数、未知值与大输出 122 条
 ```
 
-六个套件共 727 条断言（77 + 15 + 56 + 182 + 275 + 122），另有 434 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+六个套件共 740 条断言（80 + 17 + 56 + 190 + 275 + 122），另有 446 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8、HTTPS 下载器 12）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 
 `run-all.sh` 还运行 106 个 Python unittest（发布 ZIP/构建 34、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 TLS 6）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，

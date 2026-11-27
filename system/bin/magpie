@@ -1,0 +1,11 @@
+#!/system/bin/sh
+# magpie 命令入口。Magisk 开机时把它挂到 /system/bin/magpie，
+# 于是 `su -c magpie ...` 在任何 Root 方案下都能找到命令
+# （Magisk 的 su 不把 /data/adb/magisk 放进 PATH，旧版靠那里的软链接找不到）。
+# 真正的环境补齐在模块的 magpie-cli.sh 里。
+_cli=/data/adb/modules/magpie/scripts/magpie-cli.sh
+if [ ! -f "$_cli" ]; then
+  echo "magpie 模块未安装或已被移除：$_cli" >&2
+  exit 127
+fi
+exec sh "$_cli" "$@"

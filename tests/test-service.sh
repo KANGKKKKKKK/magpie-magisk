@@ -967,6 +967,59 @@ _prev=$(cat "$B/run/.user_stopped")
 _out=$(sh "$B/scripts/magpie.service" toggle-if running 2>&1); _rc=$?
 [ "$_rc:$_out" = '3:stale stopped' ] && [ ! -e "$B/run/start-sentinel" ] && [ "$(cat "$B/run/.user_stopped")" = "$_prev" ] && ok "磁贴以为运行时不重新拉起已停止实例" || bad "错误反转 stopped：$_rc $_out"
 
+echo "== 31 配置语法错误：不被 source，控制器按默认值运行并点名原因"
+build
+printf 'MAGPIE_ADDR="0.0.0.0:3425\nmagpie_path=/nonexistent\n' > "$B/cfg"
+_out=$(sh "$B/scripts/magpie.service" status 2>&1); _rc=$?
+case "$_rc:$_out" in
+  0:*语法错误*stopped*) ok "坏配置不会让控制器退出，并提示语法错误" ;;
+  *) bad "坏配置处理不对：$_rc $_out" ;;
+esac
+_out=$(sh -c ". '$SRCDIR/scripts/lib.sh'; magpie_conf_syntax_ok '$B/cfg' && echo good || echo bad")
+[ "$_out" = bad ] && ok "magpie_conf_syntax_ok 识别出语法错误" || bad "语法检查漏判：$_out"
+
+echo "== 32 网关与面板同端口时拒绝启动"
+build
+printf 'magpie_path="%s"\nMAGPIE_ADDR="127.0.0.1:3425"\nMAGPIE_WEB_ADDR="127.0.0.1:3425"\n' "$B" > "$B/cfg"
+printf '#!/bin/sh\nprintf started > "%s/launched"\n' "$B" > "$B/bin/magpie"; chmod 755 "$B/bin/magpie"
+_out=$(sh "$B/scripts/magpie.service" start 2>&1); _rc=$?
+case "$_rc:$_out" in
+  0:*) bad "同端口配置仍启动了" ;;
+  *同一个端口*) [ ! -e "$B/launched" ] && ok "同端口配置被拒绝且未执行本体" || bad "拒绝了但本体仍被执行" ;;
+  *) bad "同端口未给出原因：$_out" ;;
+esac
+
+echo "== 33 卸载在停服失败时也清理指向模块的 CLI 链接"
+build
+mkdir -p "$B/fake-adb/magisk" "$B/fake-adb/ksu/bin"
+ln -s "$B/scripts/magpie-cli.sh" "$B/fake-adb/magisk/magpie"
+printf 'other\n' > "$B/fake-adb/ksu/bin/magpie"
+printf '#!/bin/sh\nexit 1\n' > "$B/scripts/magpie.service"
+sed -e "s#/data/adb/#$B/fake-adb/#g" "$SRCDIR/uninstall.sh" > "$B/uninstall.sh"
+cp "$SRCDIR/scripts/lib.sh" "$B/scripts/lib.sh"
+stub_lib "magpie_resolve_conf() { return 1; }
+magpie_path_in_module_tree() { return 1; }"
+_out=$(sh "$B/uninstall.sh" 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && ok "停服失败时卸载如实失败" || bad "停服失败却报成功"
+[ ! -e "$B/fake-adb/magisk/magpie" ] && ok "失败路径也移除了指向模块的链接" || bad "残留 CLI 链接：$_out"
+[ -f "$B/fake-adb/ksu/bin/magpie" ] && ok "不碰同名的非链接文件" || bad "误删了别的 magpie 文件"
+
+echo "== 34 status.sh 按本体文件缓存版本号"
+build
+mkdir -p "$B/run" "$B/webroot"
+printf 'magpie_path="%s"\n' "$B" > "$B/cfg"
+printf '#!/bin/sh\necho x >> "%s/ver-calls"\necho "magpie 1.2.3"\n' "$B" > "$B/bin/magpie"; chmod 755 "$B/bin/magpie"
+sed -e "s#^CONF=.*#CONF=$B/cfg#" "$SRCDIR/scripts/status.sh" > "$B/scripts/status.sh"
+cp "$SRCDIR/scripts/lib.sh" "$B/scripts/lib.sh"
+: > "$B/module.prop"
+sh "$B/scripts/status.sh" --webonly >/dev/null 2>&1
+sh "$B/scripts/status.sh" --webonly >/dev/null 2>&1
+_calls=$(wc -l < "$B/ver-calls" 2>/dev/null | tr -d ' ')
+[ "$_calls" = 1 ] && grep -q '"version": "1.2.3"' "$B/webroot/status.json" && ok "两次刷新只执行一次 --version" || bad "版本缓存无效（调用 ${_calls:-0} 次）"
+sleep 1; printf '#!/bin/sh\necho x >> "%s/ver-calls"\necho "magpie 1.2.4"\n' "$B" > "$B/bin/magpie.n"; chmod 755 "$B/bin/magpie.n"; mv -f "$B/bin/magpie.n" "$B/bin/magpie"
+sh "$B/scripts/status.sh" --webonly >/dev/null 2>&1
+grep -q '"version": "1.2.4"' "$B/webroot/status.json" && ok "本体更换后版本缓存失效" || bad "本体换了仍显示旧版本"
+
 reap
 
 echo

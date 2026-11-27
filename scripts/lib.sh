@@ -213,17 +213,25 @@ is_usable_lan_ip() {
 # 打一个可用地址，没有则返回 1。
 # 优先 WiFi / 热点 / USB，这些才是别的设备能直接连上的；
 # 再退回其它网卡，但跳过移动数据（ccmni/rmnet）和 clat。
+#
+# 只调用一次 ip：看门狗每轮都会走到这里，以前每块网卡各 fork 一次 ip + sed。
 lan_ip() {
-  for _if in wlan0 wlan1 ap0 usb0 rndis0 eth0; do
-    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
+  _li_rows=$(ip -4 -o addr show 2>/dev/null |
+    sed -n 's/^[0-9]*: *\([^ ]*\) .*inet \([0-9.]*\)\/.*/\1 \2/p')
+  [ -n "$_li_rows" ] || return 1
+  for _if in wlan0 wlan1 ap0 usb0 rndis0 eth0 '*'; do
+    while read -r _li_if _a; do
+      [ -n "$_a" ] || continue
+      _li_if=${_li_if%%@*}
+      if [ "$_if" = '*' ]; then
+        case "$_li_if" in lo|ccmni*|rmnet*|clat*) continue ;; esac
+      elif [ "$_li_if" != "$_if" ]; then
+        continue
+      fi
       is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
-    done
-  done
-  for _if in $(ip -4 -o addr show 2>/dev/null | sed -n 's/^[0-9]*: \([^ ]*\) .*/\1/p'); do
-    case "$_if" in lo|ccmni*|rmnet*|clat*) continue ;; esac
-    for _a in $(ip -4 addr show "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p'); do
-      is_usable_lan_ip "$_a" && { echo "$_a"; return 0; }
-    done
+    done <<LANIP
+$_li_rows
+LANIP
   done
   return 1
 }
@@ -580,6 +588,46 @@ magpie_rotate_log() {
   chmod 600 "$_f" 2>/dev/null
   # 只做轮转，不写说明行：调用方的日志措辞不一样
   # （magpie.service 走 log Info 带 [Info] 前缀，service.sh 走裸时间戳）。
+  return 0
+}
+
+# 服务运行中、进程仍以 O_APPEND 持有日志时用 copytruncate：先复制为 .1，
+# 再原地清空；O_APPEND 的写入位置随之回到开头，不留空洞。
+# $1 = 日志路径，$2 = 阈值字节。真的发生截断才返回 0。
+magpie_truncate_log() {
+  _f=$1
+  _max=${2:-5242880}
+  _sz=$(stat -c %s "$_f" 2>/dev/null)
+  [ -n "$_sz" ] && [ "$_sz" -gt "$_max" ] 2>/dev/null || return 1
+  cp -f "$_f" "$_f.1" 2>/dev/null || return 1
+  chmod 600 "$_f.1" 2>/dev/null
+  : > "$_f" 2>/dev/null
+  chmod 600 "$_f" 2>/dev/null
+  return 0
+}
+
+# ---------- 配置 ----------
+#
+# 配置是 shell 片段，会被 source。BusyBox ash（Magisk/KernelSU 跑 service.sh 用它）
+# 遇到语法错误会让整个调用脚本直接退出，mksh 则继续 —— 少一个引号，开机自启和看门狗
+# 就一起静默死掉。sh -n 只解析不执行；不通过时调用方改用模块自带的默认配置。
+magpie_conf_syntax_ok() {
+  [ -f "$1" ] && sh -n "$1" >/dev/null 2>&1
+}
+
+# 把数据目录收紧为仅 root 可访问。Magisk 拉起 service.sh 时 umask 可能是 0000，
+# 以前新建的 run/、日志与锁都是 777/666。bin/ 保持 755：本体需要可执行。
+magpie_harden_perms() {
+  _hp=${1:-/data/adb/magpie}
+  [ -d "$_hp" ] && [ ! -L "$_hp" ] || return 0
+  chmod 700 "$_hp" 2>/dev/null
+  for _hp_d in run data scripts; do
+    [ -d "$_hp/$_hp_d" ] && [ ! -L "$_hp/$_hp_d" ] && chmod 700 "$_hp/$_hp_d" 2>/dev/null
+  done
+  [ -d "$_hp/bin" ] && [ ! -L "$_hp/bin" ] && chmod 755 "$_hp/bin" 2>/dev/null
+  for _hp_f in "$_hp"/run/*.log "$_hp"/run/*.log.1 "$_hp"/run/.*.flock "$_hp"/run/*.pid "$_hp"/run/lan.url; do
+    [ -f "$_hp_f" ] && [ ! -L "$_hp_f" ] && chmod 600 "$_hp_f" 2>/dev/null
+  done
   return 0
 }
 

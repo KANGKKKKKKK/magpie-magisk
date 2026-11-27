@@ -115,7 +115,7 @@ done
 echo "→ dex"
 # 同上：受控 .class 路径需要拆成独立参数，不是单个带换行的参数。
 # shellcheck disable=SC2046
-if "$BT/d8" --min-api 29 --output "$WORK/dex" \
+if "$BT/d8" --release --min-api 29 --output "$WORK/dex" \
   $(find "$WORK/classes" -name '*.class') >"$WORK/d8.log" 2>&1; then
   _d8_rc=0
 else
@@ -132,8 +132,9 @@ fi
 # 少了任何一个，装上去就是 ClassNotFoundException / NoClassDefFoundError 闪退。
 # 这份清单要与 .github/workflows/ci.yml 里的一致 —— 漏掉一个类时
 # 编译能过、dex 也在，问题要到运行时才炸。
-for _need in MagpieTileService MainActivity LauncherIcon Shell SelfCheck TileState SerialExecutor; do
-  if ! grep -qa "$_need" "$WORK/dex/classes.dex"; then
+for _need in MagpieTileService MainActivity LauncherIcon Shell SelfCheck TileState SerialExecutor Fetch; do
+  # 匹配完整类描述符，不用子串：「Shell」也是别的类名的一部分。
+  if ! grep -qa "Lcom/ruin/magpie/tile/$_need;" "$WORK/dex/classes.dex"; then
     echo "dex 里缺少 $_need，拒绝产出 APK" >&2
     exit 1
   fi
@@ -143,7 +144,8 @@ echo "→ 打包"
 aapt package -f -M "$HERE/AndroidManifest.xml" -S "$HERE/res" \
   -I "$ANDROID_JAR" -F "$WORK/base.apk"
 ( cd "$WORK/apk" && unzip -qo "$WORK/base.apk" && cp "$WORK/dex/classes.dex" . \
-  && zip -qr "$WORK/unaligned.apk" . )
+  && zip -qr -n .arsc:.png "$WORK/unaligned.apk" . )
+# targetSdk >= 30 要求 resources.arsc 不压缩（AOSP 否则拒装：RESOURCES_ARSC_COMPRESSED）。
 
 echo "→ 对齐"
 zipalign -f 4 "$WORK/unaligned.apk" "$WORK/aligned.apk"

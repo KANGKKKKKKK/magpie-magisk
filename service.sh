@@ -2,13 +2,20 @@
 # Magpie for Android - 开机自启 + 看门狗
 
 MODDIR=${0%/*}
+# Magisk 拉起 service.sh 时 umask 可能是 0000：不收紧的话日志、锁、run/ 都会是 666/777。
+umask 077
 [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/.uninstalling" ] || exit 0
 
 LOG_MAX_BYTES=5242880
 # 配置查找顺序与 magpie.service / status.sh / action.sh / doctor.sh 保持一致
 CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
+  echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
+else
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+fi
 MP=${magpie_path:-/data/adb/magpie}
 
 # run 目录必须先建出来：下面所有 `>>"$WATCH_LOG"` 都指向它。
@@ -26,6 +33,7 @@ fi
 _NETLIB="$MODDIR/scripts/lib.sh"
 if [ -f "$_NETLIB" ]; then
   . "$_NETLIB"
+  magpie_harden_perms "$MP"
 else
   lan_ip() { return 1; }
   magpie_running() { pidof magpie >/dev/null 2>&1; }
@@ -75,8 +83,7 @@ install_pending_tile_app() {
     rm -f "$_flag" 2>/dev/null
     return 0
   fi
-  # shellcheck disable=SC1091
-  . "$MODDIR/scripts/tile-app.sh"
+  command -v tile_install >/dev/null 2>&1 || . "$MODDIR/scripts/tile-app.sh"
   if tile_install "$MODDIR" >>"$WATCH_LOG" 2>&1; then
     rm -f "$_flag" 2>/dev/null
     echo "$(date +'%Y-%m-%d %H:%M:%S') 磁贴 App 已补装" >>"$WATCH_LOG" 2>/dev/null
@@ -121,7 +128,7 @@ seed_user_config() {
   # 用户隐藏过桌面图标的话，在这里重新落实（组件状态会被系统重置）
   if [ -f "$MODDIR/scripts/tile-app.sh" ]; then
     # shellcheck disable=SC1091
-    . "$MODDIR/scripts/tile-app.sh"
+    command -v tile_reconcile_launcher >/dev/null 2>&1 || . "$MODDIR/scripts/tile-app.sh"
     tile_reconcile_launcher "$MP/run" >>"$WATCH_LOG" 2>&1
   fi
   rotate_log "$MP/run/magpie.log"
@@ -183,12 +190,27 @@ WATCH_INTERVAL=${MAGPIE_WATCH_INTERVAL:-30}
     fi
 
     # 这是节流预判，不是启动授权；最终判断始终由控制器持锁重做。
-    if ! magpie_running && ! magpie_stop_intent_current "$MP/run/.user_stopped"; then
+    # 每轮只枚举一次进程：magpie_main_pid 对每个同名进程都要读 /proc，很贵。
+    _pid=$(magpie_main_pid 2>/dev/null) || _pid=""
+    if [ -z "$_pid" ] && ! magpie_stop_intent_current "$MP/run/.user_stopped"; then
       sh "$MODDIR/scripts/magpie.service" auto-start >>"$WATCH_LOG" 2>&1
       _watch_start_rc=$?
       if [ "$_watch_start_rc" -eq 0 ]; then
-        _fail=0
-        wlog "magpie 未运行, 已尝试重新拉起"
+        _pid=$(magpie_main_pid 2>/dev/null) || _pid=""
+        _now=$(date +%s)
+        # 刚拉起又没了：多半起来就崩（端口冲突、配置错误），按失败退避，
+        # 不能每 30 秒把 100 MB 的本体再拉一遍。
+        if [ -n "${_last_start:-}" ] && [ $((_now - _last_start)) -lt $((WATCH_INTERVAL * 3)) ]; then
+          _fail=$((_fail + 1))
+          _wait=$WATCH_INTERVAL; _i=1
+          while [ "$_i" -lt "$_fail" ] && [ "$_wait" -lt 600 ]; do _wait=$((_wait * 2)); _i=$((_i + 1)); done
+          [ "$_wait" -gt 600 ] && _wait=600
+          wlog "magpie 拉起后很快退出（连续 $_fail 次），$_wait 秒后再试；详见 $MP/run/magpie.log"
+        else
+          _fail=0
+          wlog "magpie 未运行, 已尝试重新拉起"
+        fi
+        _last_start=$_now
       elif [ "$_watch_start_rc" -eq 2 ]; then
         # 用户停止，不是启动故障；不刷失败日志、不增加退避。
         _fail=0
@@ -209,16 +231,19 @@ WATCH_INTERVAL=${MAGPIE_WATCH_INTERVAL:-30}
     # 服务在跑时盯住局域网地址：WiFi 重连、热点开关、切飞行模式
     # 都会让地址变化，而 run/lan.url 和 module.prop 的描述都是那一刻写死的。
     # 变了就刷新，免得用户照着旧地址连不上。
-    if magpie_running; then
-      _cur_lan=$(lan_ip)
-      if [ "$_cur_lan" != "$_last_lan" ]; then
-        _last_lan="$_cur_lan"
-        _old=$(cat "$MP/run/lan.url" 2>/dev/null)
-        _old=$(echo "$_old" | sed -n 's#^http://\([^:]*\):.*#\1#p')
-        if [ "$_cur_lan" != "$_old" ]; then
-          wlog "局域网地址 ${_old:-无} -> ${_cur_lan:-无}"
-          sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
-        fi
+    # 只和上一轮比：以前拿启动时写的 lan.url 当基准，地址 A→B→A 时第二次变化被漏掉，
+    # 描述会一直停在 B。首轮（_last_lan 未初始化）只记录，不重复刷新启动时已写好的描述。
+    if [ -n "$_pid" ]; then
+      _cur_lan=$(lan_ip) || _cur_lan=""
+      if [ "${_lan_seen:-0}" = 1 ] && [ "$_cur_lan" != "$_last_lan" ]; then
+        wlog "局域网地址 ${_last_lan:-无} -> ${_cur_lan:-无}"
+        sh "$MODDIR/scripts/status.sh" >/dev/null 2>&1
+      fi
+      _last_lan=$_cur_lan; _lan_seen=1
+      # 某些省电模块会把 oom_score_adj 改回来；注释早就说要「改回来」，以前只在启动时做了一次。
+      _oom=$(cat "/proc/$_pid/oom_score_adj" 2>/dev/null)
+      if [ -n "$_oom" ] && [ "$_oom" != "-1000" ]; then
+        echo -1000 > "/proc/$_pid/oom_score_adj" 2>/dev/null && wlog "oom_score_adj $_oom -> -1000"
       fi
     fi
 
@@ -233,6 +258,11 @@ WATCH_INTERVAL=${MAGPIE_WATCH_INTERVAL:-30}
     fi
 
     rotate_log "$WATCH_LOG"
+    # 服务日志在运行期间也会长：启动前那次轮转管不到长期不重启的情况。
+    if command -v magpie_truncate_log >/dev/null 2>&1 &&
+       magpie_truncate_log "$MP/run/magpie.log" "$LOG_MAX_BYTES"; then
+      wlog "magpie.log 超过 5MB，已归档为 magpie.log.1"
+    fi
     #>>> WATCHDOG-BODY
   done
 ) &

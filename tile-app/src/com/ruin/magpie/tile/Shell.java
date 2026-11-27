@@ -40,9 +40,21 @@ final class Shell {
     static final String NO_MODULE = "__magpie_nomodule__";
 
     /** 一条命令同时回答「模块在不在」与「服务状态」。 */
+    /**
+     * root 侧自己的时限，比客户端超时（20 秒）短一点。
+     *
+     * <p>客户端超时只能杀掉 su 客户端；Magisk 下 root shell 由守护进程派生，未必随之退出，
+     * 磁贴显示「未知」时启停可能还在后台跑。toybox/busybox 都有 timeout，让 root 侧先结束。
+     * 没有 timeout 时退回直接执行，行为与以前一致。
+     */
+    private static String bounded(String args) {
+        return "if command -v timeout >/dev/null 2>&1; then timeout 18 sh " + SERVICE + " " + args
+                + "; else sh " + SERVICE + " " + args + "; fi";
+    }
+
     static String statusCommand() {
-        return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
-                + " status; else echo " + NO_MODULE + "; fi";
+        return "if [ -d " + MODULE_DIR + " ]; then " + bounded("status")
+                + "; else echo " + NO_MODULE + "; fi";
     }
 
     /** 不使用旧 toggle 的参数扩展：旧控制器会忽略参数并实际反转。 */
@@ -51,13 +63,13 @@ final class Shell {
         if ("running".equals(expected)) operation = "toggle-if running";
         else if ("stopped".equals(expected)) operation = "toggle-if stopped";
         else throw new IllegalArgumentException("unknown expected tile state");
-        return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
-                + " " + operation + "; else echo " + NO_MODULE + "; fi";
+        return "if [ -d " + MODULE_DIR + " ]; then " + bounded(operation)
+                + "; else echo " + NO_MODULE + "; fi";
     }
 
     static String panelUrlCommand() {
-        return "if [ -d " + MODULE_DIR + " ]; then sh " + SERVICE
-                + " panel-url; else echo " + NO_MODULE + "; fi";
+        return "if [ -d " + MODULE_DIR + " ]; then " + bounded("panel-url")
+                + "; else echo " + NO_MODULE + "; fi";
     }
 
     // Accept only a successful controller response with one local, credential-free HTTP URL.
@@ -167,8 +179,9 @@ final class Shell {
         String cached = cachedSu;
         if (cached != null) {
             Result r = execWith(cached, command, timeoutMs);
-            // 业务命令的非零退出或超时不能自动重放（尤其 toggle），只让下次重找 su。
-            if (!r.ok) cachedSu = null;
+            // 业务命令的非零退出或超时不能自动重放（尤其 toggle）。只有 su 本身不可用
+            // （找不到、被拒）时才丢弃缓存；toggle-if 返回 stale 这类正常非零不必重新探测所有候选。
+            if (!r.ok && suUnavailable(r)) cachedSu = null;
             return r;
         }
         return execWith(null, command, timeoutMs);
@@ -191,6 +204,46 @@ final class Shell {
         return execOnce(su, command, timeoutMs);
     }
 
+    /** su 客户端本身失败的迹象：找不到可执行文件、被拒绝。业务命令的非零退出不算。 */
+    static boolean suUnavailable(Result r) {
+        String e = r.err == null ? "" : r.err.toLowerCase(java.util.Locale.ROOT);
+        return e.contains("error=2") || e.contains("no such file") || e.contains("permission denied")
+                || e.contains("not allowed") || e.contains("denied");
+    }
+
+    /**
+     * 用户在前台主动点「授权 root」：每个候选都给足时间等用户在弹窗里点允许。
+     * 普通探测只等 5 秒，没点完就换下一个候选，结果是连续弹好几次授权框。
+     * su 存在但被拒时不再尝试别的候选。
+     */
+    static void grant(final Callback<Result> cb) {
+        POOL.execute(new Runnable() {
+            @Override
+            public void run() {
+                Result last = new Result(false, "", "no su");
+                for (String candidate : SU_CANDIDATES) {
+                    Result r = execOnce(candidate, "id -u", GRANT_TIMEOUT_MS);
+                    if (r.ok && "0".equals(r.trimmed())) {
+                        cachedSu = candidate;
+                        last = r;
+                        break;
+                    }
+                    last = r;
+                    String e = r.err == null ? "" : r.err;
+                    if (!e.contains("error=2") && !e.contains("No such file")) break;
+                }
+                final Result done = last;
+                MAIN.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        cb.onResult(done);
+                    }
+                });
+            }
+        });
+    }
+
+    private static final long GRANT_TIMEOUT_MS = 60000L;
     private static final long TIMEOUT_MS = 20000L;
     private static final int MAX_STREAM_BYTES = 65536;
 

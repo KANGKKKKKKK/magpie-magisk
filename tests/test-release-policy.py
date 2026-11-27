@@ -29,7 +29,11 @@ class ReleasePayloadTest(unittest.TestCase):
             shutil.copytree(ROOT / name, self.src / name, ignore=shutil.ignore_patterns("build", "__pycache__"))
         self.apk = self.base / "magpie-tile.apk"
         self.apk.write_bytes(b"synthetic APK bytes; signature is tested by the real APK verifier separately")
-        self.zip = self.base / "dist/magpie-v1.2.7.zip"
+        # 文件名随 module.prop 的版本走；写死版本号会让每次发版都把这组用例弄红。
+        version = next(l.split("=", 1)[1].strip() for l in (ROOT / "module.prop").read_text().splitlines()
+                       if l.startswith("version="))
+        self.version = version
+        self.zip = self.base / f"dist/magpie-{version}.zip"
 
     def call(self, *args, ok=True):
         result = subprocess.run(["python3", "-I", str(POLICY), *map(str, args)], cwd=self.base,
@@ -61,7 +65,7 @@ class ReleasePayloadTest(unittest.TestCase):
             self.assertTrue(packaged.getinfo("service.sh").external_attr >> 16 & stat.S_IXUSR)
             self.assertIn("scripts/lib.sh", packaged.namelist())
             self.assertIn("system/etc/resolv.conf", packaged.namelist())
-        self.assertEqual(json.loads(self.verify().stdout)["version"], "v1.2.7")
+        self.assertEqual(json.loads(self.verify().stdout)["version"], self.version)
 
     def test_incomplete_package_is_not_accepted(self):
         self.pack()
@@ -152,7 +156,7 @@ gh() {
         helpers = [next(line for line in lines if line.startswith(name + "() ")) for name in checks]
         runner.write_text("\n".join([support, *helpers, self.flow_function("receive_artifact"), 'receive_artifact unsigned "$DEST"\n']))
         common = dict(os.environ, META=str(metadata), ARCHIVE=str(outer), repo="fixture/repo", work=str(self.base),
-                      commit=commit, TOOLS=str(POLICY.parent), tag="v1.2.7", ARTIFACT_ID="87", ARTIFACT_DIGEST=digest,
+                      commit=commit, TOOLS=str(POLICY.parent), tag=self.version, ARTIFACT_ID="87", ARTIFACT_DIGEST=digest,
                       GITHUB_RUN_ID="65", GITHUB_RUN_ATTEMPT="3")
         for case, environment, ok in (("good", {}, True), ("previous-attempt", {"GITHUB_RUN_ATTEMPT": "4"}, False),
                                        ("different-run", {"GITHUB_RUN_ID": "66"}, False), ("different-commit", {"commit": "b" * 40}, False),

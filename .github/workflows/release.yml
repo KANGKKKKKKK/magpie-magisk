@@ -31,7 +31,8 @@ concurrency:
 jobs:
   plan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 7
+    # verify_ci 最多等 main CI 15 分钟
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -205,7 +206,7 @@ jobs:
     needs: plan
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'finalize' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 13
+    timeout-minutes: 25
     environment: magpie-publish
     permissions:
       actions: read

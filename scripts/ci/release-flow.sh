@@ -68,16 +68,17 @@ policy_guard() {
 verify_ci() {
   [ "$(gh api "repos/$repo/branches/main" --jq '.protected')" = true ] || fail 'main protection is required before release'
   _attempt=0
-  while [ "$_attempt" -lt 12 ]; do
+  # 合并后立刻打 tag 是常见流程；main CI 一般要 5~10 分钟，只等 2 分钟必然失败。
+  while [ "$_attempt" -lt 90 ]; do
     gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$commit&event=push&per_page=100" > "$work/ci.json"
     _state=$(jq -r --arg c "$commit" '
       [.workflow_runs[] | select(.head_sha == $c and .head_branch == "main")]
       | sort_by(.run_number) | last | if .status == "completed" then .conclusion else "pending" end' "$work/ci.json")
     case "$_state" in success) return 0 ;; pending) ;; *) fail "main CI for $commit: $_state" ;; esac
     _attempt=$((_attempt + 1))
-    [ "$_attempt" -ge 12 ] || sleep 10
+    [ "$_attempt" -ge 90 ] || sleep 10
   done
-  fail 'exact main CI was not green within two minutes; wait for it and rerun all jobs'
+  fail 'exact main CI was not green within 15 minutes; wait for it and rerun all jobs'
 }
 
 receive_artifact() {

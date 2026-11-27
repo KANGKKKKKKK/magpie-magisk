@@ -2,11 +2,20 @@
 # magpie 服务控制: magpie.service {start|stop|restart|status}
 
 export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH"
+# 调用者（看门狗、磁贴 App 的 su、管理器）的 umask 可能是 0000；
+# 这里新建的日志、锁、PID 与 DNS 文件都只该给 root 读写。
+umask 077
 
 # 读配置；文件缺失时用内置默认值
 CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$(dirname "$0")/magpie.config"
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
+  echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
+  MAGPIE_CONF_ERROR="配置文件有语法错误（$CONF），已按默认值运行"
+else
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+fi
 
 magpie_path=${magpie_path:-/data/adb/magpie}
 MAGPIE_ADDR=${MAGPIE_ADDR:-127.0.0.1:3425}
@@ -52,6 +61,9 @@ if [ -z "$API_PORT" ]; then
   ADDR_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用（应为 主机:端口，1-65535；IPv6 用 [::1]:3425）"
 elif [ -z "$WEB_PORT" ]; then
   ADDR_ERROR="面板监听地址 $WEB_HOST 的端口不可用（MAGPIE_WEB_ADDR 应为 主机:端口）"
+elif [ "$API_PORT" = "$WEB_PORT" ]; then
+  # 两个监听抢同一个端口，serve 一启动就退出；以前会被看门狗每 30 秒拉一次。
+  ADDR_ERROR="网关与面板用了同一个端口 $API_PORT（MAGPIE_ADDR 与 MAGPIE_WEB_ADDR 必须不同）"
 fi
 
 WEB_KEY_FILE="$magpie_path/data/web.key"
@@ -448,6 +460,7 @@ start_allowed() {
 
 start() {
   start_allowed || return 1
+  [ -z "${MAGPIE_CONF_ERROR:-}" ] || log Warn "$MAGPIE_CONF_ERROR"
   if [ "${1:-manual}" = auto ]; then
     # 消耗的是锁内观察的结果，而不是看门狗在锁外看到的旧快照。
     has_stop_request && return 2
@@ -516,6 +529,8 @@ start() {
     [ "${1:-manual}" = auto ] || log Info "启动准备期间收到停止请求，取消启动"
     return 2
   fi
+  # 记下日志当前长度：失败时只看本次启动新写入的部分，旧报错不再误导诊断。
+  _log_off=$(stat -c %s "$LOG" 2>/dev/null) || _log_off=0
   _new_session=""
   if command -v setsid >/dev/null 2>&1; then _new_session="setsid"; fi
   # shellcheck disable=SC2086  # $_new_session 要么空、要么是两个词，故意分词
@@ -534,6 +549,7 @@ start() {
     log Info "已启动 网关 http://$MAGPIE_ADDR"
     log Info "      WebUI http://127.0.0.1:$WEB_PORT/?k=<redacted> (PID $pid)"
     pin_oom "$pid"
+    command -v magpie_harden_perms >/dev/null 2>&1 && magpie_harden_perms "$magpie_path"
     # 二进制自己报的地址会被 fake-ip 骗，这里自己算
     refresh_lan_url || true
     if [ -f "$RUN/lan.url" ]; then
@@ -541,7 +557,7 @@ start() {
     fi
   else
     rm -f "$PIDFILE" 2>/dev/null
-    if grep -q "address already in use" "$LOG" 2>/dev/null; then
+    if tail -c +"$((_log_off + 1))" "$LOG" 2>/dev/null | grep -q "address already in use"; then
       log Error "启动失败: 端口被占用, 可能上次进程还没退出。详见 $LOG"
     else
       log Error "启动失败, 详见 $LOG"

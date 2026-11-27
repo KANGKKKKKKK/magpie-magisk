@@ -31,8 +31,9 @@ PAYLOAD = {
     "scripts/status.sh": 0o755,
     "scripts/tile-app.sh": 0o644,
     "scripts/tile-check.sh": 0o755,
+    "system/bin/magpie": 0o755,
     "system/etc/resolv.conf": 0o644,
-    "webroot/index.html": 0o755,
+    "webroot/index.html": 0o644,
 }
 # The body is never inside the module. These are upper limits, not expected sizes.
 MAX_APK = 4 * 1024 * 1024

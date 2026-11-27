@@ -28,7 +28,13 @@ CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 magpie_path=/data/adb/magpie
 MAGPIE_ADDR="127.0.0.1:3425"
 MAGPIE_WEB_ADDR=""
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
+  echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
+  MAGPIE_CONF_ERROR="配置文件有语法错误（$CONF），已按默认值运行"
+else
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+fi
 
 # 端口按 1..65535 校验；非法时留空，由 [2/10] 直接报错，不静默退回默认值
 API_PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
@@ -90,6 +96,13 @@ echo "  模块   $MODDIR"
 echo "  配置   $CONF"
 echo "  监听配置   网关 $MAGPIE_ADDR  面板 $WEB_ADDR"
 echo
+
+if [ -n "${MAGPIE_CONF_ERROR:-}" ]; then
+  echo "  ✗ $MAGPIE_CONF_ERROR"
+  echo "      → 修好引号/括号后重启服务：sh -n $CONF 可定位出错行"
+  BAD=$((BAD + 1))
+  echo
+fi
 
 echo "[1/10] 本体与进程"
 _st_raw=$(sh "$MODDIR/scripts/install.sh" status 2>/dev/null)
@@ -168,7 +181,7 @@ esac
 echo "[5/10] 网关密钥"
 if [ -x "$magpie_path/bin/magpie" ]; then
   _n=$(HOME="$magpie_path/data" MAGPIE_HOME="$magpie_path/data" \
-       "$magpie_path/bin/magpie" gateway-key list 2>/dev/null \
+       timeout 15 "$magpie_path/bin/magpie" gateway-key list 2>/dev/null \
        | grep -c 'enabled')
   if [ "$_n" -gt 0 ] 2>/dev/null; then
     ok "有 $_n 把已启用的网关密钥"
@@ -215,7 +228,7 @@ if [ -n "$DL_BB" ]; then
   [ -n "$_srv" ] || _srv=223.5.5.5
   # nslookup 会把「服务器」也打成 Address 行，所以只看 Name: 之后的才是答案
   _addr=$("$DL_BB" nslookup api.deepseek.com "$_srv" 2>/dev/null \
-    | awk '/^Name:/{f=1;next} f && /^Address [0-9]*: /{sub(/^Address [0-9]*: /,""); print $1}' | head -1)
+    | awk '/^Name:/{f=1;next} f && /^Address( [0-9]+)?: /{sub(/^Address( [0-9]+)?: /,""); print $1}' | head -1)
   if [ -n "$_addr" ]; then
     ok "上游 $_srv 能解析 api.deepseek.com（$_addr）"
   else
@@ -344,13 +357,15 @@ for _f in "$magpie_path/run/magpie.log" "$magpie_path/run/watchdog.log"; do
     _sz=$(stat -c %s "$_f" 2>/dev/null)
     _mb=$((_sz / 1048576))
     if [ "$_sz" -gt 5242880 ] 2>/dev/null; then
-      warn "${_f##*/} 已 $_mb MB" "超过 5 MB，下次启动会归档为 .1"
+      warn "${_f##*/} 已 $_mb MB" "超过 5 MB，看门狗下一轮会归档为 .1"
     else
       ok "${_f##*/} $_mb MB"
     fi
   fi
 done
-if touch "$magpie_path/data/.doctor" 2>/dev/null; then
+if [ ! -d "$magpie_path/data" ]; then
+  warn "数据目录尚未创建" "首次启动服务时自动生成"
+elif touch "$magpie_path/data/.doctor" 2>/dev/null; then
   rm -f "$magpie_path/data/.doctor" 2>/dev/null
   ok "数据目录可写"
 else
