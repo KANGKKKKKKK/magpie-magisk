@@ -128,18 +128,18 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service status
 su -c sh /data/adb/modules/magpie/scripts/doctor.sh   # 十项自检，出问题会告诉你怎么修
 ```
 
-管理器里那行描述会从刷入时的静态文字变成「🟢 运行中 v… | 仅本机」；开过局域网之后则是「🟢 运行中 v… | 192.168.x.x:3425」。
+管理器描述会显示进程状态和当前 API 配置候选；真实监听范围以 `doctor.sh` 核验为准。
 
 **5. 打开面板**
 
-点 `[执行]` → 选 6「打开面板」，会带着访问密码直接用浏览器打开。也可以自己取地址：
+点 `[执行]` → 选 6「打开面板」。只有在控制器核验本体拥有回环监听、且监听与当前 Web 配置对应时，才会用外部浏览器打开不带密码的地址。也可以只查询该地址：
 
 ```sh
-su -c cat /data/adb/magpie/run/web.url
-# http://127.0.0.1:3430/?k=<32 位访问密码>
+su -c sh /data/adb/modules/magpie/scripts/magpie.service panel-url
+# 示例：http://127.0.0.1:3430/
 ```
 
-把打印出来的地址粘进手机浏览器即可。这是 magpie 本体的界面，别和[模块自带的 webroot 面板](#两个面板别弄混)弄混。
+命令没有返回地址时，先用 `doctor.sh` 查监听，不要在未确认的页面输密码。若已确认的本体面板需要登录，请在普通浏览器按本体版本的登录方式操作；不要分享带密钥的链接。这是本体界面，不是[模块 WebUI](#两个面板别弄混)。
 
 > [!TIP]
 > 想从电脑上打开面板，先把 [配置](#配置) 里的 `MAGPIE_WEB_ADDR` 改成 `0.0.0.0:3430` 并重启服务，再用面板/自检里给出的局域网地址访问。**开之前先看一眼下面的[两把密钥](#两把密钥的区别)那一节。**
@@ -190,10 +190,7 @@ su -c sh /data/adb/modules/magpie/scripts/install.sh rollback  # 用备份退回
 所以真实性的信任根是「usemagpie.ai 这个源 + TLS」，与 magpie 本体自己更新时的信任假设相同；
 仓库里虽然也有 `SHA256SUMS.sig`，但本模块没有内置公钥，因此**不声称做过 GPG 签名验证**。
 
-**怎么落盘。** 先下到同文件系统的临时文件 → 校验 → `mv` 原子替换（不会出现半截文件）；
-替换前把旧本体备份成 `bin/magpie.bak`。装完立刻跑一次 `--version` 自检：跑不起来就回退；
-首次安装没有备份可退时，把失败样本挪到 `bin/magpie.rejected` 并报出它的 sha256，
-正式路径上绝不留下「看起来已安装」的文件。
+**怎么落盘。** 先校验下载文件并实际运行候选的 `--version`，检查退出码和版本，再原子切换。可用的旧本体才会更新 `bin/magpie.bak`。最终路径自检或安装记录写入失败时，恢复切换前的本体和安装记录；候选预检失败时不替换本体，样本留在 `bin/magpie.rejected` 供检查。
 
 **不做什么。** 不自动下载、不每次开机检查、不自动升级、不覆盖已有可用本体（除非显式
 `install --yes`）、不碰 `data/`、配置、账号、provider、密钥、监听地址。升级交给本体自己：
@@ -209,9 +206,7 @@ su -c magpie update         # 下载、校验、重启进新版本
 > 刷入模块时**不会**联网下载。刷机流程里没有可靠的交互终端，因此 `customize.sh` 只做检测并告诉你怎么装，真正下载由你确认后触发。
 
 > [!NOTE]
-> 安装器不依赖 `wget` 在 `PATH` 上。模块脚本被管理器拉起时，`PATH` 往往只有系统目录，
-> 那里没有 `wget`；安装器会把各 Root 方案的 bin 目录加进去，并在必要时回退到
-> busybox 自带的 `wget`。可用 `MAGPIE_DL=/path/to/curl` 指定别的下载器。
+> 本体安装器只用支持证书校验和 HTTPS 跳转限制的 `curl`。如果管理器的 PATH 中没有 curl，可把 `MAGPIE_DL` 设为一个**可信且可在 Android 上执行**的 curl 绝对路径；需要自定义 CA 时，用 `MAGPIE_TLS_CA_BUNDLE` 指定可信 PEM。找不到合适工具会停止，不回退到无法保证校验的 BusyBox wget。已有本体和常规启停不依赖这项安装功能。
 
 > [!TIP]
 > 想换源（自建镜像、内网缓存）：
@@ -246,10 +241,10 @@ su -c magpie update         # 下载、校验、重启进新版本
 
 | 选项 | 作用 |
 | --- | --- |
-| 1 切换网关 | 同时切换 API 和管理面板的监听地址：仅本机 `127.0.0.1` / 局域网 `0.0.0.0`；服务在跑就自动重启生效 |
-| 2 查看接入信息 | 本机与局域网两套地址分行列出，并给出别的设备该填什么 |
+| 1 切换网关 | 仅本机：API 与面板均为回环；局域网 API：只开放 API。服务在跑时应用并核验实际监听 |
+| 2 查看接入信息 | 分别显示 API 与面板的配置候选地址和已核验的运行态 |
 | 3 / 4 / 5 | 重启 / 停止 / 启动 |
-| 6 打开面板 | 用浏览器打开 WebUI（带你自己的密钥） |
+| 6 打开面板 | 用外部浏览器打开已核验的本机面板，不携带密钥 |
 | 7 退出 | 关掉 `[执行]` 窗口，回到模块列表 |
 
 本体没装或跑不起来时，`[执行]` 仍然是安装入口：先打印将装的版本、大小、来源，
@@ -257,12 +252,10 @@ su -c magpie update         # 下载、校验、重启进新版本
 
 > [!TIP]
 > **开热点给平板用时**：先点 `[执行]` → 选 1 切到「局域网」→ 选 2 看给出的地址，
-> 把它填进平板上 Eta 的 magpie 接口；用完再切回「仅本机」，外部就进不来。
+> 把它填进平板上 Eta 的 magpie 接口；用完切回「仅本机」，确认运行态两个端口都已收回回环。
 
 > [!WARNING]
-> 菜单切到局域网会**同时开放 API 网关和管理面板**（默认 3425 / 3430）。两者默认使用 HTTP，
-> 不加密传输，只在可信网络使用，不要直接暴露到公网。只想共享 API、不想开放面板，
-> 请按[配置](#配置)单独设置 `MAGPIE_ADDR=0.0.0.0:3425`，保持 `MAGPIE_WEB_ADDR=127.0.0.1:3430`，再重启服务。
+> 「局域网 API」只开放 API，管理面板仍配置为回环；「仅本机」会把两个监听目标都设为回环。默认使用 HTTP，只在可信网络使用，不要直接暴露到公网。切换之后看运行态核验结果；配置写入不等于监听已生效。
 
 音量键本身会系统性地调一下媒体音量，菜单退出时会还原成进来时的值。
 在终端里跑同一个菜单（见 [命令行](#命令行)）时会原地重画、只有 `▸` 移动；
@@ -271,8 +264,8 @@ Magisk 的文本框不支持光标控制，所以那里只画一次菜单、每�
 那行文字会自动更新，不需要点任何按钮就能看到该填进客户端什么：
 
 ```
-🟢 运行中 v0.1.4260 | 192.168.1.5:3425      ← 运行中，并给出可用的局域网地址
-🟢 运行中 v0.1.4260 | 仅本机                 ← 只监听 127.0.0.1，别的设备连不上
+🟢 运行中 v0.1.4260 | 配置候选：192.168.1.5:3425
+🟢 运行中 v0.1.4260 | 配置：仅本机
 🔴 已停止 | 点 [执行] 启动
 ```
 
@@ -288,14 +281,14 @@ Magisk 的文本框不支持光标控制，所以那里只画一次菜单、每�
 <p align="center"><img src="docs/panel-magpie.jpg" width="240" alt="P1：magpie 自带的面板"> <img src="docs/panel.png" width="240" alt="P2：模块自带的 webroot 面板"></p>
 
 **P1**：magpie 自带的面板，截图停在「关于」页（版本号、更新开关）；日常配模型、供应商、额度、密钥都在这里。  
-**P2**：模块自带的 webroot 面板，要靠 KernelSU WebUI / WebUI-X 托管才能打开；里面的 API Key 与访问密码默认折叠为「点击「显示」查看」，截图未展开。
+**P2**：模块自带的 webroot 面板，要靠 KernelSU WebUI / WebUI-X 托管才能打开；显示不含密钥的状态快照，不在宿主窗口跳转本体面板；旧截图仅供布局参考。
 
 | | P1：magpie 自带的面板 | P2：模块自带的 webroot 面板 |
 | --- | --- | --- |
-| 地址 | `http://<host>:3430/?k=<data/web.key>`；也可以用 `[执行]` → 6 打开 | 没有自己的地址：在 KernelSU WebUI / WebUI-X 里打开 |
+| 地址 | 已核验时由 `panel-url` 返回无密钥的回环地址；或用 `[执行]` → 6 | 没有自己的地址：在 KernelSU WebUI / WebUI-X 里打开 |
 | 谁提供 | magpie 自己（`serve --web=…`） | `webroot/index.html`，需要 **KernelSU 的 WebUI** 或 Magisk 的 **WebUI-X** 模块来托管 |
-| 能看到什么 | magpie 的完整应用界面（Agent、会话、资源库、供应商、网关、额度、模型、插件、设置…） | 服务状态与 PID、网关地址与 API Key、面板地址与访问密码、日志尾 |
-| 纯 Magisk 下 | ✅ 可用，地址由 `run/web.url` 给出 | ❌ 没有宿主就打不开；此时 `webroot/status.json` 仍然会写，脚本可以直接读 |
+| 能看到什么 | magpie 的完整应用界面（Agent、会话、资源库、供应商、网关、额度、模型、插件、设置…） | 服务状态与 PID、API 配置候选、可核验时的面板地址、尽力脱敏的日志尾 |
+| 纯 Magisk 下 | ✅ 可用，地址由控制器核验 | ❌ 没有宿主就打不开；此时 `webroot/status.json` 仍然会写，脚本可以直接读 |
 
 ### 命令行
 
@@ -334,7 +327,7 @@ su -c sh /data/adb/modules/magpie/action.sh restart   # 重启
 su -c sh /data/adb/modules/magpie/action.sh panel     # 打开面板
 ```
 
-切网关只改配置里的 `MAGPIE_ADDR` / `MAGPIE_WEB_ADDR` 两行，服务在跑就自动重启一次生效。
+切换写入 `MAGPIE_ADDR` / `MAGPIE_WEB_ADDR`。若服务在跑，控制器成功且两个端口的监听范围核验通过后才算生效；服务未运行时只保存配置。
 
 ## 客户端怎么接入
 
@@ -377,8 +370,7 @@ su -c sh /data/adb/modules/magpie/scripts/doctor.sh
    例如 `http://192.168.1.100:3425/v1`；不要在另一台设备上填写 `127.0.0.1` 或 `0.0.0.0`。
 
 > [!WARNING]
-> 局域网开关会同时开放 API 和管理面板，默认是 HTTP。只在可信网络使用；
-> 仅共享 API 的配置方法见[执行按钮](#执行按钮)。API key 与面板链接中的 `?k=` 不是一回事。
+> 局域网菜单只开放 API；默认是 HTTP，仅在可信网络使用。API key 与面板访问密码不是一回事。
 
 > [!NOTE]
 > CLI 的 `gateway-key list` 不提供可用于接入的完整明文；创建或 `rotate` 后立即保存完整 key，
@@ -467,8 +459,8 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 | API 返回 401 | 局域网必须使用已启用的完整网关 key，不能填面板访问密码、占位符或掩码 |
 | `model not found` | 从 `/v1/models` 重新复制 `id`，检查模型启用状态及该 key 的模型权限 |
 | 列表有模型，发消息失败 | 查看返回的错误和日志，检查供应商登录、额度、上游网络及模型能力 |
-| 面板打开是 401 | 使用 `run/web.url` 的完整地址，或 `[执行]` → 选 6；不要把面板密码填进 API Key |
-| 模块面板的 API Key 显示「点击「显示」查看」 | 这是默认折叠显示；若只有掩码，仍需使用创建或轮换时保存的完整 key |
+| 面板打开是 401 | 先核验是本机面板，再按本体版本的登录方式操作；不要把面板密码填进 API Key |
+| 模块面板没有显示 API Key | 模块快照不再提供密钥；使用创建或轮换时保存的完整 key |
 
 </details>
 
@@ -487,15 +479,15 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 > [!IMPORTANT]
 > **本机回环访问不校验密钥。** magpie 文档的原话是「On this machine the gateway takes any key」，实测不带 `Authorization` 头也能调通 `/v1/models`。所以「有没有 key」不是本机的安全边界，别拿它当。
 
-本体面板（P1）能管理供应商、账号和网关密钥，不只是查看运行状态；模块面板（P2）的状态文件也可能含敏感值。
-**不要分享带 `?k=` 的完整链接、密钥截图或 `status.json`**，也不要因为界面默认折叠就把它当作脱敏。
+本体面板（P1）能管理供应商、账号和网关密钥，不只是查看运行状态；状态 JSON 不再携带密钥；日志尾只做尽力脱敏，仍不宜直接公开。
+**不要分享带 `?k=` 的完整链接或密钥截图**；公开日志前再次检查并打码。
 
 开放局域网后的暴露面：
 
 - `MAGPIE_ADDR=0.0.0.0:3425` → 网关对同网段可见。**从别的设备访问必须带一把已启用的网关 key**，随便填字符串会被拒；但网关本身可被探测。
 - `MAGPIE_WEB_ADDR=0.0.0.0:3430` → 面板暴露，不知道 `?k=` 会 401；密码一旦泄露，对方可能进入管理界面，影响供应商和密钥配置。
 
-局域网菜单会同时修改上面两项，默认使用 HTTP、没有 TLS；仅在可信网络使用，不要直接转发到公网。
+局域网菜单只把 API 设为非回环，管理面板保持回环。不要把默认的 HTTP 监听转发到公网。
 
 顺序建议：**先建好网关 key，再开局域网**；只在本机用就保持默认的 `127.0.0.1`。不确定的时候跑一次自检，它会把当前暴露面直接列出来。
 
@@ -535,14 +527,7 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 
 服务脚本、`status.sh`、`doctor.sh`、`magpie` 命令和卸载脚本按 `magpie_path` 工作；配置文件本身仍从上面的固定位置读取。仅为更改地址或 DNS 时，不需要修改 `magpie_path`。
 
-安装器与卸载器共用默认拒绝的路径白名单：只允许 `/data/adb/magpie`、`/data/adb/modules/magpie` 及其子目录。安装器另行拒绝目标路径或相关子路径中的符号链接；其 `status`、`check`、`plan`、`install`、`rollback` 都先做校验。
-
-旧版若把 `magpie_path` 配在这两个根目录之外，升级**不会**自动迁移或删除该目录，服务也不会替你搬动或清理。此时：
-
-- 直接执行模块里的 `scripts/magpie.service start|stop|restart|status` 仍按原配置工作；
-- `[执行]` 菜单和 `action.sh start|stop|restart` 会先调用 `install.sh status` 判断本体是否就绪，因此会被路径校验拦下；`action.sh status|gateway|lan|local|panel` 不走这一步。
-
-要恢复完整功能，请把数据目录迁回允许范围：先备份、停服务，再移动文件、修改配置并启动。
+安装器只向 `/data/adb/magpie` 及其子目录部署，并拒绝符号链接。旧版把数据放进 `/data/adb/modules/magpie` 的用户，仍可用 `install.sh status` 查看已有本体；要安装、回退、更新模块或卸载，请先备份并迁到模块树外。其他不受支持的旧路径须用 `magpie.service` 直接停服后再迁移；模块不会自动搬动数据。
 
 改完重启服务生效：
 
@@ -556,12 +541,12 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 
 ```
 [1/10] 本体与进程      本体装了没 / 能不能跑 / 版本 / PID / oom_score_adj
-[2/10] 端口监听        网关 / 面板端口有没有人听
+[2/10] 端口监听        网关 / 面板的实际监听范围与进程归属
 [3/10] 本机可用性      网关是否返回 200
-[4/10] 面板与访问密码  data/web.key 在不在？带密码能不能进
+[4/10] 面板与访问密码  密码文件是否存在；不读取或发送密码
 [5/10] 网关密钥        有几把已启用的 key
 [6/10] CA 证书包       证书张数与权限
-[7/10] 局域网暴露      是否已对局域网开放、对外广播的地址是什么
+[7/10] 局域网暴露      分别比较 API / Web 的配置目标与运行态
 [8/10] DNS 解析        /etc/resolv.conf 在不在、上游能不能解析域名
 [9/10] 磁贴            装了没、root 授权、画的什么、和实际状态是否一致、有没有被冻结
 [10/10] 日志与磁盘     日志大小、数据目录可写、剩余空间
@@ -578,7 +563,7 @@ su -c sh /data/adb/modules/magpie/scripts/magpie.service restart
 | 提示「本体未安装」 | 正常状态，不是故障。按[安装本体](#安装本体让模块来做)装好即可 |
 | 本体装不上：取不到更新清单 | 网络不通或清单被拦。先 `install.sh check` 看能不能连上；必要时用 `MAGPIE_MANIFEST_URL` 换源 |
 | 本体装不上：sha256 不匹配 | 下载被中间设备改过或截断。换网络重试；持续如此别装，去发布页核对 |
-| 本体装完跑不起来 | 首次安装会把样本留在 `bin/magpie.rejected` 并报出摘要；已装过则自动回退到 `bin/magpie.bak` |
+| 本体装完跑不起来 | 候选预检失败时尽可能留样本 `bin/magpie.rejected`；正式路径自检失败时恢复切换前状态 |
 | 想退回上一版本体 | `install.sh rollback` |
 | 启动失败，日志说端口占用 | 用 `doctor.sh` 或 `ss -ltnp` 确认占用者。若是本模块服务，优先用 `restart`；不要直接按 `pidof magpie` 批量杀进程，MCP 子进程也可能同名 |
 | 面板数据一动不动 | 看状态栏的「数据 HH:MM:SS」：正常巡检时默认约 2.5 分钟刷新；自定义间隔、启动失败退避会延长。长时间不更新时检查守护进程及 `run/watchdog.log` 的启动或异常记录；日志不会每轮都写 |
@@ -679,7 +664,6 @@ magpie-magisk/
 ```
 /data/adb/magpie/run/magpie.log        服务日志
 /data/adb/magpie/run/watchdog.log      看门狗日志
-/data/adb/magpie/run/web.url           带密码的面板地址
 /data/adb/magpie/run/lan.url           局域网地址（开放局域网时）
 /data/adb/magpie/run/.user_stopped     用户主动停止的标记
 /data/adb/magpie/run/magpie.pid        PID 文件
@@ -689,8 +673,8 @@ magpie-magisk/
 /data/adb/magpie/.install.lock         安装互斥锁
 /data/adb/magpie/.install.pending      二次确认的待办标记
 /data/adb/magpie/data/certs/           CA 证书包与指纹
-webroot/status.json                    面板数据（含密钥，权限 600）
-webroot/lastlog.txt                    面板日志尾（权限 600）
+webroot/status.json                    面板数据（不含密钥，权限 600）
+webroot/lastlog.txt                    尽力脱敏的面板日志尾（权限 600）
 ```
 
 ## 卸载
@@ -701,10 +685,10 @@ webroot/lastlog.txt                    面板日志尾（权限 600）
 su -c sh /data/adb/modules/magpie/uninstall.sh
 ```
 
-会依次：写卸载标记让看门狗退出、停服务、收掉守护进程和插件宿主 `magpie-bun`、清理旧版 dnsmasq、移除 PATH 里的 `magpie` 链接、删除整个 `/data/adb/magpie`（设置、供应商、网关 key、用量记录、证书、Bun 缓存都在里面），最后复查残留。
+脚本写入卸载标记并先停止服务。停止失败或确认仍有服务进程时，脚本中止清理。默认不删除持久数据目录，其中的本体、设置、供应商、密钥、用量记录和日志仍在；如需清除，请先备份再手动核对路径。
 
 > [!WARNING]
-> 数据目录会被整个删除，不会保留。想留一份就先自己备份 `/data/adb/magpie/data`。
+> 旧版若把 `magpie_path` 放在模块目录里，**必须在点移除或更新前备份并迁到 `/data/adb/magpie`**。卸载脚本会提示，但不能替管理器保证该目录不被整棵删除，也不会自动移动数据。
 
 ## 更新
 
@@ -712,7 +696,7 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 
 - 管理器会根据 `versionCode` 判断有没有新版本，需要时提示并一键更新。
 - 本体更新与模块更新独立：常规更新本体用 `su -c magpie update`；不需要为此重刷模块。
-- 维护者的发版步骤见[开发与测试](#开发与测试)，`update.json` 由工作流自动回写，不需要手工同步。
+- 维护者的发版步骤见[开发与测试](#开发与测试)，正式 Release 三件资产验证通过后，工作流提出 `update.json` PR；只有审核合入 `main` 才更新管理器通道。
 - 更新模块**不会**动 `/data/adb/magpie`，所以你配的 provider、密钥、日志都保留。
 
 ## 控制中心磁贴（可选）
@@ -743,6 +727,8 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 
 ## 已知限制
 
+- 看门狗和开机都通过 `auto-start`；同一 boot 的停止意图会在锁内重新检查。旧版无 boot ID 的空标记、或 boot ID 无法读取时，保守地保留停止意图，可显式启动一次解除。磁贴须与控制器一起更新：新版磁贴不向旧控制器回退到无条件 `toggle`，画面失配或结果不明时只刷新。
+
 - 安装器**只支持 arm64**：发布页里没有 arm32 / x86_64 的 Android 构建，非 arm64 设备会直接拒绝，而不是装错架构。
 - 安装器默认用于首次安装；已有可用本体时，不带 `--yes` 不会覆盖。显式 `install --yes` 会按当前清单重新部署，常规升级仍建议用 `magpie update`。
 - 摘要来自 usemagpie.ai 的清单，未做 GPG 签名验证；见[安装本体](#安装本体让模块来做)。
@@ -756,7 +742,7 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 - 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
 - **DNS 覆盖要重启一次手机才生效**：`system/etc/resolv.conf` 由 Magisk 在开机时挂载，装或更新模块后得重启；之后改 `MAGPIE_DNS` 重启服务即可重写覆盖文件，若 doctor 里上游还是旧的，再重启一次手机。
 - **磁贴 Shell 超时不代表 root 后代任务已取消**：保留不自动重放 toggle；超时显示未知，不把部分输出当作成功。跨 Magisk/KernelSU/APatch 的 root 控制任务取消尚待独立环境验证，不能把客户端 Process 清理等同于整棵 root 任务终止。
-- **可选磁贴 App 对自定义数据目录支持不完整**：面板 URL 固定从 `/data/adb/magpie/run/web.url` 读取，桌面图标隐藏标记固定使用 `/data/adb/magpie/run/.tile_launcher_hidden`；自定义 `magpie_path` 时这两项不会跟随迁移。磁贴启停经模块 `magpie.service` 执行，服务仍按配置中的数据目录工作。App 内的 `SERVICE` 指模块脚本目录，不是数据目录。
+- **磁贴与自定义数据目录**：启停与面板地址都通过模块控制器，使用当前配置。只有桌面图标隐藏标记仍固定在 `/data/adb/magpie/run/.tile_launcher_hidden`。受 Root 管理器或 SELinux 限制而无法读取 TCP 表或进程 FD 时，监听范围会报告未知，磁贴不会自动打开面板。
 
 ## 开发与测试
 
@@ -764,16 +750,16 @@ su -c sh /data/adb/modules/magpie/uninstall.sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 77 条
-sh tests/test-watchdog.sh                                 # 看门狗 13 条
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 43 条
-sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 150 条
-sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 267 条
-sh tests/test-tile-check.sh                               # 自查取数与未知值 72 条
+sh tests/test-watchdog.sh                                 # 看门狗 15 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 56 条
+sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 182 条
+sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 275 条
+sh tests/test-tile-check.sh                               # 自查取数、未知值与大输出 122 条
 ```
 
-六个套件共 622 条断言（77 + 13 + 43 + 150 + 267 + 72），另有 424 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程回归 6、串行队列 8）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+六个套件共 727 条断言（77 + 15 + 56 + 182 + 275 + 122），另有 434 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 
-`sh tests/run-all.sh` 还运行 84 个 Python unittest（发布 ZIP/构建 33、磁贴版本门槛 9、TileService 生命周期 14、桌面图标 3、doctor 磁贴段 25）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
+`sh tests/run-all.sh` 还运行 106 个 Python unittest（发布 ZIP/构建 34、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 TLS 6）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 
@@ -796,13 +782,7 @@ sh tests/check-counts.sh      # 实测各套件并核对文档，不一致则非
 CI 里也有这一步。
 细节与已知缺口见 [tests/README.md](tests/README.md)。
 
-发版流程：
-
-1. 改 `module.prop` 的 `version` 与 `versionCode`；磁贴代码、资源或运行时 manifest 有变化时，同时递增 `tile-app/AndroidManifest.xml` 的独立 `versionCode`（CI/Release 会与基线核对，防止老用户跳过 APK 更新）；
-2. 打同名 tag（如 `v0.8`）并推送；
-3. 工作流自动打包、校验 zip 结构、发 Release、回写 `update.json`。
-
-tag 与 `module.prop` 的 `version` 不一致时工作流会主动失败，避免发出错版本。
+发版先按[发布策略](docs/release-policy.md)配置受保护的 Environment、策略 SHA、不可变 Release 和 tag 规则。模块版本与磁贴版本分别递增；目标 `main` 提交的 CI 通过后推同名 annotated tag。构建机不接触正式密钥；独立签名、发布和更新索引 PR 各自审批。从 `main` 手动触发只核对已有草稿/正式包，不生成新的 tag 证明。
 
 仓库页面的社交预览图在 `docs/social-preview.png`（1280×640）：GitHub 没有对应的 API，
 要在「Settings → Social preview」里手动上传。

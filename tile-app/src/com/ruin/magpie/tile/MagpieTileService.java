@@ -1,6 +1,5 @@
 package com.ruin.magpie.tile;
 
-import android.content.ComponentName;
 import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Handler;
@@ -18,7 +17,7 @@ import java.lang.ref.WeakReference;
  * <ul>
  *   <li>onStartListening：读一次服务状态，刷新显示。结果缓存几秒，
  *       免得用户反复展开控制中心时每次都 fork 一个 su。</li>
- *   <li>onClick：立刻显示「处理中」并置灰，然后后台执行 toggle。
+ *   <li>onClick：立刻显示「处理中」并置灰，只在控制器确认实际状态与画面一致后才启停。
  *       启动 magpie 要几秒，没有即时反馈用户会以为没点上。</li>
  *   <li>unlockAndRun：磁贴可以从锁屏拉下来，必须先解锁再动 root 命令。</li>
  * </ul>
@@ -42,6 +41,8 @@ public class MagpieTileService extends TileService {
     // A command can outlive its Service instance; completion belongs to the current listener.
     private static WeakReference<MagpieTileService> currentListener = new WeakReference<>(null);
     private boolean listening;
+    private long listenEpoch;
+    private String paintedState;
 
     /**
      * 拿不到 Tile 对象时的重试间隔。
@@ -62,6 +63,10 @@ public class MagpieTileService extends TileService {
     public void onStartListening() {
         super.onStartListening();
 
+        if (!isCurrentListener()) {
+            ++listenEpoch;
+            paintedState = null;
+        }
         listening = true;
         currentListener = new WeakReference<>(this);
         if (STATE.isBusy()) {
@@ -73,6 +78,11 @@ public class MagpieTileService extends TileService {
             render(fresh);
             return;
         }
+        readStatus();
+    }
+
+    private void readStatus() {
+        if (!isCurrentListener()) return;
         // Keep a known value visible while reading; never invent 'stopped'.
         render(STATE.lastState() != null ? STATE.lastState() : "working");
         final long request = STATE.beginRead();
@@ -80,7 +90,7 @@ public class MagpieTileService extends TileService {
         Shell.run(Shell.statusCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                String state = classify(r);
+                String state = classifyStatus(r);
                 if (STATE.completeRead(request, state, SystemClock.elapsedRealtime())) {
                     renderCurrent(state);
                 }
@@ -117,31 +127,49 @@ public class MagpieTileService extends TileService {
     @Override
     public void onClick() {
         super.onClick();
-        // 锁屏上点磁贴时先要求解锁；root 命令不该在锁屏状态执行
+        if (!isCurrentListener() || STATE.isBusy()) return;
+        final String expected = paintedState;
+        final long epoch = listenEpoch;
+        final long paint = renderSeq;
+        // 锁屏点按可能延迟到下一次展开。保留点击时实际绘制的状态，而非解锁后的新画面。
         unlockAndRun(new Runnable() {
             @Override
             public void run() {
-                doToggle();
+                applyClick(expected, epoch, paint);
             }
         });
     }
 
-    private void doToggle() {
-        // unlockAndRun may finish after this instance stopped listening or was replaced.
-        if (!isCurrentListener()) return;
+    private void applyClick(String expected, long epoch, long paint) {
+        if (!isCurrentListener() || epoch != listenEpoch || STATE.isBusy()) return;
+        if (paint != renderSeq || (!"running".equals(expected) && !"stopped".equals(expected))
+                || !expected.equals(STATE.freshState(SystemClock.elapsedRealtime(), CACHE_MS))) {
+            readStatus();
+            return;
+        }
         final long request = STATE.beginToggle();
-        if (request == -1L) return; // UI gray-out alone does not prevent queued clicks.
+        if (request == -1L) return;
         render("working");
-        // No retry/replay: the root script owns serialization and final state.
-        Shell.run(Shell.toggleCommand(), new Shell.Callback<Shell.Result>() {
+        Shell.run(Shell.toggleIfCommand(expected), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
                 String state = classify(r);
-                if (STATE.completeToggle(request, state, SystemClock.elapsedRealtime())) {
+                if (!STATE.completeToggle(request, state, SystemClock.elapsedRealtime())) return;
+                if ("unknown".equals(state) || (r != null && !r.ok && "stopped".equals(state))) {
+                    // 失配、旧控制器拒绝以及超时都只重读。不降级到旧 toggle，也不重放动作。
+                    STATE.invalidateCache();
+                    MagpieTileService listener = currentListener.get();
+                    if (listener != null) listener.readStatus();
+                } else {
                     renderCurrent(state);
                 }
             }
         });
+    }
+
+    static String classifyStatus(Shell.Result r) {
+        String state = classify(r);
+        return r != null && !r.ok && "stopped".equals(state) ? "unknown" : state;
     }
 
     /** Shared pure classifier; unknown execution results stay unknown. */
@@ -155,6 +183,8 @@ public class MagpieTileService extends TileService {
 
     private void clearListeningInstance() {
         listening = false;
+        ++listenEpoch;
+        paintedState = null;
         // A late stop/destroy from an older instance must not clear its replacement
         // or invalidate the replacement's pending render retries. Never release busy here.
         if (currentListener.get() == this) {
@@ -244,22 +274,13 @@ public class MagpieTileService extends TileService {
         tile.setIcon(Icon.createWithResource(this, R.drawable.ic_tile));
         tile.setState(tileState);
         tile.updateTile();
+        paintedState = state;
     }
 
-    /**
-     * 让 SystemUI 重新回调 onStartListening。
-     *
-     * <p>服务在别处（App 里、命令行、看门狗）被启停后调用，磁贴才不会显示旧状态。
-     * 注意：如果本进程被系统冻结，这个调用同样跑不到 —— 这是冻结模块的问题，
-     * 不是这里的逻辑问题。
-     */
+    /** 主动授权后仅刷新当前实例；非 ACTIVE_TILE 不能依赖 requestListeningState。 */
     static void refresh(android.content.Context ctx) {
         STATE.invalidateCache();
-        try {
-            TileService.requestListeningState(
-                    ctx, new ComponentName(ctx, MagpieTileService.class));
-        } catch (Throwable ignored) {
-            // 老系统或系统限制了调用，忽略即可：下次展开控制中心自然会刷新
-        }
+        MagpieTileService listener = currentListener.get();
+        if (listener != null && !STATE.isBusy()) listener.readStatus();
     }
 }

@@ -96,6 +96,8 @@ echo
 echo "== 6 Release ZIP / tile build / versionCode 回归（独立于 Shell 断言总数）"
 python3 tests/test-release-zip.py
 python3 tests/test-tile-version.py
+python3 tests/test-release-policy.py
+python3 tests/test-installer-tls.py
 
 echo
 echo "全部公共测试通过"

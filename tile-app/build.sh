@@ -1,7 +1,7 @@
 #!/bin/sh
 # 构建磁贴 App：com.ruin.magpie.tile
 #
-#   sh tile-app/build.sh [输出目录]
+#   sh tile-app/build.sh [--unsigned] [输出目录]
 #
 # 需要：
 #   aapt / zipalign（aarch64 版，apt 装的）
@@ -14,17 +14,23 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+MODE=signed
+if [ "${1:-}" = --unsigned ]; then MODE=unsigned; shift; fi
+[ "$#" -le 1 ] || { echo "用法：sh tile-app/build.sh [--unsigned] [输出目录]" >&2; exit 1; }
 OUT=${1:-"$HERE/build"}
 
 # ---- 工具链 ----
 # SDK 位置：优先 ANDROID_SDK（本地可显式指定），其次 ANDROID_HOME（CI 常用），
 # 最后才退回 /opt/android-sdk。写死一个路径会让 CI 上直接「找不到 build-tools」。
 SDK=${ANDROID_SDK:-${ANDROID_HOME:-/opt/android-sdk}}
-BT=$(
-  for _bt in "$SDK"/build-tools/*; do
-    [ -d "$_bt" ] && printf '%s\n' "$_bt"
-  done | sort -V | tail -1
-)
+BT=${MAGPIE_BUILD_TOOLS:-}
+if [ -z "$BT" ]; then
+  BT=$(
+    for _bt in "$SDK"/build-tools/*; do
+      [ -d "$_bt" ] && printf '%s\n' "$_bt"
+    done | sort -V | tail -1
+  )
+fi
 [ -n "$BT" ] || { echo "找不到 build-tools" >&2; exit 1; }
 # 固定用 android-34，不取「最新」：SDK 里可能装着 android-37.0 这种
 # preview 平台，它的 android.jar 没有完整属性表（连 android:exported 都查不到），
@@ -44,20 +50,22 @@ done
 # ---- 签名 ----
 KS=${MAGPIE_KEYSTORE:-}
 KEYALIAS=${MAGPIE_KEY_ALIAS:-magpie}
-if [ -z "$KS" ] || [ ! -f "$KS" ]; then
-  echo "没有签名密钥：设 MAGPIE_KEYSTORE 指向 .jks 文件" >&2
-  echo "（新生成一把见 tile-app/README.md，密钥不要提交到仓库）" >&2
-  exit 1
+if [ "$MODE" = signed ]; then
+  if [ -z "$KS" ] || [ ! -f "$KS" ]; then
+    echo "没有签名密钥：设 MAGPIE_KEYSTORE 指向 .jks 文件" >&2
+    exit 1
+  fi
+  [ -n "${MAGPIE_KS_PASS:-}" ] || { echo "没有签名口令：设 MAGPIE_KS_PASS" >&2; exit 1; }
+  export MAGPIE_KS_PASS
 fi
-if [ -z "${MAGPIE_KS_PASS:-}" ]; then
-  echo "没有密钥口令：设 MAGPIE_KS_PASS" >&2
-  exit 1
-fi
-# apksigner 从环境读取口令，不能把口令展开到 /proc/<pid>/cmdline。
-export MAGPIE_KS_PASS
 
-WORK="$OUT/work"
-rm -rf "$OUT"
+# 在私有临时目录构建，不删除调用方给出的输出目录或上次产物。
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+WORK=$(mktemp -d "$OUT/.tile-build.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 mkdir -p "$WORK/gen" "$WORK/classes" "$WORK/dex" "$WORK/apk"
 
 echo "→ 资源与 R.java"
@@ -139,13 +147,18 @@ aapt package -f -M "$HERE/AndroidManifest.xml" -S "$HERE/res" \
 
 echo "→ 对齐"
 zipalign -f 4 "$WORK/unaligned.apk" "$WORK/aligned.apk"
+if [ "$MODE" = unsigned ]; then
+  mv -f "$WORK/aligned.apk" "$OUT/magpie-tile-unsigned.apk"
+  printf '已生成未签名磁贴：%s/magpie-tile-unsigned.apk\n' "$OUT"
+  exit 0
+fi
 
 echo "→ 签名"
 # 先独立保存 sign 的退出码，再过滤日志；即使旧/部分 APK 能 verify 也不能掩盖 sign 失败。
 if "$BT/apksigner" sign \
   --ks "$KS" --ks-key-alias "$KEYALIAS" \
   --ks-pass env:MAGPIE_KS_PASS --key-pass env:MAGPIE_KS_PASS \
-  --out "$OUT/magpie-tile.apk" "$WORK/aligned.apk" >"$WORK/sign.log" 2>&1; then
+  --out "$WORK/signed.apk" "$WORK/aligned.apk" >"$WORK/sign.log" 2>&1; then
   _sign_rc=0
 else
   _sign_rc=$?
@@ -156,8 +169,8 @@ if [ "$_sign_rc" -ne 0 ]; then
   exit 1
 fi
 
-"$BT/apksigner" verify "$OUT/magpie-tile.apk" >/dev/null 2>&1 \
+"$BT/apksigner" verify "$WORK/signed.apk" >/dev/null 2>&1 \
   || { echo "签名校验失败" >&2; exit 1; }
 
-echo
+mv -f "$WORK/signed.apk" "$OUT/magpie-tile.apk"
 echo "已生成 $OUT/magpie-tile.apk ($(stat -c %s "$OUT/magpie-tile.apk") 字节)"

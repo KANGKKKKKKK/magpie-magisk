@@ -238,7 +238,7 @@ public class MainActivity extends Activity {
             public void onResult(Shell.Result r) {
                 if (isFinishing() || isDestroyed()) return;
                 // 与磁贴共用同一套判定，避免「磁贴说启动失败、界面说需要 root」
-                String state = MagpieTileService.classify(r);
+                String state = MagpieTileService.classifyStatus(r);
                 if ("noroot".equals(state)) {
                     status.setText(R.string.state_no_root);
                     hint.setText(R.string.root_needed);
@@ -285,20 +285,20 @@ public class MainActivity extends Activity {
     }
 
     private void openPanel() {
-        // 面板地址写在模块的 run/web.url 里，带访问密码
-        Shell.run("cat /data/adb/magpie/run/web.url", new Shell.Callback<Shell.Result>() {
+        Shell.run(Shell.panelUrlCommand(), new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
-                if (isFinishing() || isDestroyed()) return;
-                String url = r == null ? "" : r.trimmed();
-                if (url.isEmpty()) {
-                    // 服务没起时没有这个文件，退回到不带密码的地址
-                    url = "http://127.0.0.1:3430/";
+                if (isFinishing() || isDestroyed() || !hasWindowFocus()) return;
+                String url = Shell.verifiedPanelUrl(r);
+                if (url == null) {
+                    hint.setText(R.string.panel_unverified);
+                    return;
                 }
                 try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)));
-                } catch (Throwable ignored) {
-                    // 没有浏览器就什么都不做
+                    startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                            .addCategory(Intent.CATEGORY_BROWSABLE));
+                } catch (android.content.ActivityNotFoundException | SecurityException ignored) {
+                    hint.setText(getString(R.string.panel_browser_unavailable, url));
                 }
             }
         });

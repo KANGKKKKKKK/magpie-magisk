@@ -31,6 +31,18 @@ public final class ShellTest {
 
         Shell.Result nonzero = Shell.execOnce("sh", "printf problem >&2; exit 7", 1000L);
         check("保留非零退出与 stderr", !nonzero.ok && nonzero.err.contains("problem"), nonzero.err);
+        for (String url : new String[]{"http://127.0.0.1:3430/", "http://127.23.0.1:65535/", "http://[::1]:3430/"}) {
+            check("接受控制器确认的回环地址 " + url,
+                    url.equals(Shell.verifiedPanelUrl(new Shell.Result(true, url, ""))), "unexpected rejection");
+        }
+        for (String url : new String[]{"http://127.0.0.1:65536/", "http://127.0.0.999:3430/",
+                "http://127.00.0.1:3430/", "http://localhost:3430/", "http://127.0.0.1:3430/?test=1",
+                "http://[::1]:3430/\nextra output"}) {
+            check("拒绝非规范或含额外内容的面板地址",
+                    Shell.verifiedPanelUrl(new Shell.Result(true, url, "")) == null, url);
+        }
+        check("控制器失败时不使用其输出地址",
+                Shell.verifiedPanelUrl(new Shell.Result(false, "http://127.0.0.1:3430/", "unavailable")) == null, "accepted failure");
         System.out.println("ShellTest: PASS " + passed + ", FAIL " + failed);
         if (failed != 0) System.exit(1);
     }

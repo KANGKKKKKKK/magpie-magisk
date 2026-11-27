@@ -55,8 +55,7 @@ fi
 PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
 [ -n "$PORT" ] || PORT=""
 # 面板地址留空是默认用法：跟 magpie.service 一样用「网关主机 + 3430」推出来
-WEB_ADDR=${MAGPIE_WEB_ADDR:-}
-[ -n "$WEB_ADDR" ] || WEB_ADDR="$(addr_host "$MAGPIE_ADDR"):3430"
+WEB_ADDR=${MAGPIE_WEB_ADDR:-"${MAGPIE_ADDR%:*}:3430"}
 WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
 [ -n "$WEB_PORT" ] || WEB_PORT=""
 
@@ -100,9 +99,9 @@ desc_line() {
   fi
   if [ "$RUNNING" = "1" ]; then
     if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then
-      _where="仅本机"
+      _where="配置：仅本机"
     else
-      if [ -n "$LAN_IP" ]; then _where="$LAN_IP:$PORT"; else _where="无局域网地址"; fi
+      if [ -n "$LAN_IP" ]; then _where="配置候选：$LAN_IP:$PORT"; else _where="无局域网地址"; fi
     fi
     if [ "$ICON_ON" = "0" ]; then
       echo "[运行中] ${_v:+$_v }| $_where"
@@ -163,36 +162,27 @@ if [ "$RUNNING" = "1" ]; then
   [ -n "$_mb" ] && MEM="${_mb} MB"
 fi
 
-WEB_URL=$(cat "$magpie_path/run/web.url" 2>/dev/null)
-[ -n "$WEB_URL" ] || WEB_URL=""
-WEB_KEY=$(cat "$magpie_path/data/web.key" 2>/dev/null)
-[ -n "$WEB_KEY" ] || WEB_KEY=""
-
-# 网关 key：回环访问不校验，开放局域网时必需
-API_KEY=""
-if [ -x "$magpie_path/bin/magpie" ]; then
-  API_KEY=$(HOME="$magpie_path/data" MAGPIE_HOME="$magpie_path/data" \
-    "$magpie_path/bin/magpie" gateway-key list 2>/dev/null \
-    | sed -n 's/^[0-9a-f]\{16,\}[[:space:]]\+[^[:space:]]\+[[:space:]]\+enabled[[:space:]]\+\(sk-[^[:space:]]*\)[[:space:]].*/\1/p' \
-    | head -1)
-fi
-if [ -z "$API_KEY" ]; then
-  _cf="$magpie_path/data/.config/magpie/caller-keys.json"
-  [ -f "$_cf" ] && API_KEY=$(sed -n 's/.*"secret"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_cf" 2>/dev/null | head -1)
-fi
-
 # 监听 0.0.0.0 或具体 IP 视为已开放局域网。
 # 回环判定统一走 is_loopback_host：配 ::1 或 [::1]:3425 时也是「仅本机」。
 if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then LAN_OPEN=0; else LAN_OPEN=1; fi
+if is_loopback_host "$(addr_host "$WEB_ADDR")"; then WEB_LAN_OPEN=0; else WEB_LAN_OPEN=1; fi
 
-# 端口非法时这些字段留空：不拿 0 拼出一个能点但连不上的地址
-api_url=""; api_root=""; web_url=""
-[ "$PORT" -gt 0 ] 2>/dev/null && { api_url="http://127.0.0.1:$PORT/v1"; api_root="http://127.0.0.1:$PORT"; }
-[ "$WEB_PORT" -gt 0 ] 2>/dev/null && web_url="http://127.0.0.1:$WEB_PORT"
-lan_api=""; lan_web=""
-if [ -n "$LAN_IP" ]; then
-  [ "$PORT" -gt 0 ] 2>/dev/null && lan_api="http://$LAN_IP:$PORT/v1"
-  [ "$WEB_PORT" -gt 0 ] 2>/dev/null && lan_web="http://$LAN_IP:$WEB_PORT"
+# API 地址是配置候选；Web 地址只发布控制器确认归属的本机回环监听。
+api_url=''; api_root=''; web_url=''
+if [ -z "$CONFIG_ERROR" ]; then
+  if api_root=$(magpie_config_url "$MAGPIE_ADDR" 2>/dev/null); then api_url="$api_root/v1"; fi
+  if [ "$RUNNING" = 1 ]; then
+    web_url=$(MAGPIE_CONF="$CONF" sh "$MODDIR/scripts/magpie.service" panel-url 2>/dev/null) || web_url=''
+  fi
+fi
+lan_api=''; lan_web=''
+if [ -n "$LAN_IP" ] && [ -z "$CONFIG_ERROR" ]; then
+  case "$(addr_host "$MAGPIE_ADDR")" in
+    ''|0.0.0.0|"$LAN_IP") lan_api="http://$LAN_IP:$PORT/v1" ;;
+  esac
+  case "$(addr_host "$WEB_ADDR")" in
+    ''|0.0.0.0|"$LAN_IP") lan_web="http://$LAN_IP:$WEB_PORT" ;;
+  esac
 fi
 
 # 原子写：同目录临时文件 → 设权限 → mv 替换。
@@ -225,13 +215,11 @@ cat <<EOF | write_atomic "$MODDIR/webroot/status.json" 600
   "apiPort": $PORT,
   "apiUrl": "$(json_str "$api_url")",
   "apiUrlRoot": "$(json_str "$api_root")",
-  "apiKey": "$(json_str "$API_KEY")",
   "webPort": $WEB_PORT,
   "webUrl": "$(json_str "$web_url")",
-  "webUrlKey": "$(json_str "$WEB_URL")",
-  "webKey": "$(json_str "$WEB_KEY")",
   "lanIp": "$(json_str "$LAN_IP")",
   "lanOpen": $([ "$LAN_OPEN" = "1" ] && echo true || echo false),
+  "webLanOpen": $([ "$WEB_LAN_OPEN" = "1" ] && echo true || echo false),
   "lanApiUrl": "$(json_str "$lan_api")",
   "lanWebUrl": "$(json_str "$lan_web")",
   "configError": "$(json_str "$CONFIG_ERROR")",
@@ -243,7 +231,13 @@ EOF
 LOG_SRC="$magpie_path/run/magpie.log"
 LOG_OUT="$MODDIR/webroot/lastlog.txt"
 if [ -f "$LOG_SRC" ]; then
-  tail -n 30 "$LOG_SRC" 2>/dev/null | write_atomic "$LOG_OUT" 600
+  # 公开面板日志先遮掉常见 URL 凭据、Bearer token 和网关 API key。
+  tail -n 30 "$LOG_SRC" 2>/dev/null | sed -E \
+    -e 's/([?&]k=)[^&[:space:]]+/\1<redacted>/g' \
+    -e 's/((secret|password|token|api[_-]?key)=)[^&[:space:]]+/\1<redacted>/g' \
+    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1<redacted>/g' \
+    -e 's/sk-[A-Za-z0-9_-]{8,}/<redacted>/g' \
+    | write_atomic "$LOG_OUT" 600
 else
   echo "(暂无日志, 服务可能还没启动过)" | write_atomic "$LOG_OUT" 600
 fi

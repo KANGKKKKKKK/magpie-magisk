@@ -157,20 +157,8 @@ magpie_norm_path() {
   echo "$_p"
 }
 
-# 这个路径是不是「可以整目录删掉」。返回 0 表示可以删。
-# 传进来的路径会先归一化，所以 "/data/" 与 "/data" 等价。
-#
-# 判定方式是**白名单**：只放行本模块自己的位置，其它一律拒绝。
-#
-# 为什么不用黑名单（枚举危险路径）：黑名单每加一条都得靠记性，而漏一条的
-# 代价是 rm -rf 掉整个系统。/data/adb 下面是 Root 方案的命脉（magisk / ksu /
-# ap / magisk.db / service.d），/data/misc/wifi 存着所有 WiFi 密码，
-# /data/user/0/* 与 /data/data/* 是同一 inode —— 这些都不在「危险清单」里时
-# 就会被当成普通目录删掉。
-#
-# 代价：用户把 magpie_path 自定义到别处时，卸载不再自动删除该目录
-# （uninstall.sh 会打印「跳过可疑路径，请手动确认」）。
-# 这比「配置写错一个词就删掉 magisk.db」划算得多。
+# 历史白名单，仅用于只读识别旧安装位置；不再是允许删除数据的判据。
+# 新安装使用下面更窄的持久目录白名单，卸载不递归删除数据。
 magpie_path_cleanable() {
   _c=$(magpie_norm_path "$1" 2>/dev/null) || return 1
 
@@ -182,12 +170,26 @@ magpie_path_cleanable() {
   return 1
 }
 
-# 安装也只允许本模块自有目录；与卸载共用同一条默认拒绝策略。
-# 不放行 /data/adb 下的任意兄弟目录，也不提供环境变量绕过。
-# 符号链接由安装器入口另行检查；本函数只判断路径归属。
-magpie_path_installable() {
-  magpie_path_cleanable "$1"
-}
+# 持久数据只能放在可跨模块更新/移除保留的目录。符号链接另由安装器拒绝。
+magpie_path_installable() (
+  _pi=$(magpie_norm_path "$1" 2>/dev/null) || exit 1
+  case "$_pi" in /data/adb/magpie|/data/adb/magpie/*) exit 0 ;; *) exit 1 ;; esac
+)
+
+# 判断旧布局是否在管理器可能整棵替换的模块目录里。对已有路径也检查物理位置。
+magpie_path_in_module_tree() (
+  _pt_path=$(magpie_norm_path "$1" 2>/dev/null) || exit 1
+  _pt_module=$(magpie_norm_path "$2" 2>/dev/null) || exit 1
+  case "$_pt_path" in
+    "$_pt_module"|"$_pt_module"/*|/data/adb/modules|/data/adb/modules/*|/data/adb/modules_update|/data/adb/modules_update/*) exit 0 ;;
+  esac
+  _pt_real=$(readlink -f "$_pt_path" 2>/dev/null) || exit 1
+  _pt_mod_real=$(readlink -f "$_pt_module" 2>/dev/null) || _pt_mod_real=$_pt_module
+  case "$_pt_real" in
+    "$_pt_mod_real"|"$_pt_mod_real"/*|/data/adb/modules|/data/adb/modules/*|/data/adb/modules_update|/data/adb/modules_update/*) exit 0 ;;
+    *) exit 1 ;;
+  esac
+)
 
 # ---------- 局域网地址 ----------
 
@@ -305,6 +307,146 @@ magpie_rss_mb() {
   done
   [ "$_sum" -gt 0 ] && echo "$((_sum / 1024))"
 }
+
+# ---------- 本次开机的停止意图 ----------
+
+magpie_valid_boot_id() {
+  printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' &&
+    [ "${#1}" -eq 36 ]
+}
+
+magpie_boot_id() (
+  _mb_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || exit 1
+  magpie_valid_boot_id "$_mb_id" || exit 1
+  printf '%s\n' "$_mb_id"
+)
+
+# 对无代次的旧标记、读取失败和未知 boot ID 保守：只有两个有效、不同的
+# 内核 boot ID 能证明标记过期；不以 Android 尚未校准的墙上时钟猜测。
+magpie_stop_intent_current() (
+  [ -e "$1" ] || [ -L "$1" ] || exit 1
+  [ -f "$1" ] && [ ! -L "$1" ] || exit 0
+  IFS= read -r _ms_record < "$1" || exit 0
+  case "$_ms_record" in boot=*) _ms_id=${_ms_record#boot=} ;; *) exit 0 ;; esac
+  magpie_valid_boot_id "$_ms_id" || exit 0
+  _ms_boot=$(magpie_boot_id) || exit 0
+  [ "$_ms_id" = "$_ms_boot" ]
+)
+
+# ---------- 已核验的 TCP 监听（只读） ----------
+
+# 仅供显示的配置候选 URL，不能据此判断运行态或打开浏览器。
+magpie_config_url() (
+  _cu_port=$(addr_port "$1") || exit 1
+  _cu_host=$(addr_host "$1")
+  case "$_cu_host" in
+    ''|0.0.0.0) _cu_host=127.0.0.1 ;;
+    ::) _cu_host='[::1]' ;;
+    *:*)
+      case "$_cu_host" in *[!0-9a-fA-F:.]*) exit 1 ;; esac
+      _cu_host="[$_cu_host]" ;;
+    *[!a-zA-Z0-9.-]*) exit 1 ;;
+  esac
+  printf 'http://%s:%s\n' "$_cu_host" "$_cu_port"
+)
+
+# 不能把某个同名进程、首个还没就绪的 PID 或多个 serve 当作明确归属。
+magpie_listener_pid() (
+  _ml_pid=$(magpie_command_pids serve 2>/dev/null) || exit 1
+  case "$_ml_pid" in ''|0|*[!0-9]*) exit 1 ;; esac
+  printf '%s\n' "$_ml_pid"
+)
+
+magpie_port_rows() (
+  _mr_port=$(addr_port ":$1") || exit 1
+  _mr_hex=$(printf '%04X' "$_mr_port") || exit 1
+  # 从调用者的网络命名空间同时看两种协议族。读不到任一张表，不把它当成空表。
+  awk -v port="$_mr_hex" '
+    FNR == 1 { if ($1 == "sl" && $2 == "local_address") headers++; next }
+    $4 == "0A" {
+      split($2, addr, ":")
+      if (toupper(addr[2]) != port) next
+      ip = toupper(addr[1]); ip_len = length(ip)
+      if ((ip_len != 8 && ip_len != 32) || ip !~ /^[0-9A-F]+$/ || $10 !~ /^[1-9][0-9]*$/) bad = 1
+      else print ip, $10
+    }
+    END { if (headers != 2 || bad) exit 1 }
+  ' /proc/self/net/tcp /proc/self/net/tcp6 2>/dev/null
+)
+
+# Android arm64 的 /proc TCP 地址按小端 32 位字显示。识别 ::1、127/8 及映射地址。
+magpie_tcp_loopback_host() (
+  case "$1" in
+    00000000000000000000000001000000) printf '[::1]\n'; exit 0 ;;
+    0000000000000000FFFF0000??????7F) _mh_v4=${1#0000000000000000FFFF0000} ;;
+    ??????7F) _mh_v4=$1 ;;
+    *) exit 1 ;;
+  esac
+  _mh_d=${_mh_v4%??????}; _mh_v4=${_mh_v4#??}
+  _mh_c=${_mh_v4%????}; _mh_v4=${_mh_v4#??}
+  _mh_b=${_mh_v4%??}
+  printf '127.%d.%d.%d\n' "0x$_mh_b" "0x$_mh_c" "0x$_mh_d"
+)
+
+# $1 = 已辨认的唯一 serve PID（无则为空），$2 = 端口。
+# 输出 local HOST / nonlocal / closed / unknown。端口的每个监听 socket 都要
+# 能绑定到该进程的 FD；同端口有其它监听、FD 不可读或采样变化都报告 unknown。
+magpie_port_observation() (
+  _mo_rows=$(magpie_port_rows "$2") || { echo unknown; exit; }
+  [ -n "$_mo_rows" ] || { echo closed; exit; }
+  _mo_pid=$1
+  case "$_mo_pid" in ''|0|*[!0-9]*) echo unknown; exit ;; esac
+  _mo_self_net=$(readlink /proc/self/ns/net 2>/dev/null) || { echo unknown; exit; }
+  if [ "$(readlink "/proc/$_mo_pid/ns/net" 2>/dev/null)" != "$_mo_self_net" ] ||
+     ! magpie_pid_command "$_mo_pid" serve; then
+    echo unknown; exit
+  fi
+
+  _mo_sockets=' '
+  for _mo_fd in /proc/"$_mo_pid"/fd/*; do
+    _mo_link=$(readlink "$_mo_fd" 2>/dev/null) || continue
+    case "$_mo_link" in 'socket:['*']') _mo_sockets="$_mo_sockets${_mo_link#socket:} " ;; esac
+  done
+  _mo_host=''; _mo_nonlocal=0
+  while read -r _mo_ip _mo_ino; do
+    case "$_mo_sockets" in *" [$_mo_ino] "*) ;; *) echo unknown; exit ;; esac
+    if _mo_addr=$(magpie_tcp_loopback_host "$_mo_ip"); then
+      # 双栈优先选 IPv4；只有 IPv6 时保留方括号地址。
+      case "$_mo_host:$_mo_addr" in :*|'[::1]:127.'*) _mo_host=$_mo_addr ;; esac
+    else
+      _mo_nonlocal=1
+    fi
+  done <<EOF
+$_mo_rows
+EOF
+  _mo_after=$(magpie_port_rows "$2") || { echo unknown; exit; }
+  if [ "$_mo_rows" != "$_mo_after" ] || ! magpie_pid_command "$_mo_pid" serve ||
+     [ "$(readlink "/proc/$_mo_pid/ns/net" 2>/dev/null)" != "$_mo_self_net" ]; then
+    echo unknown
+  elif [ "$_mo_nonlocal" = 1 ]; then
+    echo nonlocal
+  elif [ -n "$_mo_host" ]; then
+    printf 'local %s\n' "$_mo_host"
+  else
+    echo unknown
+  fi
+)
+
+magpie_process_web_binding() (
+  case "$1" in ''|0|*[!0-9]*) exit 1 ;; esac
+  _mw_args=$(tr '\000\n' '\n\001' 2>/dev/null < "/proc/$1/cmdline") || exit 1
+  printf '%s\n' "$_mw_args" | grep -Fxq -- "--web=$2"
+)
+
+magpie_listener_report() (
+  if [ "$1" = "$2" ]; then
+    printf 'api=unknown\nweb=unknown\n'
+    exit 0
+  fi
+  _mlr_pid=$(magpie_listener_pid) || _mlr_pid=''
+  printf 'api=%s\nweb=%s\n' "$(magpie_port_observation "$_mlr_pid" "$1")" \
+    "$(magpie_port_observation "$_mlr_pid" "$2")"
+)
 
 # ---------- DNS ----------
 #

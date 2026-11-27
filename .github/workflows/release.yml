@@ -2,287 +2,311 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', '!v*-*']  # suffix tags are explicit prerelease dispatches only
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'build: 在目标 tag 运行；finalize/recover: 从 main 核对已有产物'
+        type: choice
+        options: [build, finalize, recover]
+        default: build
       tag:
-        description: '已存在的 annotated tag，例如 v1.2.5'
-        required: true
+        description: 'finalize/recover 必填；build 留空或与触发 tag 一致'
         type: string
+        required: false
       prerelease:
-        description: '发布为预发布（不更新 update.json）'
+        description: '仅 build：创建预发布草稿，不更新管理器通道'
         type: boolean
         default: false
       sync_update_json:
-        description: '正式发布后同步管理器更新通道'
+        description: '正式包验证后创建更新通道 PR（不直接推 main）'
         type: boolean
         default: true
-      finalize_draft:
-        description: '仅核验并发布已有 draft（不重建、不覆盖资产）'
-        type: boolean
-        default: false
-      recovery_sync_only:
-        description: '仅恢复已通过新签名/校验门槛的正式 Release 的 update.json'
-        type: boolean
-        default: false
 
-permissions:
-  contents: write
-  actions: read
-  id-token: write
-  attestations: write
-
+permissions: {}
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      INPUT_TAG: ${{ inputs.tag }}
-      PRERELEASE: ${{ inputs.prerelease || false }}
-      RECOVERY: ${{ inputs.recovery_sync_only || false }}
-      FINALIZE_DRAFT: ${{ inputs.finalize_draft || false }}
-      SYNC_UPDATE: ${{ github.event_name == 'push' || inputs.sync_update_json }}
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      commit: ${{ steps.meta.outputs.commit }}
+      tag_object: ${{ steps.meta.outputs.tag_object }}
     steps:
-      - name: 检出受信 workflow 源码（恢复不使用历史 tag 的校验工具）
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
-
-      - name: 固定校验工具、tag 源码、版本与发布门槛
+          persist-credentials: false
+      - name: 核对触发 ref、annotated tag 与目标提交的 main CI
         id: meta
-        run: |
-          set -eu
-          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
-          . scripts/lib.sh
-          is_valid_release_tag "$TAG" || { echo '::error::非法 tag'; exit 1; }
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
-            echo '::error::手动发布/恢复必须从 main 工作流触发'; exit 1
-          fi
-          if [ "$RECOVERY" = true ] && [ "$FINALIZE_DRAFT" = true ]; then
-            echo '::error::恢复更新通道与发布草稿不能同时选择'; exit 1
-          fi
-          if [ "$RECOVERY" = true ] && [ "$PRERELEASE" = true ]; then
-            echo '::error::恢复只支持正式 Release'; exit 1
-          fi
-          TOOLS="$RUNNER_TEMP/trusted-release-verifier"
-          mkdir -p "$TOOLS"
-          cp scripts/ci/verify-release-zip.sh scripts/ci/check-tile-version.py scripts/ci/tile-cert-sha256.txt "$TOOLS/"
-          git rev-parse HEAD > "$TOOLS/source-commit"
-          git fetch --quiet origin main "+refs/tags/$TAG:refs/tags/$TAG"
-          [ "$(git cat-file -t "refs/tags/$TAG")" = tag ] || { echo '::error::必须使用 annotated tag'; exit 1; }
-          COMMIT=$(git rev-parse "refs/tags/$TAG^{commit}")
-          git merge-base --is-ancestor "$COMMIT" origin/main || { echo '::error::tag commit 不属于 main'; exit 1; }
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            [ "$(git rev-parse "$GITHUB_SHA^{commit}")" = "$COMMIT" ] || { echo "::error::tag 在触发后被移动"; exit 1; }
-          fi
-          git checkout --quiet --detach "$COMMIT"
-          [ "$(git rev-parse HEAD)" = "$COMMIT" ] || exit 1
-          if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ]; then
-            python3 "$TOOLS/check-tile-version.py" --repo "$GITHUB_WORKSPACE" --current-tag "$TAG"
-          fi
-          VER=$(sed -n 's/^version=//p' module.prop | tr -d '\r')
-          CODE=$(sed -n 's/^versionCode=//p' module.prop | tr -d '\r')
-          [ "$VER" = "$TAG" ] || { echo '::error::tag 与 module.prop version 不符'; exit 1; }
-          case "$CODE" in ''|*[!0-9]*) echo '::error::versionCode 必须是正整数'; exit 1 ;; esac
-          [ "$CODE" -gt 0 ] && [ "$CODE" -le 2147483647 ] || exit 1
-          gh api "repos/$REPO/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
-          EXISTING=$(jq --arg t "$TAG" '[.[] | select(.tag_name == $t)] | length' "$RUNNER_TEMP/releases.json")
-          if [ "$RECOVERY" = true ]; then
-            jq -e --arg t "$TAG" '.[] | select(.tag_name == $t and .draft == false and .prerelease == false)' "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/release.json"
-          elif [ "$FINALIZE_DRAFT" = true ]; then
-            [ "$EXISTING" = 1 ] || { echo '::error::必须存在唯一同名 draft'; exit 1; }
-            jq -e --arg t "$TAG" '.[] | select(.tag_name == $t and .draft == true)' "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/release.json"
-          else
-            [ "$EXISTING" = 0 ] || { echo '::error::同名 Release 已存在，禁止覆盖；草稿请用 finalize_draft，正式版请用 recovery_sync_only'; exit 1; }
-          fi
-          if [ "$RECOVERY" != true ]; then
-            BASE_CODE=$(git show "$COMMIT^:module.prop" | sed -n 's/^versionCode=//p' | tr -d '\r')
-            case "$BASE_CODE" in ''|*[!0-9]*) echo '::error::父提交 versionCode 无效'; exit 1 ;; esac
-            [ "$CODE" -gt "$BASE_CODE" ] || { echo '::error::发布提交必须递增 versionCode'; exit 1; }
-            # 下载最近正式 Release 的精确资产并比较，而非把下载/解析失败当作 0。
-            LATEST=$(jq -r '[.[] | select(.draft == false and .prerelease == false)] | first | .tag_name // empty' "$RUNNER_TEMP/releases.json")
-            if [ -n "$LATEST" ]; then
-              gh release download "$LATEST" --repo "$REPO" -p "magpie-$LATEST.zip" -O "$RUNNER_TEMP/latest.zip"
-              OLD_CODE=$(unzip -p "$RUNNER_TEMP/latest.zip" module.prop | sed -n 's/^versionCode=//p' | tr -d '\r')
-              case "$OLD_CODE" in ''|*[!0-9]*) echo '::error::已发布 versionCode 无法确认'; exit 1 ;; esac
-              [ "$CODE" -gt "$OLD_CODE" ] || { echo '::error::versionCode 必须大于最近正式版'; exit 1; }
-            fi
-            gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" > "$RUNNER_TEMP/ci.json"
-            jq -e --arg c "$COMMIT" '[.workflow_runs[] | select(.head_sha == $c and .head_branch == "main")] | sort_by(.run_number) | last | .status == "completed" and .conclusion == "success"' "$RUNNER_TEMP/ci.json" > /dev/null || {
-              echo '::error::目标 commit 的 main CI 尚未成功'; exit 1;
-            }
-          fi
-          { echo "tag=$TAG"; echo "version=$VER"; echo "code=$CODE"; echo "commit=$COMMIT"; } >> "$GITHUB_OUTPUT"
-          { echo "TAG=$TAG"; echo "VER=$VER"; echo "CODE=$CODE"; echo "RELEASE_COMMIT=$COMMIT"; } >> "$GITHUB_ENV"
-          echo "tag=$TAG commit=$COMMIT versionCode=$CODE recovery=$RECOVERY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode || 'build' }}
+          TARGET_TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease || false }}
+        run: sh scripts/ci/release-flow.sh plan
 
-      - name: 安装构建与校验工具
+  build:
+    needs: plan
+    if: ${{ github.event_name == 'push' || inputs.mode == 'build' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - name: 安装构建环境（没有正式密钥或发布权限）
         run: |
           set -eu
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aapt zipalign apksigner shellcheck
-          if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ] && [ ! -f "$ANDROID_HOME/platforms/android-34/android.jar" ]; then
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-34'
-          fi
-          if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ]; then
-            test -s "$ANDROID_HOME/platforms/android-34/android.jar"
-          fi
+          sudo apt-get install -y -qq shellcheck aapt zipalign
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-34' 'build-tools;35.0.0'
+      - name: 公共测试与未签名 APK
+        run: |
+          set -eu
+          sh tests/run-all.sh
+          MAGPIE_BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0" sh tile-app/build.sh --unsigned "$RUNNER_TEMP/unsigned"
+      - name: 只交接未签名 APK
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: magpie-unsigned-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unsigned/magpie-tile-unsigned.apk
+          if-no-files-found: error
+          retention-days: 35
 
-      - name: 全部公共测试（与 CI 同一份）
-        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
-        run: sh tests/run-all.sh
-
-      - name: 必须以既有签名密钥构建磁贴（不轮换、不静默降级）
-        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
+  sign:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    environment: magpie-signing
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    env:
+      TARGET_TAG: ${{ needs.plan.outputs.tag }}
+      EXPECTED_COMMIT: ${{ needs.plan.outputs.commit }}
+      EXPECTED_TAG_OBJECT: ${{ needs.plan.outputs.tag_object }}
+      POLICY_SHA: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+    steps:
+      - name: 检查 Environment 策略版本已配置
+        run: printf '%s' "$POLICY_SHA" | grep -Ex '[0-9a-f]{40}' >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+          path: policy
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 安装签名校验工具
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt apksigner zipalign
+      - name: 按 ID 和摘要取回构建产物
         env:
-          KEYSTORE_B64: ${{ secrets.MAGPIE_KEYSTORE_B64 }}
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          OUT_DIR: ${{ runner.temp }}/unsigned-input
+        run: sh policy/scripts/ci/release-flow.sh fetch-unsigned
+      - name: 使用既有正式证书签 APK，以审核过的策略打包
+        env:
+          MAGPIE_KEYSTORE_B64: ${{ secrets.MAGPIE_KEYSTORE_B64 }}
           MAGPIE_KS_PASS: ${{ secrets.MAGPIE_KS_PASS }}
-        run: |
-          set -eu
-          if [ -z "$KEYSTORE_B64" ] || [ -z "$MAGPIE_KS_PASS" ]; then
-            echo '::error::缺少磁贴签名 secret，拒绝发版'; exit 1
-          fi
-          umask 077
-          MAGPIE_KEYSTORE="$RUNNER_TEMP/magpie-tile.jks"
-          export MAGPIE_KEYSTORE MAGPIE_KS_PASS
-          trap 'rm -f "$MAGPIE_KEYSTORE"' EXIT
-          printf '%s' "$KEYSTORE_B64" | base64 -d > "$MAGPIE_KEYSTORE"
-          sh build.sh dist
+          IN_DIR: ${{ runner.temp }}/unsigned-input
+          OUT_DIR: ${{ runner.temp }}/signed
+        run: sh policy/scripts/ci/release-flow.sh sign
+      - name: 只交接已核验的 ZIP 和校验清单
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: magpie-signed-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/signed/magpie-${{ needs.plan.outputs.tag }}.zip
+            ${{ runner.temp }}/signed/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 35
 
-      - name: 校验安装包并生成 SHA256SUMS
-        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
+  publish:
+    needs: [plan, sign]
+    if: ${{ needs.sign.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: magpie-publish
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      MODE: build
+      TARGET_TAG: ${{ needs.plan.outputs.tag }}
+      EXPECTED_COMMIT: ${{ needs.plan.outputs.commit }}
+      EXPECTED_TAG_OBJECT: ${{ needs.plan.outputs.tag_object }}
+      POLICY_SHA: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+    outputs:
+      stable: ${{ steps.release.outputs.stable }}
+      digest: ${{ steps.release.outputs.digest }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      code: ${{ steps.release.outputs.code }}
+    steps:
+      - name: 检查 Environment 策略版本已配置
+        run: printf '%s' "$POLICY_SHA" | grep -Ex '[0-9a-f]{40}' >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+          path: policy
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 安装校验工具
         run: |
-          set -eu
-          SOURCE_ROOT="$GITHUB_WORKSPACE" EXPECTED_CERT_FILE="$RUNNER_TEMP/trusted-release-verifier/tile-cert-sha256.txt" \
-            sh "$RUNNER_TEMP/trusted-release-verifier/verify-release-zip.sh" "dist/magpie-$VER.zip" "$TAG"
-          ( cd dist && sha256sum "magpie-$VER.zip" > SHA256SUMS && sha256sum -c SHA256SUMS )
-
-      - name: 为 zip 和 SHA256SUMS 生成 provenance
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt apksigner zipalign
+      - name: 按 ID 和摘要核对签名阶段输出
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.sign.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.sign.outputs.artifact_digest }}
+          OUT_DIR: ${{ runner.temp }}/ready
+        run: sh policy/scripts/ci/release-flow.sh fetch-signed
+      - name: 只在 tag 运行中为确切的已签名产物生成证明
         id: attest
-        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            dist/magpie-*.zip
-            dist/SHA256SUMS
-
-      - name: 创建 draft（核验后才公开，绝不覆盖已有 Release）
-        if: env.RECOVERY != 'true' && env.FINALIZE_DRAFT != 'true'
+            ${{ runner.temp }}/ready/magpie-${{ needs.plan.outputs.tag }}.zip
+            ${{ runner.temp }}/ready/SHA256SUMS
+      - name: 核对不可变设置、上传验证过的草稿并回读正式资产
+        id: release
         env:
-          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-        run: |
-          set -eu
-          cp "$BUNDLE" dist/provenance.sigstore.json
-          {
-            # shellcheck disable=SC2016  # Markdown 代码标记保留字面量
-            printf '模块 **%s**，构建自 `%s`。\n\n' "$TAG" "$RELEASE_COMMIT"
-            awk -v v="$TAG" '$0 == "## " v || index($0, "## " v " ") == 1 { f=1; next } f && /^## / { exit } f { print }' CHANGELOG.md
-            # shellcheck disable=SC2016  # Markdown 验证命令必须保留字面反引号
-            printf '\n验证：`sha256sum -c SHA256SUMS`；`gh attestation verify magpie-%s.zip --repo %s`。\n' "$TAG" "$REPO"
-            # shellcheck disable=SC2016  # 正文中的反引号不是命令替换
-            printf '\nDNS 行为：模块通过 system/etc/resolv.conf 提供 DNS 覆盖；本版不替换已安装的 Magpie 本体或配置。\n'
-          } > "$RUNNER_TEMP/notes.md"
-          gh release create "$TAG" "dist/magpie-$VER.zip" dist/SHA256SUMS dist/provenance.sigstore.json \
-            --repo "$REPO" --verify-tag --draft --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
-          # GitHub 的 /releases/tags/:tag 对 draft 返回 404；从认证列表取得 ID。
-          gh api "repos/$REPO/releases?per_page=100" > "$RUNNER_TEMP/releases-after-create.json"
-          jq -e --arg t "$TAG" '[.[] | select(.tag_name == $t and .draft == true)] | if length == 1 then .[0] else error("missing-or-ambiguous draft") end' \
-            "$RUNNER_TEMP/releases-after-create.json" > "$RUNNER_TEMP/release.json"
+          GH_TOKEN: ${{ github.token }}
+          IN_DIR: ${{ runner.temp }}/ready
+          PRERELEASE: ${{ inputs.prerelease || false }}
+          PROVENANCE_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          MAGPIE_RELEASE_SETTINGS_TOKEN: ${{ secrets.MAGPIE_RELEASE_SETTINGS_TOKEN }}
+        run: sh policy/scripts/ci/release-flow.sh publish
 
-      - name: 按 asset ID 回读并核对 digest、校验清单、APK 和 attestation
+  finalize:
+    needs: plan
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'finalize' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 13
+    environment: magpie-publish
+    permissions:
+      actions: read
+      contents: write
+    env:
+      MODE: finalize
+      TARGET_TAG: ${{ needs.plan.outputs.tag }}
+      EXPECTED_COMMIT: ${{ needs.plan.outputs.commit }}
+      EXPECTED_TAG_OBJECT: ${{ needs.plan.outputs.tag_object }}
+      POLICY_SHA: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+    outputs:
+      stable: ${{ steps.release.outputs.stable }}
+      digest: ${{ steps.release.outputs.digest }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      code: ${{ steps.release.outputs.code }}
+    steps:
+      - name: 检查 Environment 策略版本已配置
+        run: printf '%s' "$POLICY_SHA" | grep -Ex '[0-9a-f]{40}' >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+          path: policy
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 安装校验工具
         run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/verify-release" dist
-          for NAME in "magpie-$VER.zip" SHA256SUMS; do
-            ID=$(jq -r --arg n "$NAME" '[.assets[] | select(.name == $n)] | if length == 1 then .[0].id else empty end' "$RUNNER_TEMP/release.json")
-            case "$ID" in ''|*[!0-9]*) echo "::error::缺少唯一资产 $NAME"; exit 1 ;; esac
-            gh api "repos/$REPO/releases/assets/$ID" -H 'Accept: application/octet-stream' > "$RUNNER_TEMP/verify-release/$NAME"
-            HASH=$(sha256sum "$RUNNER_TEMP/verify-release/$NAME" | awk '{print $1}')
-            DIGEST=$(jq -r --arg n "$NAME" '.assets[] | select(.name == $n) | .digest // empty' "$RUNNER_TEMP/release.json")
-            [ "$DIGEST" = "sha256:$HASH" ] || { echo "::error::GitHub asset digest 不符/缺失: $NAME"; exit 1; }
-            if [ "$RECOVERY" != true ] && [ "$FINALIZE_DRAFT" != true ]; then
-              cmp "dist/$NAME" "$RUNNER_TEMP/verify-release/$NAME"
-            fi
-          done
-          # 不执行来自远端清单的任意文件名；精确绑定唯一 zip。
-          python3 - "$RUNNER_TEMP/verify-release" "magpie-$VER.zip" <<'PY'
-          import hashlib, pathlib, sys
-          root, name = pathlib.Path(sys.argv[1]), sys.argv[2]
-          digest = hashlib.sha256((root / name).read_bytes()).hexdigest()
-          if (root / 'SHA256SUMS').read_text() != f'{digest}  {name}\n':
-              raise SystemExit('SHA256SUMS 未精确绑定该 zip')
-          PY
-          SOURCE_ROOT="$GITHUB_WORKSPACE" EXPECTED_CERT_FILE="$RUNNER_TEMP/trusted-release-verifier/tile-cert-sha256.txt" \
-            sh "$RUNNER_TEMP/trusted-release-verifier/verify-release-zip.sh" "$RUNNER_TEMP/verify-release/magpie-$VER.zip" "$TAG"
-          ZIP_CODE=$(unzip -p "$RUNNER_TEMP/verify-release/magpie-$VER.zip" module.prop | sed -n 's/^versionCode=//p' | tr -d '\r')
-          [ "$ZIP_CODE" = "$CODE" ] || { echo "::error::zip versionCode 与 tag 源码不符"; exit 1; }
-          gh attestation verify "$RUNNER_TEMP/verify-release/magpie-$VER.zip" --repo "$REPO" \
-            --source-digest "$RELEASE_COMMIT" --source-ref "refs/tags/$TAG" --signer-workflow "$REPO/.github/workflows/release.yml"
-          gh attestation verify "$RUNNER_TEMP/verify-release/SHA256SUMS" --repo "$REPO" \
-            --source-digest "$RELEASE_COMMIT" --source-ref "refs/tags/$TAG" --signer-workflow "$REPO/.github/workflows/release.yml"
-          # 恢复时 dist 从已经独立校验的远端生成，不接受本地旧产物。
-          if [ "$RECOVERY" = true ] || [ "$FINALIZE_DRAFT" = true ]; then
-            cp "$RUNNER_TEMP/verify-release/magpie-$VER.zip" dist/
-            cp "$RUNNER_TEMP/verify-release/SHA256SUMS" dist/
-          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt apksigner zipalign
+      - name: 只验证已有资产，不重建或生成新的 provenance
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAGPIE_RELEASE_SETTINGS_TOKEN: ${{ secrets.MAGPIE_RELEASE_SETTINGS_TOKEN }}
+        run: sh policy/scripts/ci/release-flow.sh publish
 
-      - name: 发布已核验的 draft
-        if: env.RECOVERY != 'true'
+  recover:
+    needs: plan
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'recover' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 13
+    environment: magpie-publish
+    permissions:
+      contents: read
+    env:
+      MODE: recover
+      TARGET_TAG: ${{ needs.plan.outputs.tag }}
+      EXPECTED_COMMIT: ${{ needs.plan.outputs.commit }}
+      EXPECTED_TAG_OBJECT: ${{ needs.plan.outputs.tag_object }}
+      POLICY_SHA: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+    outputs:
+      stable: ${{ steps.release.outputs.stable }}
+      digest: ${{ steps.release.outputs.digest }}
+      release_id: ${{ steps.release.outputs.release_id }}
+      code: ${{ steps.release.outputs.code }}
+    steps:
+      - name: 检查 Environment 策略版本已配置
+        run: printf '%s' "$POLICY_SHA" | grep -Ex '[0-9a-f]{40}' >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+          path: policy
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 安装校验工具
         run: |
-          set -eu
-          ID=$(jq -r .id "$RUNNER_TEMP/release.json")
-          case "$ID" in ''|*[!0-9]*) echo '::error::无效 Release ID'; exit 1 ;; esac
-          gh api --method PATCH "repos/$REPO/releases/$ID" -F draft=false -F prerelease="$PRERELEASE" > "$RUNNER_TEMP/published-release.json"
-          jq -e --arg t "$TAG" '.tag_name == $t and .draft == false' "$RUNNER_TEMP/published-release.json"
-          jq '{tag_name,draft,prerelease,assets:[.assets[].name]}' "$RUNNER_TEMP/published-release.json"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt apksigner zipalign
+      - name: 只验证已有资产，不重建或生成新的 provenance
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh policy/scripts/ci/release-flow.sh publish
 
-      - name: 公开下载复核后同步 update.json（可独立恢复）
-        if: env.RECOVERY == 'true' || (env.SYNC_UPDATE == 'true' && env.PRERELEASE != 'true')
-        run: |
-          set -eu
-          URL="https://github.com/$REPO/releases/download/$TAG/magpie-$VER.zip"
-          EXPECT=$(sha256sum "dist/magpie-$VER.zip" | awk '{print $1}')
-          curl --fail --location --retry 5 --retry-all-errors --max-time 120 "$URL" -o "$RUNNER_TEMP/public-release.zip"
-          [ "$(sha256sum "$RUNNER_TEMP/public-release.zip" | awk '{print $1}')" = "$EXPECT" ] || exit 1
-          WT="$RUNNER_TEMP/update-channel"
-          git fetch --quiet origin main
-          git worktree add --quiet --detach "$WT" origin/main
-          cd "$WT"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          for TRY in 1 2 3 4; do
-            echo "同步更新通道：第 $TRY 次"
-            git fetch --quiet origin main
-            # 只重置本步骤创建的临时 worktree，不改 tag 源码或其他工作区。
-            git reset --quiet --hard origin/main
-            CUR=$(jq -r .versionCode update.json)
-            case "$CUR" in ''|*[!0-9]*) echo '::error::update.json versionCode 无效'; exit 1 ;; esac
-            if [ "$CUR" -gt "$CODE" ]; then echo '更新通道已更高，不回退'; exit 0; fi
-            if [ "$CUR" = "$CODE" ] && [ "$(jq -r .version update.json)" != "$VER" ]; then
-              echo '::error::相同 versionCode 指向其他版本，拒绝覆盖'; exit 1
-            fi
-            python3 - "$VER" "$CODE" "$URL" "$REPO" <<'PY'
-          import json, pathlib, sys
-          ver, code, url, repo = sys.argv[1:]
-          data = {'version': ver, 'versionCode': int(code), 'zipUrl': url,
-                  'changelog': f'https://raw.githubusercontent.com/{repo}/main/CHANGELOG.md'}
-          pathlib.Path('update.json').write_text(json.dumps(data, indent=2) + '\n')
-          PY
-            git diff --quiet -- update.json && { echo 'update.json 已正确同步'; exit 0; }
-            git add update.json
-            git commit -m "chore: update.json -> $TAG"
-            if git push origin HEAD:main; then
-              git fetch --quiet origin main
-              [ "$(git show origin/main:update.json | jq -r .versionCode)" -ge "$CODE" ] || exit 1
-              echo 'update.json 推送并回读成功'; exit 0
-            fi
-            sleep 3
-          done
-          echo '::error::Release 已发布且核验通过，但 update.json 同步失败。请从 main 手动运行 release，指定同一 tag 并勾选 recovery_sync_only；不要覆盖资产。'
-          exit 1
+  update-channel:
+    needs: [plan, publish, finalize, recover]
+    if: ${{ !cancelled() && (needs.publish.outputs.stable == 'true' || needs.finalize.outputs.stable == 'true' || needs.recover.outputs.stable == 'true') && (github.event_name == 'push' || inputs.sync_update_json || inputs.mode == 'recover') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: magpie-update-channel
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      MODE: ${{ inputs.mode || 'build' }}
+      TARGET_TAG: ${{ needs.plan.outputs.tag }}
+      EXPECTED_COMMIT: ${{ needs.plan.outputs.commit }}
+      EXPECTED_TAG_OBJECT: ${{ needs.plan.outputs.tag_object }}
+      POLICY_SHA: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+    steps:
+      - name: 检查 Environment 策略版本已配置
+        run: printf '%s' "$POLICY_SHA" | grep -Ex '[0-9a-f]{40}' >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ vars.MAGPIE_RELEASE_POLICY_SHA }}
+          path: policy
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 回读公开不可变发布，只提 PR，不绕过 main 规则
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.publish.outputs.release_id || needs.finalize.outputs.release_id || needs.recover.outputs.release_id }}
+          RELEASE_CODE: ${{ needs.publish.outputs.code || needs.finalize.outputs.code || needs.recover.outputs.code }}
+          ZIP_DIGEST: ${{ needs.publish.outputs.digest || needs.finalize.outputs.digest || needs.recover.outputs.digest }}
+        run: sh policy/scripts/ci/release-flow.sh update-pr

@@ -22,8 +22,8 @@
 #   action.sh start | stop | restart
 #   action.sh panel               浏览器打开面板
 #
-# 切网关只改 magpie.config 里的 MAGPIE_ADDR / MAGPIE_WEB_ADDR 两行；
-# 服务在跑就顺势重启一次让新地址生效。
+# 局域网模式只开放 MAGPIE_ADDR（API）；面板 MAGPIE_WEB_ADDR 始终留在回环地址。
+# 服务在跑时要求控制器成功并等待进程恢复；失败不会报告切换成功。
 
 # 模块目录。Magisk 用绝对路径调用；被相对路径调用时也能自己找对位置
 case "$0" in
@@ -72,8 +72,7 @@ MAGPIE_ADDR=${MAGPIE_ADDR:-127.0.0.1:3425}
 # "http://127.0.0.1:127.0.0.1/v1" 这种链接。这里只记下错误，
 # 由启动入口拒绝、由状态输出如实说明，不替用户猜。
 API_PORT=$(addr_port "$MAGPIE_ADDR" 2>/dev/null)
-WEB_ADDR=${MAGPIE_WEB_ADDR:-}
-[ -n "$WEB_ADDR" ] || WEB_ADDR="$(addr_host "$MAGPIE_ADDR"):3430"
+WEB_ADDR=${MAGPIE_WEB_ADDR:-"${MAGPIE_ADDR%:*}:3430"}
 WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
 ADDR_ERROR=""
 if [ -z "$API_PORT" ]; then
@@ -102,13 +101,31 @@ install_ready() {
 # 局域网地址实时算，不读 run/lan.url —— 那是启动时的快照，
 # WiFi 换过、热点开关过之后就可能指向一个已经不存在的地址。
 
-panel_url() {
-  _k=$(cat "$magpie_path/data/web.key" 2>/dev/null)
-  if [ -n "$_k" ]; then
-    echo "http://127.0.0.1:$WEB_PORT/?k=$_k"
-  else
-    echo "http://127.0.0.1:$WEB_PORT/"
+read_runtime_listeners() {
+  _runtime_listeners=''
+  if command -v magpie_listener_report >/dev/null 2>&1; then
+    _runtime_listeners=$(magpie_listener_report "$API_PORT" "$WEB_PORT")
   fi
+  RUNTIME_API=$(printf '%s\n' "$_runtime_listeners" | sed -n 's/^api=//p')
+  RUNTIME_WEB=$(printf '%s\n' "$_runtime_listeners" | sed -n 's/^web=//p')
+  RUNTIME_API=${RUNTIME_API:-unknown}
+  RUNTIME_WEB=${RUNTIME_WEB:-unknown}
+}
+
+runtime_scope() {
+  case "$1" in
+    'local '*) printf '回环 %s\n' "${1#local }" ;;
+    nonlocal) echo '包含非回环监听（不等于远端可达）' ;;
+    closed) echo '端口未监听' ;;
+    *) echo '未知（无法核验监听归属）' ;;
+  esac
+}
+
+runtime_matches_gateway() {
+  case "$1:$RUNTIME_API:$RUNTIME_WEB" in
+    local:local\ *:local\ *|lan:nonlocal:local\ *) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # 接入信息。标签占 8 列（中文按两列算），值从第 10 列起；
@@ -121,40 +138,62 @@ print_endpoints() {
     echo " 进程    $(magpie_main_pid 2>/dev/null)"
     return 0
   fi
-  _mode=$(gateway_mode)
+  _api_lan=0; _web_lan=0
+  is_loopback_host "$(addr_host "$MAGPIE_ADDR")" || _api_lan=1
+  is_loopback_host "$(addr_host "$WEB_ADDR")" || _web_lan=1
   _lan_now=$(lan_ip)
-  _open=""
-  if [ "$_mode" = lan ] && [ -n "$_lan_now" ]; then _open=1; fi
 
-  echo " 网关    本机 http://127.0.0.1:$API_PORT/v1"
-  [ -n "$_open" ] && echo "         平板 http://$_lan_now:$API_PORT/v1"
-  echo " 面板    本机 $(panel_url)"
-  [ -n "$_open" ] && echo "         平板 http://$_lan_now:$WEB_PORT  （打开后要输访问密码）"
+  _api_candidate=$(magpie_config_url "$MAGPIE_ADDR" 2>/dev/null) || _api_candidate=''
+  _web_candidate=$(magpie_config_url "$WEB_ADDR" 2>/dev/null) || _web_candidate=''
+  echo " 网关配置  $MAGPIE_ADDR"
+  [ -z "$_api_candidate" ] || echo "         配置候选 $_api_candidate/v1"
+  if [ "$_api_lan" = 1 ]; then
+    case "$(addr_host "$MAGPIE_ADDR")" in
+      ''|0.0.0.0|"$_lan_now")
+        [ -z "$_lan_now" ] || echo "         平板配置候选 http://$_lan_now:$API_PORT/v1" ;;
+    esac
+  else
+    echo "         局域网未开放（配置目标）"
+  fi
+  echo " 面板配置  $WEB_ADDR"
+  [ -z "$_web_candidate" ] || echo "         配置候选 $_web_candidate/"
+  if [ "$_web_lan" = 1 ]; then
+    case "$(addr_host "$WEB_ADDR")" in
+      ''|0.0.0.0|"$_lan_now")
+        [ -z "$_lan_now" ] || echo "         局域网配置候选 http://$_lan_now:$WEB_PORT" ;;
+    esac
+  else
+    echo "         局域网未开放（配置目标）"
+  fi
   echo " 进程    $(magpie_main_pid 2>/dev/null)"
 
-  if [ "$_mode" = lan ]; then
-    if [ -n "$_lan_now" ]; then
-      echo " 提示    局域网已开放，其他设备可以连"
-    else
-      echo " 提示    局域网已开，但还没有可用地址（Wi-Fi 与热点都没开）"
-    fi
+  read_runtime_listeners
+  echo " 运行态    API $(runtime_scope "$RUNTIME_API")；面板 $(runtime_scope "$RUNTIME_WEB")"
+  if [ "$_api_lan" = 1 ] || [ "$_web_lan" = 1 ]; then
+    echo " 提示    有非回环配置；「仅本机」会把两个监听目标均设为回环"
   else
-    echo " 提示    局域网未开放，只有本机能连"
+    echo " 提示    网关和面板都配置为仅本机；是否生效见运行态"
   fi
 }
 
 # ---------- 网关监听地址 ----------
 # addr_host / is_loopback_host 来自 lib.sh：IPv6 的 [::1]:3425 也能认出是本机
 gateway_mode() {
-  if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then echo local; else echo lan; fi
+  if ! is_loopback_host "$(addr_host "$MAGPIE_ADDR")" || ! is_loopback_host "$(addr_host "$WEB_ADDR")"; then echo lan; else echo local; fi
 }
-gateway_host() { case "$1" in lan) echo 0.0.0.0 ;; *) echo 127.0.0.1 ;; esac }
-gateway_other() { case "$(gateway_mode)" in lan) echo local ;; *) echo lan ;; esac }
+gateway_host() { case "$1" in lan) echo 0.0.0.0 ;; *) echo 127.0.0.1 ;; esac; }
+gateway_other() { case "$(gateway_mode)" in lan) echo local ;; *) echo lan ;; esac; }
+gateway_target_matches() {
+  case "$1" in
+    lan) ! is_loopback_host "$(addr_host "$MAGPIE_ADDR")" && is_loopback_host "$(addr_host "$WEB_ADDR")" ;;
+    *)   is_loopback_host "$(addr_host "$MAGPIE_ADDR")" && is_loopback_host "$(addr_host "$WEB_ADDR")" ;;
+  esac
+}
 
 # 短名，菜单里用
-gateway_short() { case "$1" in lan) echo "局域网" ;; *) echo "仅本机" ;; esac; }
-# 当前实际的监听地址：配置里可能不是 0.0.0.0 而是某个具体 IP，照实说
-gateway_actual() { echo "$(gateway_short "$(gateway_mode)") $MAGPIE_ADDR"; }
+gateway_short() { case "$1" in lan) echo "局域网 API" ;; *) echo "仅本机" ;; esac; }
+# 表示配置目标，不冒充内核实际监听状态
+gateway_actual() { echo "API $MAGPIE_ADDR；面板 $WEB_ADDR"; }
 
 # 把配置里的两个监听地址改成 $1 开头，其余行原样保留
 write_conf_host() {
@@ -162,39 +201,29 @@ write_conf_host() {
   _f="$CONF"
   [ -f "$_f" ] || { echo "找不到配置文件：$_f"; return 1; }
   _tmp="$_f.tmp.$$"
+  # 局域网模式只开放 API；管理面板始终绑定回环地址。
   sed -e "s|^MAGPIE_ADDR=.*|MAGPIE_ADDR=\"$_h:$API_PORT\"|" \
-      -e "s|^MAGPIE_WEB_ADDR=.*|MAGPIE_WEB_ADDR=\"$_h:$WEB_PORT\"|" "$_f" > "$_tmp" 2>/dev/null
+      -e "s|^MAGPIE_WEB_ADDR=.*|MAGPIE_WEB_ADDR=\"127.0.0.1:$WEB_PORT\"|" "$_f" > "$_tmp" 2>/dev/null
   [ -s "$_tmp" ] || { rm -f "$_tmp"; echo "写配置失败：sed 没有产出内容"; return 1; }
   grep -q '^MAGPIE_ADDR=' "$_tmp"     || printf 'MAGPIE_ADDR="%s:%s"\n' "$_h" "$API_PORT" >> "$_tmp"
-  grep -q '^MAGPIE_WEB_ADDR=' "$_tmp" || printf 'MAGPIE_WEB_ADDR="%s:%s"\n' "$_h" "$WEB_PORT" >> "$_tmp"
+  grep -q '^MAGPIE_WEB_ADDR=' "$_tmp" || printf 'MAGPIE_WEB_ADDR="127.0.0.1:%s"\n' "$WEB_PORT" >> "$_tmp"
   # cat 覆盖而不是 mv：保留原文件的 inode 与权限
   cat "$_tmp" > "$_f" || { rm -f "$_tmp"; echo "写配置失败：无法写入 $_f"; return 1; }
   rm -f "$_tmp"
   MAGPIE_ADDR="$_h:$API_PORT"
-  WEB_ADDR="$_h:$WEB_PORT"
+  WEB_ADDR="127.0.0.1:$WEB_PORT"
   return 0
 }
 
 # 其他设备（平板上的 Eta 之类）该填什么
 device_hint() {
   _lan=$(lan_ip)
-  [ -n "$_lan" ] || return 0
+  [ -n "$_lan" ] && [ -n "$API_PORT" ] || return 0
+  case "$(addr_host "$MAGPIE_ADDR")" in ''|0.0.0.0|"$_lan") ;; *) return 0 ;; esac
   echo
-  echo "其他设备（平板 / 电脑）这样填："
+  echo "其他设备（运行态核验成功后再使用）："
   echo "  接口  http://$_lan:$API_PORT/v1"
   echo "  密钥  面板 › 网关 › 调用密钥，用名为 Magpie 的那把"
-}
-
-# $1 = 轮数，每轮 0.25 秒
-wait_ready() {
-  _i=0
-  _lim=${1:-40}
-  while [ "$_i" -lt "$_lim" ]; do
-    is_running && return 0
-    sleep 0.25
-    _i=$((_i + 1))
-  done
-  return 1
 }
 
 set_gateway() {
@@ -207,37 +236,54 @@ set_gateway() {
     echo "  配置文件 $CONF"
     return 1
   fi
-  if [ "$_to" = "$(gateway_mode)" ]; then
-    echo "网关现在就是「$(gateway_actual)」，不用改。"
-    return 0
+  read_runtime_listeners
+  if gateway_target_matches "$_to"; then
+    echo "监听配置已经匹配「$(gateway_actual)」。"
+    if runtime_matches_gateway "$_to"; then
+      echo "已核验 API 和面板的当前监听范围符合目标，无需重启。"
+      return 0
+    fi
+    # 无法辨认归属时，不因已匹配的配置而报成功，也不盲目反复重启。
+    if [ "$RUNTIME_API" = unknown ] || [ "$RUNTIME_WEB" = unknown ]; then
+      echo "配置已匹配，但无法核验运行态；请查看自检，不要当作已生效。"
+      return 1
+    fi
+    echo "运行态尚未生效。"
+  else
+    write_conf_host "$(gateway_host "$_to")" || return 1
+    echo "已写入监听配置目标「$(gateway_actual)」。"
   fi
-  write_conf_host "$(gateway_host "$_to")" || return 1
-  echo "已切到「$(gateway_actual)」，配置里这两行改了："
-  grep -nE '^MAGPIE_ADDR=|^MAGPIE_WEB_ADDR=' "$CONF" | sed 's/^/  /'
 
   if ! is_running; then
-    echo
-    echo "magpie 没在运行，下次启动时生效。"
-    sync_status
-    return 0
-  fi
-
-  echo
-  echo "正在重启，让新地址生效 ..."
-  sh "$SERVICE" restart >/dev/null 2>&1
-  if ! wait_ready 60; then
-    echo "重启后没能起来。日志末尾："
-    tail -n 20 "$magpie_path/run/magpie.log" 2>/dev/null
-    sync_status
+    if [ "$RUNTIME_API:$RUNTIME_WEB" = closed:closed ]; then
+      echo "未检测到服务进程，两个端口均未监听；配置待下次启动生效。"
+      sync_status
+      return 0
+    fi
+    echo "未能确认服务进程与端口归属；配置不代表已经生效。"
     return 1
   fi
 
-  echo "重启完成。"
-  echo
-  print_endpoints
-  [ "$_to" = lan ] && device_hint
-  sync_status
-  return 0
+  echo "正在重启，让新地址生效 ..."
+  sh "$SERVICE" restart
+  _restart_rc=$?
+  if [ "$_restart_rc" -ne 0 ]; then
+    echo "控制器重启失败（退出码 $_restart_rc）；配置已保存，但运行态未确认。"
+    return "$_restart_rc"
+  fi
+  _listener_try=0
+  while [ "$_listener_try" -lt 10 ]; do
+    read_runtime_listeners
+    if runtime_matches_gateway "$_to"; then
+      echo "已核验 API 和面板的当前监听范围符合目标。"
+      print_endpoints
+      return 0
+    fi
+    _listener_try=$((_listener_try + 1))
+    sleep 0.3
+  done
+  echo "配置已保存，但未核验新监听已生效。请查看自检。"
+  return 1
 }
 
 do_start() {
@@ -249,64 +295,45 @@ do_start() {
     echo "  配置文件 $CONF"
     return 1
   fi
-  echo "启动中 ..."
-  sh "$SERVICE" start
-  if wait_ready 80; then
-    echo "已启动。"
-    echo
-    print_endpoints
-  else
-    echo "没能启动。日志末尾："
-    tail -n 20 "$magpie_path/run/magpie.log" 2>/dev/null
-  fi
-  sync_status
+  run_control start
 }
 
-do_stop() {
-  echo "停止中 ..."
-  sh "$SERVICE" stop
-  _i=0
-  while [ "$_i" -lt 25 ]; do
-    is_running || break
-    sleep 0.2
-    _i=$((_i + 1))
-  done
-  if is_running; then
-    echo "没能停掉，进程还在。日志末尾："
-    tail -n 20 "$magpie_path/run/magpie.log" 2>/dev/null
-  else
-    echo "已停止。"
-  fi
-  sync_status
-}
+do_stop() { run_control stop; }
+do_restart() { run_control restart; }
 
-do_restart() {
-  if [ -n "$ADDR_ERROR" ]; then
-    echo "配置有问题，先改好再重启："
-    echo "  $ADDR_ERROR"
-    echo "  配置文件 $CONF"
-    return 1
+run_control() {
+  case "$1" in
+    start) echo "启动中 ..." ;;
+    stop) echo "停止中 ..." ;;
+    restart) echo "重启中 ..." ;;
+  esac
+  sh "$SERVICE" "$1"
+  _control_rc=$?
+  if [ "$_control_rc" -ne 0 ]; then
+    echo "控制器未确认 $1 成功（退出码 $_control_rc）。"
+    return "$_control_rc"
   fi
-  echo "重启中 ..."
-  sh "$SERVICE" restart >/dev/null 2>&1
-  if wait_ready 80; then
-    echo "已重启。"
-    echo
-    print_endpoints
+  if [ "$1" = stop ]; then
+    echo "服务已停止。"
   else
-    echo "没能重启。日志末尾："
-    tail -n 20 "$magpie_path/run/magpie.log" 2>/dev/null
+    echo "控制器返回成功；端口运行态如下。"
+    print_endpoints
   fi
-  sync_status
+  return 0
 }
 
 open_panel() {
-  _url=$(panel_url)
-  echo "面板  http://127.0.0.1:$WEB_PORT"
-  # 指定 user 0，否则 root shell 下 am 可能因用户不确定而失败
-  am start -a android.intent.action.VIEW -d "$_url" --user 0 2>/dev/null \
-    || am start -a android.intent.action.VIEW -d "$_url" 2>/dev/null \
-    || echo "没能自动打开，请手动访问上面的地址。"
+  if ! _url=$(sh "$SERVICE" panel-url 2>/dev/null) || [ -z "$_url" ]; then
+    echo "未能核验本机面板的回环监听，未打开浏览器。请查看自检。"
+    return 1
+  fi
+  # 只使用控制器验证过的无密码地址，不从配置或旧缓存猜测。
+  if am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d "$_url" --user 0 2>/dev/null ||
+     am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d "$_url" 2>/dev/null; then
+    return 0
+  fi
+  echo "无法打开浏览器，已核验的本机地址：$_url"
+  return 1
 }
 
 # ---------- 音量键 ----------
@@ -445,11 +472,12 @@ menu_body() {
     lan)
       echo " 警告  仅在可信局域网开启；公共/陌生 Wi-Fi 请用仅本机"
       _lan=$(lan_ip)
-      echo " 网关  局域网 · 仅可信网络使用"
+      echo " 网关配置  $MAGPIE_ADDR · 非回环仅用于可信网络"
       echo " 地址  ${_lan:-无（Wi-Fi 与热点都没开）}"
+      is_loopback_host "$(addr_host "$WEB_ADDR")" && echo " 面板配置  仅本机" || echo " 面板配置  局域网开放"
       ;;
     *)
-      echo " 网关  仅本机 · 其他设备连不上"
+      echo " 网关配置  API 与面板均为仅本机"
       ;;
   esac
   echo "$SEP32"
@@ -544,11 +572,11 @@ legacy_toggle() {
   if is_running; then
     print_endpoints
     echo
-    do_stop
+    do_stop || return $?
     echo
     echo "下次点 [执行] 会重新启动。"
   else
-    do_start
+    do_start || return $?
     echo
     open_panel
   fi
@@ -578,7 +606,7 @@ menu() {
     echo "想用菜单，也可以在终端里跑：sh <本文件> status | lan | local"
     restore_vol
     legacy_toggle
-    exit 0
+    exit $?
   fi
   trap 'stop_keys; restore_vol' EXIT INT TERM HUP
 
@@ -642,16 +670,12 @@ case "$1" in
     ;;
   start|stop|restart)
     install_ready || { echo "本体还没装好：先点模块的 [执行] 走一遍安装。"; exit 1; }
-    # 与菜单里选同一项时输出一致，退出码仍然反映最终状态
     "do_$1"
-    case "$1" in
-      stop) is_running && exit 1 || exit 0 ;;
-      *)    is_running && exit 0 || exit 1 ;;
-    esac
+    exit $?
     ;;
   panel)
     open_panel
-    exit 0
+    exit $?
     ;;
   *)
     echo "点模块的 [执行] 就是音量键菜单；也可以带参数调用："

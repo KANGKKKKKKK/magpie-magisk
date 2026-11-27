@@ -1,7 +1,7 @@
 # 测试
 
 六套脚本都在临时目录运行，并用桩替代服务进程；不会操作真实运行的 magpie。
-当前文档计数为 622 条断言（77 + 13 + 43 + 150 + 267 + 72），另有 424 条 JVM 用例（`ClassifyTest` 21、`TileStateTest` 28、`SelfCheckTest` 361、`ShellTest` 6、`SerialExecutorTest` 8）。
+当前文档计数为 727 条断言（77 + 15 + 56 + 182 + 275 + 122），另有 434 条 JVM 用例（`ClassifyTest` 21、`TileStateTest` 28、`SelfCheckTest` 361、`ShellTest` 16、`SerialExecutorTest` 8）。
 
 - **桌面 Linux**：公共入口为 `sh tests/run-all.sh`；JVM 直接编译生产类，不再复制磁贴判定实现。计数描述当前套件，实际通过情况以对应运行记录为准。
 - **突变检验**：把安装器换回旧黑名单、把磁贴判据换回旧 `sed` 范围后，分别有 7 / 8 条断言失败；计数校验在「合计写错、分项仍对」时也会失败。这些用例不是只按新实现写的。
@@ -9,14 +9,14 @@
 
 | 套件 | 断言数 | 测什么 |
 | --- | --- | --- |
-| `test-install.sh` | 77 | 安装器的 21 组用例 |
-| `test-watchdog.sh` | 13 | 看门狗的决定逻辑（含循环体抽取自检） |
-| `test-action.sh` | 43 | `[执行]` 菜单：安装分支、退路一键启停、子命令、按键解析、两种界面模式、收尾关窗口、白名单外路径的就绪拦截 |
-| `test-service.sh` | 150 | 进程清理、开机目录、配置路径、DNS 生成、状态输出与配置来源、看门狗等开机、服务脱离调用者会话 |
-| `test-lib.sh` | 267 | `lib.sh` 纯函数：地址切分、端口边界、回环判定（含 IPv6 大小写）、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转、安装/卸载路径白名单、磁贴入口对账、用户配置生成 |
-| `test-tile-check.sh` | 72 | 自查完成标记、命令失败、安装/服务/绘制/进程/cgroup 未知值与只读取数 |
+| `test-install.sh` | 77 | 安装预检、下载、互斥及事务回退 |
+| `test-watchdog.sh` | 15 | 看门狗的决定逻辑（含循环体抽取自检） |
+| `test-action.sh` | 56 | `[执行]` 菜单：安装分支、退路一键启停、子命令、按键解析、两种界面模式、收尾关窗口、仅本机重试、控制器失败与外部浏览器交接 |
+| `test-service.sh` | 182 | 进程清理、开机目录、配置路径、DNS 生成、状态输出与配置来源、看门狗等开机、服务脱离调用者会话、卸载/禁用门槛、已核验的面板地址 |
+| `test-lib.sh` | 275 | `lib.sh` 纯函数：地址切分、端口边界、回环判定（含 IPv6 大小写）、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转、持久目录白名单、IPv4/IPv6 TCP 监听归属、磁贴入口对账、用户配置生成 |
+| `test-tile-check.sh` | 122 | 自查完成标记、命令失败、安装/服务/绘制/进程/cgroup 未知值与只读取数 |
 
-发布校验另有 `python3 tests/test-release-zip.py` 的 33 个测试（不计入上面的六套断言数），使用离线工具桩验证 ZIP 安全、证书判定、APK 元数据和构建失败路径；不能替代真实签名/验签。另有版本门槛 9、真实 TileService 配内存 API 的生命周期 14、桌面图标 3、doctor 磁贴段 25 个 unittest，共 84 个；生命周期测试的 SDK 29/35 参数不代表设备兼容性实测。
+公共入口另跑 106 个 Python unittest：发布 ZIP/构建 34，磁贴版本门槛 9，TileService 生命周期 18，桌面图标 3，doctor 磁贴段 25，发布策略 11，安装 HTTPS/TLS 6。TLS 用一次性 CA 和回环服务器校验可信连接、拒绝不可信证书/协议降级；磁贴用 SDK 29/35 内存替身，不等于 Android 真机覆盖。正式 CI 另用临时签名真实构建 APK/ZIP。
 
 需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service、lib 不需要。
 换端口跑时，夹具必须用同一地址生成，否则清单里的下载地址对不上，会看到一堆假失败：
@@ -73,7 +73,7 @@ python3 tests/make-fixtures.py /tmp/fx
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
 ```
 
-这一节是整套 14 组里的 4 个「分支选择」用例，只看选了哪条路，不验启停实现
+这一节是整套 17 个主组里的 4 个「分支选择」用例，只看选了哪条路，不验启停实现
 （启停、子命令、按键解析、界面模式在后面的组里）：
 
 1. 本体缺失 → 进安装流程，**不调用启停**，也不提前下载；
@@ -95,7 +95,7 @@ python3 tests/make-fixtures.py /tmp/fx
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 ```
 
-覆盖 21 组用例（表格即清单）：
+主要用例（详见 `test-install.sh`）：
 
 | # | 用例 |
 | --- | --- |
@@ -108,14 +108,14 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 | 7 | sha256 不匹配拒绝部署，不留正式文件、不留临时文件 |
 | 8 | 大小不符拒绝部署 |
 | 9 | 能下载但跑不起来：自检拦住，正式位置不留文件，样本另存 `magpie.rejected` |
-| 10 | 已有损坏本体：识别 `broken`，重装可修好，留下备份 |
-| 11 | `rollback` 能退回 |
+| 10 | 已有损坏本体：识别 `broken`，重装可修好，损坏旧本体不写入备份 |
+| 11 / 11a / 11b | 回退版本和元数据读回；非零退出的备份拒绝切换，正式路径失败恢复原文件 |
 | 12 | 拒绝装到共享存储（`/sdcard/…`） |
 | 13 | 清单取不到时错误可读（`install` 与 `plan`） |
 | 14 | 并发安装被锁拦住 |
-| 15 | 过期锁能清理，清理后安装成功 |
-| 16 | `PATH` 里没有 `wget` 时靠 busybox 兜底（Android）/ 给出可读失败（桌面） |
-| 17 | 收到 `TERM` 时立刻退出：锁已释放、没有落盘（用一个只连不应答的服务器把下载卡住） |
+| 15 | 遗留锁目录不改动，不阻止新内核锁下安装 |
+| 16 | 无 `curl` 时拒绝降级到 `wget` 并给出可读失败 |
+| 17 | 收到 `TERM` 时立刻退出：锁已释放、没有落盘（下载进程使用阻塞桩，生产 curl TLS 另用回环测试） |
 | 18 | `status`、`check`、`plan`、`install`、`rollback` 入口均先拒绝非白名单路径，不创建目标、不执行目标下的本体 |
 | 19 | 拒绝目标目录、二进制、备份、安装记录、锁和临时清单文件中的符号链接；缺少公共路径校验时失败关闭 |
 
@@ -143,34 +143,7 @@ sh tests/test-service.sh
 
 ## 在 Android 上跑
 
-Android 上还要额外验证「模块脚本被管理器拉起」那种环境 —— `PATH` 只有系统目录、
-没有 `wget`。用一个最小的仓库镜像跑一遍：
-
-```sh
-R=/data/local/tmp/mgrepo
-mkdir -p $R/scripts $R/tests
-cp /data/adb/modules/magpie/scripts/install.sh $R/scripts/
-cp /data/adb/modules/magpie/scripts/lib.sh     $R/scripts/
-cp /data/adb/modules/magpie/service.sh         $R/
-cp tests/* $R/tests/
-
-# 把 PATH 收窄到系统目录，逼它走 busybox 兜底
-env PATH=/product/bin:/system/bin:/system/xbin \
-  TEST_SRV=http://127.0.0.1:8899 TEST_BASE=/data/local/tmp/mg-it \
-  /system/bin/sh $R/tests/test-install.sh
-
-env PATH=/product/bin:/system/bin:/system/xbin \
-  TEST_BASE=/data/local/tmp/mg-wd \
-  /system/bin/sh $R/tests/test-watchdog.sh
-
-env PATH=/product/bin:/system/bin:/system/xbin \
-  TEST_SRV=http://127.0.0.1:8899 TEST_BASE=/data/local/tmp/mg-act \
-  /system/bin/sh $R/tests/test-action.sh
-
-env PATH=/product/bin:/system/bin:/system/xbin \
-  TEST_BASE=/data/local/tmp/mg-svc \
-  /system/bin/sh $R/tests/test-service.sh
-```
+Android 上还要验证管理器的精简 `PATH`。如果设备没有可执行的可信 `curl`，安装器明确提示失败，不回退到 BusyBox wget。不要在测试中更改正在使用的模块或数据目录。使用完整 checkout；控制器和测试必须来自同一份工作树，安装器/Action 夹具可在主机使用 `tests/run-all.sh` 验证。需要在 Android 上重复部分 Shell 回归时，单独指定新建的测试目录，保留 `/system/bin/sh` 的真实 PATH，并在隔离设备上进行；不要让测试清理任何配好的模块目录。
 
 ## 真机上的额外验证（不在 CI 里）
 
@@ -182,19 +155,17 @@ env PATH=/product/bin:/system/bin:/system/xbin \
 ## 已知缺口
 
 - 没有覆盖「下载中途断网」：夹具是本地文件，断网场景需要额外的代理或断点工具才能模拟。
-- 没有覆盖「下载中途断网」之外的网络异常（DNS 失败、TLS 被拦）在桌面侧的复现。
+- TLS 证书核验和协议限制有回环测试；没有覆盖所有真实网络异常或各 Root 方案的 curl/CA 适配。
 - 没有覆盖 arm32 / x86_64 设备：`check_arch` 会直接拒绝，但没有在真机上跑过非 arm64。
 - 没有覆盖自定义 `magpie_path` 的**完整安装**（只覆盖了拒绝非法路径的分支，以及
   `magpie` 命令是否读对目录）。
-- 信号用例依赖 `python3` 起一个只连不应答的服务器；没有 `python3` 的环境会跳过这一条。
+- 信号测试使用有界的阻塞下载桩；真机 curl 下载取消尚待验证。
 - 安装器用例在 x86_64 的 CI 上靠 `MAGPIE_ALLOW_ANY_ARCH=1` 绕过架构闸门（闸门本身
   只在真机上被验证过）；被绕过的只是 `uname -m` 那一句，其他逻辑照常测。
 
 ## 发布中断恢复
 
-正式发布不覆盖任何已有资产。若 Actions 已上传草稿但尚未公开，在 `main` 手动运行 `release`，指定原 tag 并开启 `finalize_draft`：仅下载、验签和核对来源 commit，全部通过后才公开原草稿，不重建、不上传。若正式 Release 已成功、只是更新通道同步失败，则改用 `recovery_sync_only`，只修复 `update.json`。两种模式不能同时开启；缺少新校验清单或磁贴 APK 的历史版本（如 v1.2.4）不支持此恢复流程。
-
-草稿元数据必须从认证的 Release 列表/ID 取得，不能依赖只按 tag 读取的端点。实际中断恢复验证也必须核对资产 ID 与摘要未改变。
+按[发布策略](../docs/release-policy.md)从 `main` 运行 `mode=finalize` 核对原草稿，或 `mode=recover` 核对已公开且不可变的正式包并提更新 PR。不重建、不覆盖已有资产，也不从 `main` 生成 tag 的 provenance。
 
 ## 磁贴审查回归与验证边界
 
