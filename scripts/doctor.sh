@@ -178,6 +178,26 @@ case "$_web_bind" in
   *) warn "未核验到本模块的面板回环监听，不建议在未核实的页面输入密码" ;;
 esac
 
+# [执行] → 6 实际走的路径：控制器 panel-url → am 交给浏览器。只解析、不真正启动，
+# 避免 doctor 弹出浏览器；不带密码。之前只测端口，路径断了也全绿。
+_purl=$(MAGPIE_CONF="$CONF" sh "$MODDIR/scripts/magpie.service" panel-url 2>/dev/null) || _purl=''
+if [ -z "$_purl" ]; then
+  warn "[执行]→6 拿不到控制器核验的面板地址，打不开面板" "服务未运行，或面板监听未能核验"
+elif ! command -v cmd >/dev/null 2>&1; then
+  bad "[执行]→6 找不到 cmd（am 依赖它），无法把地址交给浏览器" "PATH=$PATH"
+else
+  _res=$(cmd package resolve-activity --brief -a android.intent.action.VIEW \
+    -c android.intent.category.BROWSABLE -d "$_purl" </dev/null 2>&1)
+  case "$_res" in
+    *'Failed transaction'*|*Exception*|*Failure*)
+      bad "[执行]→6 本 shell 调不通系统服务：$(printf '%s' "$_res" | tail -n 1)" \
+        "多见于 KernelSU 的 SELinux 规则；[执行] 会把这条错误原样显示" ;;
+    *'No activity found'*) bad "[执行]→6 没有能打开 $_purl 的浏览器" "安装或启用一个浏览器" ;;
+    */*) ok "[执行]→6 可交给 $(printf '%s' "$_res" | tail -n 1 | cut -d/ -f1) 打开 $_purl（仅解析，未启动）" ;;
+    *) warn "[执行]→6 无法确认浏览器解析结果" "$(printf '%s' "$_res" | tail -n 1)" ;;
+  esac
+fi
+
 echo "[5/10] 网关密钥"
 if [ -x "$magpie_path/bin/magpie" ]; then
   _n=$(HOME="$magpie_path/data" MAGPIE_HOME="$magpie_path/data" \

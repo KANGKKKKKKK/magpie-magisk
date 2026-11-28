@@ -295,7 +295,7 @@ Magisk 的文本框不支持光标控制，所以那里只画一次菜单、每�
 <p align="center"><img src="docs/panel-magpie.jpg" width="240" alt="P1：magpie 自带的面板"> <img src="docs/panel.png" width="240" alt="P2：模块自带的 webroot 面板"></p>
 
 **P1**：magpie 自带的面板，截图停在「关于」页（版本号、更新开关）；日常配模型、供应商、额度、密钥都在这里。  
-**P2**：模块自带的 webroot 面板，要靠 KernelSU WebUI / WebUI-X 托管才能打开；显示不含密钥的状态快照，不在宿主窗口跳转本体面板；旧截图仅供布局参考。
+**P2**：模块自带的 webroot 面板，要靠 KernelSU WebUI / WebUI-X 托管才能打开；在 KernelSU WebUI 里会经 `ksu.exec` 现取登录链接直接进入 P1（密码不落盘）；拿不到时或地址带 `#status` 时显示不含密钥的状态快照。旧截图仅供布局参考。
 
 | | P1：magpie 自带的面板 | P2：模块自带的 webroot 面板 |
 | --- | --- | --- |
@@ -820,13 +820,13 @@ python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单
 (cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 80 条
 sh tests/test-watchdog.sh                                 # 看门狗 17 条
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 56 条
-sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 190 条
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 59 条
+sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 194 条
 sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 275 条
 sh tests/test-tile-check.sh                               # 自查取数、未知值与大输出 122 条
 ```
 
-六个套件共 740 条断言（80 + 17 + 56 + 190 + 275 + 122），另有 446 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8、HTTPS 下载器 12）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+六个套件共 747 条断言（80 + 17 + 59 + 194 + 275 + 122），另有 446 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8、HTTPS 下载器 12）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 
 `run-all.sh` 还运行 106 个 Python unittest（发布 ZIP/构建 34、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 TLS 6）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，

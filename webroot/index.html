@@ -461,6 +461,33 @@ function loadLog() {
     .catch(function () { $('log').textContent = '（无法读取日志）'; });
 }
 
+/* ---------- KernelSU WebUI：进入本体面板（P1） ----------
+ * 宿主提供 ksu.exec 时，向控制器要一次「已核验回环地址 + 访问密码」的登录链接，
+ * 在同一 WebView 里打开 P1。密码只经 root 命令的 stdout 返回，不写入 status.json、
+ * lastlog.txt 或日志。拿不到（服务未运行、监听未核验、宿主不支持）就留在本页（P2）。
+ * 地址带 #status 时强制停留在状态页。 */
+var P1_CMD = 'sh /data/adb/modules/magpie/scripts/magpie.service webui-url';
+function openP1(silent) {
+  if (typeof ksu === 'undefined' || !ksu || typeof ksu.exec !== 'function') return false;
+  var cb = 'magpieP1_' + Date.now();
+  window[cb] = function (code, out) {
+    delete window[cb];
+    var u = String(out || '').trim();
+    if (code === 0 && /^http:\/\/(127\.0\.0\.1|\[::1\]):[0-9]+\/\?k=[A-Za-z0-9_-]+$/.test(u)) {
+      location.replace(u);
+    } else if (!silent) {
+      toast('未能核验本体面板，留在状态页');
+    }
+  };
+  try { ksu.exec(P1_CMD, '{}', cb); return true; } catch (e) { delete window[cb]; return false; }
+}
+if (location.hash !== '#status') openP1(true);
+if (typeof ksu !== 'undefined' && ksu && typeof ksu.exec === 'function') {
+  var bo = $('btnOpen');
+  bo.className = 'btn'; bo.removeAttribute('aria-disabled'); bo.textContent = '进入本体面板';
+  bo.addEventListener('click', function () { openP1(false); });
+}
+
 loadStatus();
 setInterval(loadStatus, 5000);
 document.addEventListener('visibilitychange', function () { if (!document.hidden) loadStatus(); });
