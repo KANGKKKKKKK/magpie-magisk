@@ -45,7 +45,8 @@ expect_port() {
   _want=$1; _in=$2
   _got=$(addr_port "$_in" 2>/dev/null); _rc=$?
   if [ "$_want" = "-" ]; then
-    [ "$_rc" -ne 0 ] && ok "port($_in) 被拒" || bad "port($_in) 应为非法，却给出 [$_got]"
+    [ "$_rc" -ne 0 ] && [ -z "$_got" ] && ok "port($_in) 被拒" \
+      || bad "port($_in) 应无输出且失败，实际 [$_got] rc=$_rc"
   else
     [ "$_rc" -eq 0 ] && [ "$_got" = "$_want" ] && ok "port($_in) = $_got" \
       || bad "port($_in) = [$_got] rc=$_rc，期望 [$_want]"
@@ -68,12 +69,18 @@ expect_host 192.168.1.5  "192.168.1.5:3430"
 expect_host ::1          "[::1]:3425"
 expect_host 2001:db8::1  "[2001:db8::1]:80"
 expect_host ::1          "[::1]"
+expect_host ::1          "::1"                 # 裸 IPv6 是主机，不从末段猜端口
+expect_host fe80::1%wlan0 "[fe80::1%wlan0]:3425"
 expect_host ""           ":3425"
 
 echo "== 2 地址切分：端口"
 expect_port 3425   "127.0.0.1:3425"
 expect_port 65535  "127.0.0.1:65535"
 expect_port 3430   "[::1]:3430"
+expect_port 3425   ":3425"
+expect_port 3425   "127.gateway-1.example.:3425"
+expect_port 3425   "[fe80::1%wlan0]:3425"
+expect_port 80     "[1:2:3:4:5:6:192.0.2.1]:80"
 expect_port -      "127.0.0.1"          # 漏端口：这正是写出非法 JSON 的那个配置
 expect_port -      "127.0.0.1:"
 expect_port -      "127.0.0.1:0"
@@ -84,12 +91,17 @@ expect_port -      "127.0.0.1:-1"
 expect_port -      "127.0.0.1:12 34"
 expect_port -      "[::1]"
 expect_port -      ""
+for a in '::1' '2001:db8::1:3425' '[::1:3425' 'host]:3425' '[::1]:80]:3425' \
+         '[host]:3425' '[2001:::1]:3425' '[fe80::1%]:3425' '[fe80::1%wlan0%2]:3425'; do
+  expect_port - "$a"
+done
 
 echo "== 3 回环判定"
-for h in 127.0.0.1 127.1.2.3 localhost ::1 "[::1]" 0:0:0:0:0:0:0:1; do
+for h in 127.0.0.1 127.1.2.3 localhost ::1 "[::1]" 0:0:0:0:0:0:0:1 '[::FFFF:127.255.0.1]'; do
   expect_bool Y "$h" is_loopback_host
 done
-for h in 0.0.0.0 "" 192.168.1.5 :: 2001:db8::1 "[::]"; do
+for h in 0.0.0.0 "" 192.168.1.5 :: 2001:db8::1 "[::]" 127.gateway-1.example. \
+         127.1.2 127.0.0.256 127.0.0.1. ::ffff:127.example '[::FFFF:127.0.0.999]'; do
   expect_bool N "$h" is_loopback_host
 done
 
@@ -97,16 +109,20 @@ echo "== 4 IPv4"
 for a in 223.5.5.5 1.1.1.1 8.8.8.8 0.0.0.0 255.255.255.255 192.168.1.1; do
   expect_bool Y "$a" is_ipv4_addr
 done
-for a in 256.1.1.1 999.999.999.999 1.2.3 1.2.3.4.5 1..2.3 .1.2.3 1.2.3. \
+for a in 256.1.1.1 999.999.999.999 1.2.3 1.2.3.4.5 1..2.3 .1.2.3 1.2.3. 1.2.3.4. \
          abc 01.2.3.4 1.2.3.04 "" 1.2.3.4:53; do
   expect_bool N "$a" is_ipv4_addr
 done
 
 echo "== 5 IPv6"
-for a in ::1 :: 2001:4860:4860::8888 2001:4860:4860:0:0:0:0:8888 fe80::1 ::ffff:192.168.1.1; do
+# :: 可以只省一段（左端、中间、右端），但不能省零段；点分 IPv4 尾部占两段。
+for a in ::1 :: 2001:4860:4860::8888 2001:4860:4860:0:0:0:0:8888 fe80::1 ::ffff:192.168.1.1 \
+         ::1:2:3:4:5:6:7 1:2:3::4:5:6:7 1:2:3:4:5:6:7:: 1:2:3:4:5:6:192.0.2.1 1:2:3:4:5::192.0.2.1; do
   expect_bool Y "$a" is_ipv6_addr
 done
 for a in 1::2::3 ::: ::1:2:3:4:5:6:7:8 1:2:3:4:5:6:7:8:9 12345::1 \
+         :1:2:3:4:5:6:7 1:2:3:4:5:6:7: :1::2 1::2: 1::2:3:4:5:6:7:8 \
+         1:2:3:4:5:6:7:192.0.2.1 1:2:3:4:5:6::192.0.2.1 ::ffff:192.0.2.1. 192.0.2.1::1 \
          ::ffff:999.1.1.1 "fe80::1%wlan0" "" 1.2.3.4; do
   expect_bool N "$a" is_ipv6_addr
 done
@@ -122,6 +138,11 @@ if [ "$n" = "3" ]; then ok "3 个合法项被留下"; else bad "留下了 $n 项
 case "$body" in *"nameserver abc"*) bad "abc 不该被写进 resolv.conf" ;; *) ok "非法项 abc 被跳过" ;; esac
 case "$body" in *"nameserver 999.999.999.999"*) bad "越界 IPv4 不该被写进去" ;; *) ok "越界 IPv4 被跳过" ;; esac
 case "$body" in *"options timeout:2 attempts:2"*) ok "options 行仍在" ;; *) bad "丢了 options 行" ;; esac
+
+body=$(magpie_resolv_body '192.0.2.1. 1:2:3:4:5:6:192.0.2.1 :1:2:3:4:5:6:7 fe80::1%wlan0')
+if [ "$body" = 'nameserver 1:2:3:4:5:6:192.0.2.1
+options timeout:2 attempts:2' ]; then ok "只写入合法的混合 IPv6 上游"
+else bad "混合 IPv6 列表过滤错误：$body"; fi
 
 bad_list=$(magpie_bad_dns "223.5.5.5 abc 8.8.8" | tr '\n' ' ')
 if [ "$bad_list" = "abc 8.8.8 " ]; then ok "被跳过的项能逐个点名"; else bad "点名结果不对：[$bad_list]"; fi

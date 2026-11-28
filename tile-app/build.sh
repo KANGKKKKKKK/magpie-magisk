@@ -84,11 +84,16 @@ echo "→ 编译"
 #   1. 管道让 $? 变成 grep 的退出码，javac 失败会被当成成功（set -e 也不管用）；
 #   2. 过滤规则写宽一点就把 error 也滤掉了。
 # 曾经因此打出一个只有部分类的 APK，装上去一启动就 ClassNotFoundException。
-# 文件名由仓库控制；这里刻意把 find 结果拆成独立的 javac 参数。
-# shellcheck disable=SC2046
+# 仓库/生成的 Java 相对文件名不含换行。逐行组装一个 argv；源码树、输出目录
+# 即使含空格也不会被拆成多个参数。保存清单还可检查 find 自身的退出码。
+(cd "$HERE/src" && find . -name '*.java') > "$WORK/src.list"
+(cd "$WORK/gen" && find . -name '*.java') > "$WORK/gen.list"
+[ -s "$WORK/src.list" ] || { echo "没有 Java 源文件" >&2; exit 1; }
+set --
+while IFS= read -r _java; do set -- "$@" "$HERE/src/${_java#./}"; done < "$WORK/src.list"
+while IFS= read -r _java; do set -- "$@" "$WORK/gen/${_java#./}"; done < "$WORK/gen.list"
 if javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
-  -d "$WORK/classes" \
-  $(find "$HERE/src" "$WORK/gen" -name '*.java') >"$WORK/javac.log" 2>&1; then
+  -d "$WORK/classes" "$@" >"$WORK/javac.log" 2>&1; then
   _javac_rc=0
 else
   _javac_rc=$?
@@ -102,21 +107,20 @@ if [ "$_javac_rc" -ne 0 ]; then
 fi
 
 # 兜底自检：每个源文件都必须产出对应的 .class，防止「编译没报错但类没生成」
-# 仓库 Java 源文件名不含空白；与上面的显式参数列表采用相同约定。
-# shellcheck disable=SC2044
-for _java in $(find "$HERE/src" -name '*.java'); do
-  _cls="$WORK/classes/$(echo "${_java#"$HERE/src/"}" | sed 's/\.java$/.class/')"
-  if [ ! -f "$_cls" ]; then
-    echo "编译产物缺失：${_cls#"$WORK/classes/"}" >&2
+while IFS= read -r _java; do
+  _cls=${_java#./}
+  _cls=${_cls%.java}.class
+  if [ ! -f "$WORK/classes/$_cls" ]; then
+    echo "编译产物缺失：$_cls" >&2
     exit 1
   fi
-done
+done < "$WORK/src.list"
 
 echo "→ dex"
-# 同上：受控 .class 路径需要拆成独立参数，不是单个带换行的参数。
-# shellcheck disable=SC2046
-if "$BT/d8" --release --min-api 29 --output "$WORK/dex" \
-  $(find "$WORK/classes" -name '*.class') >"$WORK/d8.log" 2>&1; then
+(cd "$WORK/classes" && find . -name '*.class') > "$WORK/class.list"
+set --
+while IFS= read -r _cls; do set -- "$@" "$WORK/classes/${_cls#./}"; done < "$WORK/class.list"
+if "$BT/d8" --release --min-api 29 --output "$WORK/dex" "$@" >"$WORK/d8.log" 2>&1; then
   _d8_rc=0
 else
   _d8_rc=$?

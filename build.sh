@@ -1,6 +1,7 @@
 #!/bin/sh
 # 本地构建完整的已签名模块包。正式 CI 将构建、签名和发布分开，不调用这个组合入口。
 set -eu
+[ "$#" -le 1 ] || { echo "用法: sh build.sh [输出目录]" >&2; exit 2; }
 cd "$(dirname "$0")"
 OUT=${1:-dist}
 mkdir -p "$OUT"
@@ -15,11 +16,17 @@ if [ -n "${MAGPIE_KEYSTORE:-}" ]; then
   sh tile-app/build.sh "$WORK"
   APK="$WORK/magpie-tile.apk"
 elif [ -f magpie-tile.apk ]; then
-  echo "未设置 MAGPIE_KEYSTORE，使用现有的 magpie-tile.apk（请确认它与 tile-app/ 源码同版本）" >&2
+  echo "未设置 MAGPIE_KEYSTORE，先核验已有磁贴的元数据与可信签名" >&2
   APK="$PWD/magpie-tile.apk"
 else
   echo "没有签名密钥（MAGPIE_KEYSTORE），也没有现成的 magpie-tile.apk，无法打包" >&2
   exit 1
 fi
-python3 -I scripts/ci/release-artifacts.py package --source "$PWD" \
-  --apk "$APK" --output "$OUT"
+# 始终先在同一文件系统的私有目录打包，校验失败不覆盖已有输出。
+ZIP=$(python3 -I scripts/ci/release-artifacts.py package --source "$PWD" --apk "$APK" --output "$WORK")
+if [ -z "${MAGPIE_KEYSTORE:-}" ]; then
+  VERSION=$(sed -n 's/^version=//p' module.prop)
+  SOURCE_ROOT="$PWD" sh scripts/ci/verify-release-zip.sh "$ZIP" "$VERSION"
+fi
+mv -fT "$ZIP" "$OUT/${ZIP##*/}"
+printf '%s\n' "$OUT/${ZIP##*/}"

@@ -35,6 +35,9 @@ build() {
     echo "MP=$WD"
     echo "WATCH_LOG=$WD/run/watchdog.log"
     echo '. "$MODDIR/scripts/lib.sh"'
+    echo 'BOOT_DIR_ID=$(stat -c "%d:%i" "$MODDIR")'
+    sed -n '/^boot_module_active()/,/^}/p' "$SRC"
+    sed -n '/^boot_log_paths_safe()/,/^}/p' "$SRC"
     echo "wlog() { echo \"\$(date +'%H:%M:%S') \$1\" >> \"$WD/run/watchdog.log\" 2>/dev/null; }"
     echo '_last_lan=""'
     echo "WATCH_INTERVAL=$INTERVAL"
@@ -149,6 +152,27 @@ n=$(logtext | grep -c "很快退出")
 [ "$n" -ge 2 ] && ok "识别出起来就崩（$n 次）" || bad "没有识别崩溃循环：$(logtext)"
 seq=$(logtext | sed -n 's/.*很快退出.*，\([0-9]*\) 秒后再试.*/\1/p' | tr '\n' ' ')
 case "$seq" in "$INTERVAL $((INTERVAL * 2)) "*) ok "崩溃循环按 $INTERVAL/$((INTERVAL * 2)) 退避" ;; *) bad "崩溃循环退避不对：$seq" ;; esac
+
+echo "== 7 巡检时 run / 日志链接不是可写的模块日志布局"
+for entry in run watchdog.log magpie.log.1; do
+  build 2
+  put_elf
+  fake_running 'return 1'
+  printf '#!/bin/sh\necho called >> "%s/verbs"\n' "$WD" > "$WD/scripts/magpie.service"
+  mkdir "$WD/other"
+  printf 'fixture\n' > "$WD/other/watchdog.log"
+  if [ "$entry" = run ]; then
+    rmdir "$WD/run"; ln -s other "$WD/run"
+  else
+    ln -s ../other/watchdog.log "$WD/run/$entry"
+  fi
+  if sh "$WD/loop.sh" >"$WD/output" 2>&1 || ! grep -q '守护退出' "$WD/output"; then
+    bad "$entry 链接未明确中止巡检"
+  else ok "$entry 链接中止巡检并报告原因"; fi
+  if [ "$(cat "$WD/other/watchdog.log")" = fixture ] && [ ! -e "$WD/verbs" ]; then
+    ok "$entry 链接不写目标且不触发自动启动"
+  else bad "$entry 链接下仍有副作用"; fi
+done
 
 rm -rf "$WD"
 echo

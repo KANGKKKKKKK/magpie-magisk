@@ -20,6 +20,10 @@
 - 已公开不可变发布需复核，或正式版的更新索引尚未合入：从 `main` 选 `mode=recover`，传入原 tag。不重签或覆盖发布，只读复核资产；仅正式版可由独立更新 job 提 `update.json` PR。同一 tag 和 ZIP 摘要复用分支，只补中断的步骤，不强推。旧发布如果缺少新清单、证明或不可变状态，不能走该自动恢复路径。已经有同版更新 PR 时，优先检查/合并已有的，不重复提。
 - 发布端按 Release ID / asset ID 回读 ZIP、`SHA256SUMS` 和 Sigstore bundle 并核对摘要，验 APK 的既有证书、源码清单、tag、提交及签名工作流；公开草稿前检查仓库已启用不可变发布；无法确认时留在草稿。公开后再次核对三个下载地址；如果动作已公开但公共验证暂时失败，可从 `main` 走只读恢复，不能直接推进索引。Release 能公开不表示更新通道已经变更；以受保护 `main` 上 `update.json` 的最终合入为准。
 
+## 合并前可验证什么
+
+`sh tests/run-all.sh` 在无正式密钥环境中运行 Shell、JVM、Python 和 WebUI 回归，并核对同一轮的计数。CI 再用一次性证书真实构建磁贴 APK 和模块 ZIP，核对签名、SDK、包内源码与权限；还会验证复用同一 APK 能产出相同 ZIP，且签名不符时不覆盖已有文件。这不是对正式证书的签名授权，也不是设备刷入测试。只有受保护发布流程产出的资产才是正式版；不要分发这些临时证书构建的包。
+
 ## 用户侧验真
 
 取发布说明中写明的仓库、tag 和源码 commit，下载三个文件。先核对 `SHA256SUMS`，再按该版 Release 的 `gh attestation verify ... --bundle ... --source-ref ... --source-digest ... --signer-workflow ... --signer-digest ...` 说明验证 ZIP。APK 证书只覆盖 APK，不覆盖刷机包内 Root 脚本；Magisk、KernelSU、APatch 是否在刷入前执行整个 ZIP 的签名验真，不能由本仓库工作流保证。管理器不提供证明验证时，请先用独立工具核验再安装。

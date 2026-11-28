@@ -214,7 +214,11 @@ echo "[6/10] CA 证书包"
 CA="$magpie_path/data/certs/ca-bundle.crt"
 if [ -s "$CA" ]; then
   _n=$(grep -c 'BEGIN CERTIFICATE' "$CA" 2>/dev/null)
-  ok "证书包可用（$_n 张，权限 $(stat -c %a "$CA" 2>/dev/null)）"
+  if [ "${_n:-0}" -gt 0 ] 2>/dev/null; then
+    ok "证书包包含 $_n 个证书头（权限 $(stat -c %a "$CA" 2>/dev/null)）"
+  else
+    warn "证书包非空但未找到可读的 PEM 证书头" "检查 data/certs/ca-bundle.crt 后重新生成"
+  fi
 else
   warn "没有证书包" "重启服务会自动生成；HTTPS 若失败可删掉它再重启"
 fi
@@ -385,9 +389,8 @@ for _f in "$magpie_path/run/magpie.log" "$magpie_path/run/watchdog.log"; do
 done
 if [ ! -d "$magpie_path/data" ]; then
   warn "数据目录尚未创建" "首次启动服务时自动生成"
-elif touch "$magpie_path/data/.doctor" 2>/dev/null; then
-  rm -f "$magpie_path/data/.doctor" 2>/dev/null
-  ok "数据目录可写"
+elif [ -w "$magpie_path/data" ] && [ -x "$magpie_path/data" ]; then
+  ok "数据目录的访问检查允许写入（未创建测试文件）"
 else
   bad "$magpie_path/data 不可写" "检查磁盘空间与权限"
 fi

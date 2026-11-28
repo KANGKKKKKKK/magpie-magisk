@@ -174,11 +174,10 @@ dl_fetch() {
     --proto "=$DL_SCHEME" --proto-redir "=$DL_SCHEME" --tlsv1.2 \
     --connect-timeout "$DL_STALL" --speed-limit 1024 --speed-time "$DL_STALL" \
     --max-time "$DL_TOTAL" --max-filesize "$_dl_limit"
-  if [ -n "${MAGPIE_TLS_CA_BUNDLE:-}" ]; then
-    [ -r "$MAGPIE_TLS_CA_BUNDLE" ] || return 1
+  if [ "$DL_KIND" = curl ] && [ -n "${MAGPIE_TLS_CA_BUNDLE:-}" ]; then
     set -- "$@" --cacert "$MAGPIE_TLS_CA_BUNDLE"
   fi
-  DL_STARTING=1
+  CHILD_STARTING=1
   if [ "$DL_KIND" = java ]; then
     # 参数与上面的 curl 约束一一对应；MAGPIE_TLS_CA_BUNDLE 只对 curl 生效。
     (exec 8>&-; CLASSPATH="$DL_APK" exec "$DL_CMD" / com.ruin.magpie.tile.Fetch \
@@ -187,11 +186,21 @@ dl_fetch() {
     (exec 8>&-; exec "$DL_CMD" "$@" -o "$_dl_out" -- "$_dl_url") 2>/dev/null &
   fi
   DL_PID=$!
-  DL_STARTING=''
-  [ -z "$DL_SIGNAL" ] || on_signal "$DL_SIGNAL"
+  child_registered
   wait "$DL_PID"
   _dl_rc=$?
   DL_PID=''
+  # 不回显可能含签名 URL 的下载器原始错误；保留可采取行动的分类和真实退出码。
+  if [ "$_dl_rc" -ne 0 ]; then
+    case "$DL_KIND:$_dl_rc" in
+      curl:28|java:6) _dl_reason='下载超时' ;;
+      curl:22|curl:47|java:4) _dl_reason='HTTP 响应或重定向失败' ;;
+      curl:63|java:5) _dl_reason='下载超过大小上限' ;;
+      curl:60)        _dl_reason='TLS 证书校验失败' ;;
+      *)              _dl_reason='下载器失败' ;;
+    esac
+    warn "$_dl_reason（$DL_KIND 退出码 $_dl_rc）" >&2
+  fi
   return "$_dl_rc"
 }
 
@@ -203,9 +212,24 @@ dl_name() {
   fi
 }
 
+valid_download_seconds() {
+  # Java 的连接/读取超时使用有符号 int 毫秒；curl 的 0 则会关闭时限。
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 7 ] && [ "$1" -ge 1 ] && [ "$1" -le 2147483 ]
+}
+
 # 下载前先说清楚是「没有下载器」还是「网络问题」，两者的处理完全不同。
 need_downloader() {
-  pick_downloader && return 0
+  if ! valid_download_seconds "$DL_STALL" || ! valid_download_seconds "$DL_TOTAL"; then
+    warn "MAGPIE_DL_STALL 和 MAGPIE_DL_TIMEOUT 必须是 1 至 2147483 的整数秒"; return 1
+  fi
+  if pick_downloader; then
+    if [ "$DL_KIND" = curl ] && [ -n "${MAGPIE_TLS_CA_BUNDLE:-}" ] &&
+       { [ ! -f "$MAGPIE_TLS_CA_BUNDLE" ] || [ ! -r "$MAGPIE_TLS_CA_BUNDLE" ]; }; then
+      warn "无法读取 MAGPIE_TLS_CA_BUNDLE 指定的 CA 文件"; return 1
+    fi
+    return 0
+  fi
   say "✗ 没有能校验证书的 HTTPS 下载器"
   say "  · 重刷完整的模块 zip（里面的 magpie-tile.apk 提供下载能力，不必安装它）"
   say "  · 或装一个 curl（如 Termux），再用 MAGPIE_DL=/绝对路径/curl 指定"
@@ -215,21 +239,32 @@ need_downloader() {
 # 下载大文件时每 10 秒报一次进度：Magisk 的文本框几分钟没输出，用户会以为卡死而退出。
 progress_start() {
   _pg_file=$1; _pg_total=$2
-  PROGRESS_PID=''
   [ -n "$_pg_total" ] && [ "$_pg_total" -gt 4194304 ] 2>/dev/null || return 0
+  _pg_parent=$$
+  CHILD_STARTING=1
   (
-    trap 'exit 0' TERM
-    while sleep 10; do
+    exec 8>&-
+    _pg_timer=''; CHILD_STARTING=''; CHILD_SIGNAL=''
+    trap 'stop_child "$_pg_timer"' EXIT
+    trap 'on_signal 0' INT TERM HUP
+    while :; do
+      # wait 可以被 trap 打断；前台 sleep 会让每次完成/取消都可能多等十秒。
+      CHILD_STARTING=1
+      sleep 10 &
+      _pg_timer=$!
+      child_registered
+      wait "$_pg_timer" || break
+      _pg_timer=''
+      kill -0 "$_pg_parent" 2>/dev/null || break
       _pg_now=$(stat -c %s "$_pg_file" 2>/dev/null) || _pg_now=0
       say "  … 已下载 $(human_size "$_pg_now") / $(human_size "$_pg_total")（$((_pg_now * 100 / _pg_total))%）"
     done
   ) &
   PROGRESS_PID=$!
+  child_registered
 }
 progress_stop() {
-  [ -n "${PROGRESS_PID:-}" ] || return 0
-  kill "$PROGRESS_PID" 2>/dev/null
-  wait "$PROGRESS_PID" 2>/dev/null
+  stop_child "$PROGRESS_PID"
   PROGRESS_PID=''
 }
 
@@ -277,15 +312,15 @@ probe_version() (
   esac
 )
 
-# missing | broken | ready
-bin_state() {
+# 状态和显示的版本必须来自同一次 --version；不同路径的部署自检仍分别执行。
+inspect_bin() {
+  BIN_VERSION=''
   if [ ! -e "$BIN" ]; then
-    echo missing; return 0
-  fi
-  if probe_version "$BIN" >/dev/null 2>&1; then
-    echo ready
+    BIN_STATE=missing
+  elif BIN_VERSION=$(probe_version "$BIN"); then
+    BIN_STATE=ready
   else
-    echo broken
+    BIN_STATE=broken
   fi
 }
 
@@ -350,8 +385,7 @@ check_target() {
   # 已有的子路径也不能是链接：否则 bin 指到别处仍会越过目录白名单，
   # 清单临时文件、备份或记录文件的重定向也可能跟随链接写到外面。
   for _target in "$BIN_DIR" "$BIN" "$BAK" "$INFO" "$LOCK" "$magpie_path/.install.lock" "$PENDING" \
-                 "$magpie_path/.manifest.tmp" \
-                 "$BIN.rejected" "$BIN_DIR/.magpie.new.$$" "$BIN_DIR/.magpie.rollback.$$"; do
+                 "$magpie_path/.manifest.tmp" "$BIN.rejected"; do
     [ ! -L "$_target" ] || die "$_target 是符号链接，出于安全考虑不接受"
   done
   for _target in "$BIN" "$BAK" "$INFO" "$BIN.rejected"; do
@@ -402,31 +436,35 @@ release_lock() {
   exec 8>&-
 }
 
-DL_PID=""
-DL_STARTING=""
-DL_SIGNAL=""
+DL_PID=''; PROGRESS_PID=''; DOWNLOAD_TMP=''
+CHILD_STARTING=''; CHILD_SIGNAL=''
 
-stop_download() {
-  [ -n "$DL_PID" ] || return 0
-  # TERM 让 timeout 把信号转发给 wget；SIGKILL timeout 会留下下载孤儿。
-  kill -TERM "$DL_PID" 2>/dev/null || :
-  wait "$DL_PID" 2>/dev/null || :
-  DL_PID=""
+stop_child() {
+  [ -n "$1" ] || return 0
+  kill -TERM "$1" 2>/dev/null || :
+  wait "$1" 2>/dev/null || :
 }
 
 cleanup_install() {
+  trap '' INT TERM HUP
+  stop_child "$DL_PID"
   progress_stop
-  stop_download
+  [ -z "$DOWNLOAD_TMP" ] || rm -f "$DOWNLOAD_TMP" 2>/dev/null
   clear_manifest_tmp
   finish_swap || :
   release_lock
 }
 
 on_signal() {
-  # spawn 与记录 $! 之间信号先记账，PID 一就绪立即退出，不遗留下载进程。
-  if [ -n "$DL_STARTING" ]; then DL_SIGNAL="$1"; return; fi
+  # spawn 与记录 $! 之间信号先记账，以免留下没有 PID 可回收的子进程。
+  if [ -n "$CHILD_STARTING" ]; then CHILD_SIGNAL="$1"; return; fi
   trap '' INT TERM HUP
   exit "$1"
+}
+
+child_registered() {
+  CHILD_STARTING=''
+  [ -z "$CHILD_SIGNAL" ] || on_signal "$CHILD_SIGNAL"
 }
 
 # ---------- 下载 ----------
@@ -444,7 +482,7 @@ download_verified() {
       [ -n "$_u" ] || continue
       say "  下载 $_u"
       say "  （约 $(human_size "$_want_size")，视网络可能要几分钟）"
-      rm -f "$_tmp" 2>/dev/null
+      : > "$_tmp" || return 1
       progress_start "$_tmp" "$_want_size"
       if ! dl_fetch "$_u" "$_tmp" "$_want_size"; then
         progress_stop
@@ -597,9 +635,9 @@ rollback() {
 # ---------- 子命令 ----------
 
 cmd_status() {
-  _st=$(bin_state)
-  case "$_st" in
-    ready)  echo "state=ready version=$(probe_version "$BIN") path=$BIN" ;;
+  inspect_bin
+  case "$BIN_STATE" in
+    ready)  echo "state=ready version=$BIN_VERSION path=$BIN" ;;
     broken) echo "state=broken path=$BIN" ;;
     *)      echo "state=missing path=$BIN" ;;
   esac
@@ -612,12 +650,12 @@ cmd_check() {
   load_manifest || die "取不到更新清单或清单不符合 HTTPS/元数据要求"
   _ver=$M_VER; _size=$M_SIZE; _pub=$M_PUB
 
-  case "$(bin_state)" in
+  inspect_bin
+  case "$BIN_STATE" in
     ready)
-      _cur=$(probe_version "$BIN")
-      say "已装：  $_cur"
+      say "已装：  $BIN_VERSION"
       say "最新：  $_ver"
-      if [ "$_cur" = "$_ver" ]; then
+      if [ "$BIN_VERSION" = "$_ver" ]; then
         say "已是最新，不需要动。"
       else
         say "有新版本。升级请用本体自己的更新，模块不代劳："
@@ -711,12 +749,14 @@ cmd_install() {
 
   check_arch || die "本模块只支持 arm64 设备（当前 $(uname -m)）"
 
-  _st=$(bin_state)
-  if [ "$_st" = "ready" ] && [ "$_yes" = "0" ]; then
-    say "已存在可用本体（$(probe_version "$BIN")），不覆盖。"
-    say "要重装请显式加 --yes：sh install.sh install --yes"
-    say "要升级请用本体自己的：su -c magpie update"
-    return 0
+  if [ "$_yes" = "0" ]; then
+    inspect_bin
+    if [ "$BIN_STATE" = ready ]; then
+      say "已存在可用本体（$BIN_VERSION），不覆盖。"
+      say "要重装请显式加 --yes：sh install.sh install --yes"
+      say "要升级请用本体自己的：su -c magpie update"
+      return 0
+    fi
   fi
 
   # 未带 --yes：走「再点一次」确认。终端里不可交互，所以不读 stdin。
@@ -744,7 +784,7 @@ cmd_install() {
 
   mkdir -p "$magpie_path" 2>/dev/null
   acquire_lock
-  need_downloader || { release_lock; exit 1; }
+  need_downloader || exit 1
   # 持锁说明没有别的安装器在跑：回收上次被强杀留下的半截下载（每份约 100 MB）。
   for _old in "$BIN_DIR"/.magpie.new.*; do
     [ -f "$_old" ] && [ ! -L "$_old" ] && rm -f "$_old" 2>/dev/null && say "  已清理上次中断留下的临时文件 ${_old##*/}"
@@ -752,44 +792,34 @@ cmd_install() {
 
   say "取更新清单 ..."
   if ! load_manifest; then
-    release_lock
     die "取不到更新清单（需要 HTTPS），或清单缺少可验证的资产元数据"
   fi
 
   check_space "$M_SIZE"
 
   # 先建目录：临时文件要落在同一个文件系统上，才能用 mv 原子替换
-  mkdir -p "$BIN_DIR" 2>/dev/null || { release_lock; die "无法创建 $BIN_DIR"; }
+  mkdir -p "$BIN_DIR" 2>/dev/null || die "无法创建 $BIN_DIR"
   chmod 755 "$BIN_DIR" 2>/dev/null
 
   say "开始安装 magpie ${M_VER:-未知版本}（$(human_size "$M_SIZE")）"
-  _tmp="$BIN_DIR/.magpie.new.$$"
-  if ! download_verified "$_tmp" "$M_SIZE" "$M_SUM" "$M_CDN" "$M_GH"; then
-    rm -f "$_tmp" 2>/dev/null
-    release_lock
-    die "所有来源都失败了，本体未改动"
-  fi
+  DOWNLOAD_TMP=$(mktemp "$BIN_DIR/.magpie.new.XXXXXX") || die "无法创建临时下载文件"
+  download_verified "$DOWNLOAD_TMP" "$M_SIZE" "$M_SUM" "$M_CDN" "$M_GH" || die "所有来源都失败了，本体未改动"
 
   say "部署 ..."
-  deploy "$_tmp"
+  deploy "$DOWNLOAD_TMP"
   _deploy_rc=$?
   if [ "$_deploy_rc" -ne 0 ]; then
-    if [ "$_deploy_rc" -eq 2 ] && [ -f "$_tmp" ]; then
-      mv -f "$_tmp" "$BIN.rejected" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    if [ "$_deploy_rc" -eq 2 ] && [ -f "$DOWNLOAD_TMP" ]; then
+      mv -f "$DOWNLOAD_TMP" "$BIN.rejected" 2>/dev/null || die "新本体跑不起来，无法保存失败样本；未替换当前本体"
       if [ ! -f "$BIN" ] && [ ! -f "$BAK" ]; then
         say "  首次安装，无可用备份；失败样本保留在 $BIN.rejected"
       else
         say "  原有本体与可用备份保持不变；失败样本保留在 $BIN.rejected"
       fi
-      release_lock
       die "新本体跑不起来，未替换当前本体"
     fi
-    rm -f "$_tmp" 2>/dev/null
-    release_lock
     die "部署失败，现有本体未主动替换"
   fi
-
-  release_lock
 
   say "✓ 已安装 magpie $DEPLOY_VERSION"
   say "  位置  $BIN"
@@ -802,7 +832,6 @@ cmd_install() {
 cmd_rollback() {
   acquire_lock
   rollback
-  release_lock
   return 0
 }
 
