@@ -329,17 +329,39 @@ run_control() {
   return 0
 }
 
+# 把 URL 交给外部浏览器。am 会把自己的 stdin/stdout/stderr 经 binder 交给
+# system_server；KernelSU 的 [执行] 里这些是管理器 App 持有的管道，SELinux
+# 可能拒绝（Failed transaction），而且 am 失败时退出码仍是 0。所以：stdin 用
+# /dev/null，输出用本 shell 自己的命令替换管道，再按输出文本判断成败。
+launch_url() {
+  _lu_out=$(am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE \
+    -d "$1" --user 0 </dev/null 2>&1) && launch_ok "$_lu_out" && return 0
+  _lu_out=$(am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE \
+    -d "$1" </dev/null 2>&1) && launch_ok "$_lu_out" && return 0
+  LAUNCH_ERR=$(printf '%s\n' "$_lu_out" | grep -m1 -iE 'error|exception|failure|denied|not found' || printf '%s\n' "$_lu_out" | tail -n 1)
+  return 1
+}
+
+launch_ok() {
+  case "$1" in
+    *Error*|*Exception*|*Failure*|*'Failed transaction'*|*'unable to resolve'*|*'not found'*) return 1 ;;
+  esac
+  return 0
+}
+
 open_panel() {
   if ! _url=$(sh "$SERVICE" panel-url 2>/dev/null) || [ -z "$_url" ]; then
     echo "未能核验本机面板的回环监听，未打开浏览器。请查看自检。"
     return 1
   fi
   # 只使用控制器验证过的无密码地址，不从配置或旧缓存猜测。
-  if am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d "$_url" --user 0 2>/dev/null ||
-     am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d "$_url" 2>/dev/null; then
+  LAUNCH_ERR=""
+  if launch_url "$_url"; then
+    echo "已请求浏览器打开面板：$_url"
     return 0
   fi
-  echo "无法打开浏览器，已核验的本机地址：$_url"
+  echo "无法打开浏览器${LAUNCH_ERR:+（$LAUNCH_ERR）}"
+  echo "已核验的本机地址：$_url"
   return 1
 }
 

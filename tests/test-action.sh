@@ -86,6 +86,8 @@ MOCK
 #!/bin/sh
 base=${0%/*}
 printf '%s\n' "$*" >> "$base/browser.log"
+readlink /proc/self/fd/0 >> "$base/am-stdin.log" 2>/dev/null
+[ -z "${TEST_AM_OUT:-}" ] || echo "$TEST_AM_OUT"
 exit "${TEST_AM_RC:-0}"
 MOCK
   chmod 755 "$B/am"
@@ -289,6 +291,13 @@ out=$(run panel 2>&1); rc=$?
 [ "$rc" -eq 0 ] && grep -Fq 'http://[::1]:3430/' "$B/browser.log" && ok "已核验的 IPv6 地址按原样交接" || bad "面板地址未正确交接：$out"
 out=$(TEST_AM_RC=7 run panel 2>&1); rc=$?
 [ "$rc" -ne 0 ] && has "$out" "无法打开浏览器" && ok "浏览器失败非零退出" || bad "浏览器调用误报成功：$out"
+# KernelSU：am 经 binder 交出管理器持有的 fd 被 SELinux 拒绝时，退出码仍是 0
+out=$(TEST_AM_OUT='cmd: Failure calling service activity: Failed transaction (2147483646)' run panel 2>&1); rc=$?
+[ "$rc" -ne 0 ] && has "$out" "Failed transaction" && ok "am 退出码 0 但报 Failed transaction 时如实失败" || bad "am 失败被当成成功：$rc $out"
+out=$(TEST_AM_OUT='Error: Activity not started, unable to resolve Intent' run panel 2>&1); rc=$?
+[ "$rc" -ne 0 ] && has "$out" "unable to resolve" && ok "没有浏览器时如实失败" || bad "无浏览器被当成成功：$rc $out"
+: > "$B/am-stdin.log"; out=$(run panel 2>&1)
+[ -s "$B/am-stdin.log" ] && ! grep -v '^/dev/null$' "$B/am-stdin.log" >/dev/null && ok "am 的 stdin 不继承管理器的管道" || bad "am stdin 未重定向：$(cat "$B/am-stdin.log")"
 
 rm -rf "$B"
 echo

@@ -273,7 +273,11 @@ printf 'request ?k=web-password-sentinel-1234567890 Bearer abcdefghijklmnop sk-1
 MAGPIE_CONF="$B/cfg" sh "$B/scripts/status.sh" >/dev/null 2>&1
 if grep -Eq 'apiKey|webKey|webUrlKey|web-password-sentinel|sk-1234567890secret' "$J"; then bad "状态 JSON 含秘密或密码链接"; else ok "状态 JSON 不含长期密钥或带密码 URL"; fi
 if grep -Eq 'web-password-sentinel|sk-1234567890secret|Bearer abcdefghijklmnop' "$B/webroot/lastlog.txt"; then bad "公开日志快照未脱敏"; else ok "WebUI 日志快照遮盖常见 URL/Bearer/API key"; fi
-if grep -Eq 'webUrlKey|d\.webUrlKey|window\.open|href = d\.webUrl' "$SRCDIR/webroot/index.html"; then bad "模块 WebView 仍有面板导航链接"; else ok "模块 WebView 不导航到面板，也不携带密码链接"; fi
+if grep -Eq 'webUrlKey|webKey|web\.key|window\.open|href = d\.webUrl' "$SRCDIR/webroot/index.html"; then bad "模块 WebView 从静态快照取密码或带密码链接"; else ok "模块 WebView 不从静态快照取密码链接"; fi
+if grep -Fq 'magpie.service webui-url' "$SRCDIR/webroot/index.html" && grep -Fq 'ksu.exec' "$SRCDIR/webroot/index.html" &&
+   grep -Fq "location.hash !== '#status'" "$SRCDIR/webroot/index.html"; then
+  ok "KernelSU WebUI 经 ksu.exec 向控制器取 P1 登录链接，#status 保留 P2"
+else bad "KernelSU WebUI 入口未接到本体面板（P1）"; fi
 
 echo "== 7 看门狗也要等开机：两条启动路径不会在开机过程中抢着 start"
 # 静态断言：wait_boot_completed 必须出现在看门狗子 shell 里、循环之前。
@@ -886,9 +890,18 @@ cp "$B/proc/self/net/tcp" "$B/proc/self/net/tcp6"
 printf ' 0: 00000000000000000000000001000000:0D66 0:0 0A 0:0 00:0 0 0 0 501\n' >> "$B/proc/self/net/tcp6"
 _out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?
 [ "$_rc:$_out" = '0:http://[::1]:3430/' ] && ok "真实控制器输出已核验的 IPv6 回环地址" || bad "IPv6 面板地址不正确：$_rc $_out"
+mkdir -p "$B/data"; printf 'abcdef0123456789abcdef0123456789\n' > "$B/data/web.key"
+_out=$(sh "$B/scripts/magpie.service" webui-url 2>&1); _rc=$?
+[ "$_rc:$_out" = '0:http://[::1]:3430/?k=abcdef0123456789abcdef0123456789' ] && ok "webui-url 只在已核验地址上附带访问密码" || bad "webui-url 不正确：$_rc $_out"
+printf 'bad key\n' > "$B/data/web.key"
+_out=$(sh "$B/scripts/magpie.service" webui-url 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && [ -z "$_out" ] && ok "密码格式异常时 webui-url 不输出" || bad "webui-url 输出了异常密码：$_out"
+printf 'abcdef0123456789abcdef0123456789\n' > "$B/data/web.key"
 proc_candidate 101 "$B/bin/magpie" magpie serve '--web=[::1]:3440'
 _out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?
 [ "$_rc" -ne 0 ] && [ -z "$_out" ] && ok "当前配置未应用到 Web 时不返回地址" || bad "误把其它端口认作面板：$_out"
+_out=$(sh "$B/scripts/magpie.service" webui-url 2>&1); _rc=$?
+[ "$_rc" -ne 0 ] && [ -z "$_out" ] && ok "未核验面板时 webui-url 不泄露密码" || bad "webui-url 在未核验时输出：$_out"
 proc_candidate 101 "$B/bin/magpie" magpie serve '--web=[::1]:3430'
 rm "$B/proc/101/fd/5"
 _out=$(sh "$B/scripts/magpie.service" panel-url 2>&1); _rc=$?

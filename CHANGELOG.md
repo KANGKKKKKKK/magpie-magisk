@@ -1,5 +1,14 @@
 # 变更记录
 
+## 未发布
+
+### 修复
+
+- **KernelSU WebUI 重新进入本体面板（P1）**。v1.2.7 起状态快照不再携带密码链接，模块 WebUI 只剩静态状态页（P2）。现在宿主提供 `ksu.exec` 时，页面向控制器新增的 `magpie.service webui-url` 现取一次「已核验回环地址 + 访问密码」并在同一窗口打开 P1；密码只经 root 命令 stdout 返回，不写入 `status.json`、`lastlog.txt` 或日志。服务未运行、监听未核验或宿主不支持时留在 P2；地址带 `#status` 时强制停留在 P2，P2 上的按钮也可再次进入 P1。
+- **KernelSU 上 `[执行]` → 6 打不开面板**。`am` 会把自身 stdin/stdout/stderr 经 binder 交给 system_server；在 KernelSU 的 `[执行]` 里这些是管理器 App 的管道，可能被 SELinux 拒绝（`Failed transaction`），而 `am` 失败时退出码仍为 0，脚本因此误报成功。现在 stdin 改为 `/dev/null`、输出走本 shell 的管道，并按输出文本判断成败，失败时显示原始错误与已核验地址。
+- `doctor.sh` 增加 `[执行]→6` 路径检查：控制器能否给出面板地址、本 shell 能否调通系统服务、是否有浏览器能处理该地址（只解析，不启动浏览器、不带密码）。
+- 当前套件：747 条断言（80 + 17 + 59 + 194 + 275 + 122）。
+
 ## v1.3.0 — 2026-11-28
 
 模块 versionCode **1110**；磁贴 App **1.3.0 / versionCode 14**。

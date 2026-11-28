@@ -321,7 +321,7 @@ webroot one **P2**, so there is no left/right to get confused about:
 
 **P1**: magpie's own panel, captured on the About page (version, update switches); models,
 providers, quota and keys live here.  
-**P2**: the module's webroot panel. It needs KernelSU WebUI / WebUI-X as a host. It displays a credential-free snapshot and cannot navigate its host WebView to the body panel. The older capture only illustrates layout.
+**P2**: the module's webroot panel. It needs KernelSU WebUI / WebUI-X as a host. Under KernelSU WebUI it fetches a sign-in link via `ksu.exec` and opens P1 directly (the password is never written to disk); if that fails, or the URL has `#status`, it shows the credential-free snapshot. The older capture only illustrates layout.
 
 | | P1: magpie's own panel | P2: the module's webroot panel |
 | --- | --- | --- |
@@ -873,13 +873,13 @@ python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manife
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 80 assertions
 sh tests/test-watchdog.sh                                 # watchdog, 17 assertions
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 56 assertions
-sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 190 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 59 assertions
+sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 194 assertions
 sh tests/test-lib.sh                                      # pure helpers and process identity: 275 assertions
 sh tests/test-tile-check.sh                               # self-check data, unknown results and large dumps: 122 assertions
 ```
 
-740 assertions total (80 + 17 + 56 + 190 + 275 + 122), plus 446 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions, 12 HTTPS downloader). Tests use temp
+747 assertions total (80 + 17 + 59 + 194 + 275 + 122), plus 446 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions, 12 HTTPS downloader). Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
