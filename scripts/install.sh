@@ -40,7 +40,12 @@ fi
 CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
 magpie_path=/data/adb/magpie
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
+  echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
+else
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+fi
 
 BIN_DIR="$magpie_path/bin"
 BIN="$BIN_DIR/magpie"
@@ -122,20 +127,32 @@ extract_asset() {
 }
 
 # ---------- 下载器 ----------
-# 只选能同时执行证书校验与 HTTPS 重定向限制的 curl。BusyBox wget 的 TLS 能力、
-# 证书默认值与重定向选项因构建不同，不让 root 安装链静默降级。
+# 只用会校验证书、并能把跳转限制在 HTTPS 的下载器：
+#   1. curl（PATH 里的，或 MAGPIE_DL 指定的绝对路径）
+#   2. 没有 curl 时，用系统自带的 Java TLS 栈：app_process 直接运行模块里磁贴 APK
+#      中的 Fetch 类（Conscrypt + 系统 CA，不需要安装 App）。原版 Android 不带 curl，
+#      以前这类设备的 [执行] 首次安装必然失败，还会被误报成「检查网络」。
+# BusyBox wget 不在候选里：Magisk 自带的那份实测不校验证书。
 DL_SCHEME=https
 DL_CMD=''
+DL_KIND=''
 DL_STALL=${MAGPIE_DL_STALL:-60}
 DL_TOTAL=${MAGPIE_DL_TIMEOUT:-1800}
+DL_APK="${MAGPIE_FETCH_APK:-$MODDIR/magpie-tile.apk}"
 
 pick_downloader() {
   [ -n "$DL_CMD" ] && return 0
   if [ -n "${MAGPIE_DL:-}" ]; then
     case "$MAGPIE_DL" in /*) [ -f "$MAGPIE_DL" ] && [ -x "$MAGPIE_DL" ] || return 1 ;; *) return 1 ;; esac
-    DL_CMD=$MAGPIE_DL
+    DL_CMD=$MAGPIE_DL; DL_KIND=curl
+  elif DL_CMD=$(command -v curl 2>/dev/null) && [ -n "$DL_CMD" ]; then
+    DL_KIND=curl
+  elif [ "${MAGPIE_DL_NO_JAVA:-0}" != 1 ] && [ -f "$DL_APK" ] && [ ! -L "$DL_APK" ] &&
+       DL_CMD=$(command -v app_process 2>/dev/null) && [ -n "$DL_CMD" ]; then
+    DL_KIND=java
   else
-    DL_CMD=$(command -v curl) || return 1
+    DL_CMD=''; DL_KIND=''
+    return 1
   fi
 }
 
@@ -162,7 +179,13 @@ dl_fetch() {
     set -- "$@" --cacert "$MAGPIE_TLS_CA_BUNDLE"
   fi
   DL_STARTING=1
-  (exec 8>&-; exec "$DL_CMD" "$@" -o "$_dl_out" -- "$_dl_url") 2>/dev/null &
+  if [ "$DL_KIND" = java ]; then
+    # 参数与上面的 curl 约束一一对应；MAGPIE_TLS_CA_BUNDLE 只对 curl 生效。
+    (exec 8>&-; CLASSPATH="$DL_APK" exec "$DL_CMD" / com.ruin.magpie.tile.Fetch \
+      "$_dl_url" "$_dl_out" "$_dl_limit" "$DL_STALL" "$DL_TOTAL") 2>/dev/null &
+  else
+    (exec 8>&-; exec "$DL_CMD" "$@" -o "$_dl_out" -- "$_dl_url") 2>/dev/null &
+  fi
   DL_PID=$!
   DL_STARTING=''
   [ -z "$DL_SIGNAL" ] || on_signal "$DL_SIGNAL"
@@ -173,7 +196,41 @@ dl_fetch() {
 }
 
 dl_name() {
-  pick_downloader && printf '%s\n' "$DL_CMD" || printf '%s\n' '无可用的 HTTPS curl（也可用 MAGPIE_DL 指定可信 curl 的绝对路径）'
+  if pick_downloader; then
+    case "$DL_KIND" in java) printf '%s\n' "系统 Java TLS（app_process，经 $DL_APK）" ;; *) printf '%s\n' "$DL_CMD" ;; esac
+  else
+    printf '%s\n' '无可用的 HTTPS 下载器（没有 curl，且模块里的 magpie-tile.apk 或 app_process 不可用）'
+  fi
+}
+
+# 下载前先说清楚是「没有下载器」还是「网络问题」，两者的处理完全不同。
+need_downloader() {
+  pick_downloader && return 0
+  say "✗ 没有能校验证书的 HTTPS 下载器"
+  say "  · 重刷完整的模块 zip（里面的 magpie-tile.apk 提供下载能力，不必安装它）"
+  say "  · 或装一个 curl（如 Termux），再用 MAGPIE_DL=/绝对路径/curl 指定"
+  return 1
+}
+
+# 下载大文件时每 10 秒报一次进度：Magisk 的文本框几分钟没输出，用户会以为卡死而退出。
+progress_start() {
+  _pg_file=$1; _pg_total=$2
+  PROGRESS_PID=''
+  [ -n "$_pg_total" ] && [ "$_pg_total" -gt 4194304 ] 2>/dev/null || return 0
+  (
+    trap 'exit 0' TERM
+    while sleep 10; do
+      _pg_now=$(stat -c %s "$_pg_file" 2>/dev/null) || _pg_now=0
+      say "  … 已下载 $(human_size "$_pg_now") / $(human_size "$_pg_total")（$((_pg_now * 100 / _pg_total))%）"
+    done
+  ) &
+  PROGRESS_PID=$!
+}
+progress_stop() {
+  [ -n "${PROGRESS_PID:-}" ] || return 0
+  kill "$PROGRESS_PID" 2>/dev/null
+  wait "$PROGRESS_PID" 2>/dev/null
+  PROGRESS_PID=''
 }
 
 fetch_manifest() {
@@ -308,7 +365,7 @@ check_space() {
   [ -n "$_need" ] || _need=104857600
   # 同时要放临时文件和备份，按两倍再加 50MB 余量
   _want=$((_need * 2 + 52428800))
-  _free=$(df -k "$magpie_path" 2>/dev/null | tail -1 | awk '{print $4}')
+  _free=$(df -Pk "$magpie_path" 2>/dev/null | tail -1 | awk '{print $4}')
   case "$_free" in
     ''|*[!0-9]*) return 0 ;;   # 取不到就不拦
   esac
@@ -358,6 +415,7 @@ stop_download() {
 }
 
 cleanup_install() {
+  progress_stop
   stop_download
   clear_manifest_tmp
   finish_swap || :
@@ -387,10 +445,13 @@ download_verified() {
       say "  下载 $_u"
       say "  （约 $(human_size "$_want_size")，视网络可能要几分钟）"
       rm -f "$_tmp" 2>/dev/null
+      progress_start "$_tmp" "$_want_size"
       if ! dl_fetch "$_u" "$_tmp" "$_want_size"; then
+        progress_stop
         warn "下载失败，换下一个来源"
         continue
       fi
+      progress_stop
       [ -s "$_tmp" ] || { warn "下到空文件"; continue; }
 
       if [ -n "$_want_size" ]; then
@@ -546,6 +607,7 @@ cmd_status() {
 
 cmd_check() {
   check_arch || die "本模块只支持 arm64 设备（当前 $(uname -m)）"
+  need_downloader || exit 1
   say "查询 $MANIFEST_URL ..."
   load_manifest || die "取不到更新清单或清单不符合 HTTPS/元数据要求"
   _ver=$M_VER; _size=$M_SIZE; _pub=$M_PUB
@@ -620,6 +682,7 @@ load_manifest() {
 
 cmd_plan() {
   check_arch || { say "✗ 本模块只支持 arm64 设备（当前 $(uname -m)）"; return 1; }
+  need_downloader || return 1
   if ! load_manifest; then
     say "✗ 取不到更新清单（$MANIFEST_URL）——检查网络后重试"
     return 1
@@ -681,6 +744,11 @@ cmd_install() {
 
   mkdir -p "$magpie_path" 2>/dev/null
   acquire_lock
+  need_downloader || { release_lock; exit 1; }
+  # 持锁说明没有别的安装器在跑：回收上次被强杀留下的半截下载（每份约 100 MB）。
+  for _old in "$BIN_DIR"/.magpie.new.*; do
+    [ -f "$_old" ] && [ ! -L "$_old" ] && rm -f "$_old" 2>/dev/null && say "  已清理上次中断留下的临时文件 ${_old##*/}"
+  done
 
   say "取更新清单 ..."
   if ! load_manifest; then

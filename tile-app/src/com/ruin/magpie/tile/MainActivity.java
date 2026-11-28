@@ -267,8 +267,8 @@ public class MainActivity extends Activity {
     private void requestRoot() {
         grant.setEnabled(false);
         grant.setText("…");
-        // 只是触发一次授权：真正要的是 su 弹窗，命令本身无所谓
-        Shell.run("id -u", new Shell.Callback<Shell.Result>() {
+        // 只是触发一次授权：真正要的是 su 弹窗。单独的路径给用户足够时间点「允许」。
+        Shell.grant(new Shell.Callback<Shell.Result>() {
             @Override
             public void onResult(Shell.Result r) {
                 if (isFinishing() || isDestroyed()) return;

@@ -187,7 +187,7 @@ fi
 if [ -z "$_who" ] && [ "$(settings get global cached_apps_freezer 2>/dev/null)" = "enabled" ]; then
   _who=system
 fi
-if [ -z "$_who" ] && service check greezer 2>/dev/null | grep -q found; then
+if [ -z "$_who" ] && service check greezer 2>/dev/null | grep -q ': found$'; then
   _who=greezer
 fi
 echo "freezer=$_who"

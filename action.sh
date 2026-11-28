@@ -61,7 +61,12 @@ fi
 
 CONF="${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}"
 [ -f "$CONF" ] || CONF="$MODDIR/scripts/magpie.config"
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
+  echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
+else
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+fi
 
 # 与 magpie.service 保持一致
 magpie_path=${magpie_path:-/data/adb/magpie}
@@ -207,9 +212,11 @@ write_conf_host() {
   [ -s "$_tmp" ] || { rm -f "$_tmp"; echo "写配置失败：sed 没有产出内容"; return 1; }
   grep -q '^MAGPIE_ADDR=' "$_tmp"     || printf 'MAGPIE_ADDR="%s:%s"\n' "$_h" "$API_PORT" >> "$_tmp"
   grep -q '^MAGPIE_WEB_ADDR=' "$_tmp" || printf 'MAGPIE_WEB_ADDR="127.0.0.1:%s"\n' "$WEB_PORT" >> "$_tmp"
-  # cat 覆盖而不是 mv：保留原文件的 inode 与权限
-  cat "$_tmp" > "$_f" || { rm -f "$_tmp"; echo "写配置失败：无法写入 $_f"; return 1; }
-  rm -f "$_tmp"
+  # 原子替换：中途断电或被杀也不会留下半份配置。配置由 root 拥有、权限 600，
+  # 先给临时文件同样权限再 mv，不丢权限。
+  chmod 600 "$_tmp" 2>/dev/null
+  sh -n "$_tmp" 2>/dev/null || { rm -f "$_tmp"; echo "写配置失败：生成的配置语法不对，原文件未改"; return 1; }
+  mv -f "$_tmp" "$_f" || { rm -f "$_tmp"; echo "写配置失败：无法写入 $_f"; return 1; }
   MAGPIE_ADDR="$_h:$API_PORT"
   WEB_ADDR="127.0.0.1:$WEB_PORT"
   return 0
@@ -356,7 +363,8 @@ start_keys() {
   done
   KEYLOG="$magpie_path/run/magpie-keys.$$"
   : > "$KEYLOG" 2>/dev/null || return 1
-  getevent -lq > "$KEYLOG" 2>/dev/null &
+  # >> 以 O_APPEND 打开：read_key 截断日志后写入位置回到开头，不会留空洞。
+  getevent -lq >> "$KEYLOG" 2>/dev/null &
   KEYPID=$!
   KEYN=0
   # getevent 立刻退出（没有权限、设备不支持）时不要傻等 60 秒
@@ -390,6 +398,11 @@ read_key() {
   while :; do
     _tot=$(wc -l < "$KEYLOG" 2>/dev/null | tr -d ' ')
     [ -n "$_tot" ] || _tot=0
+    # getevent 记录所有输入设备，触摸滑动一次就是几 KB；已处理的部分定期清掉，
+    # 否则每 0.1 秒一次的 wc 会随菜单停留时间越跑越慢。
+    if [ "$_tot" -le "$KEYN" ] && [ "$KEYN" -gt 2000 ]; then
+      : > "$KEYLOG" 2>/dev/null && KEYN=0
+    fi
     if [ "$_tot" -gt "$KEYN" ]; then
       _new=$(tail -n +"$((KEYN + 1))" "$KEYLOG" 2>/dev/null)
       KEYN="$_tot"
@@ -522,7 +535,7 @@ run_item() {
 # Magisk 跑完 action.sh 不会自己关掉那个文本框，页面就停在那儿。
 # 主动按一次返回键把浮层关掉，就回到模块列表了。
 # 只在「确实是在模块管理器里跑」时才按：终端、adb、别的 App 里跑绝不动手。
-MGR_PKGS="com.topjohnwu.magisk me.weishu.kernelsu me.bmax.apatch com.dergoogler.mmrl com.fox2code.mmm"
+MGR_PKGS="com.topjohnwu.magisk me.weishu.kernelsu me.bmax.apatch com.dergoogler.mmrl com.fox2code.mmm com.rifsxd.ksunext com.sukisu.ultra"
 
 is_mgr_pkg() {
   for _m in $MGR_PKGS; do
@@ -608,7 +621,10 @@ menu() {
     legacy_toggle
     exit $?
   fi
-  trap 'stop_keys; restore_vol' EXIT INT TERM HUP
+  # 信号处理必须退出：只清理不退出时脚本会接着空转到 60 秒超时。
+  trap 'stop_keys; restore_vol' EXIT
+  trap 'stop_keys; restore_vol; exit 130' INT
+  trap 'stop_keys; restore_vol; exit 143' TERM HUP
 
   while :; do
     # 终端里每次原地重画（箭头移动）；Magisk 文本框里只在开头和动作之后整屏画
@@ -623,6 +639,15 @@ menu() {
         [ -z "$UI_TTY" ] && show_sel
         ;;
       up)
+        # 用户按返回离开了管理器、去别的 App 调音量时，不能把那一下当成「执行」。
+        # 终端模式和读不出前台包名（Magisk 被随机包名隐藏等）时不拦。
+        if [ -z "$UI_TTY" ]; then
+          _fg=$(fg_pkg)
+          if [ -n "$_fg" ] && ! is_mgr_pkg "$_fg"; then
+            echo; echo "管理器已不在前台，菜单已退出（没有执行任何动作）。"
+            break
+          fi
+        fi
         UI_DRAWN=""        # 动作的输出要看得见，之后整屏重画一次
         if ! run_item "$SEL"; then break; fi
         ;;

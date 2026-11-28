@@ -1,5 +1,66 @@
 # 变更记录
 
+## v1.3.0 — 2026-11-28
+
+模块 versionCode **1110**；磁贴 App **1.3.0 / versionCode 14**。
+
+### 安装与下载
+
+- **没有 curl 的设备也能装本体**。原版 Android 不带 curl，以前 `[执行]` 首次安装必然失败，还被误报成「检查网络」。现在没有 curl 时，安装器用 `app_process` 直接运行模块里磁贴 APK 中的 `Fetch` 类，走系统 Java TLS（Conscrypt + 系统 CA）下载；不需要安装磁贴 App。约束与 curl 一致：只允许 HTTPS、跳转也必须是 HTTPS（最多 5 次）、URL 不带凭据、有大小上限和停滞/总时限。sha256 校验不变。BusyBox wget 仍不在候选里：Magisk 自带的那份实测不校验证书。
+- 「没有下载器」和「网络不通」分开报告，并给出具体处理办法。
+- 下载 100 MB 本体时每 10 秒打印进度，避免用户以为卡死而强退。
+- 安装前回收上次被强杀留下的半截下载（每份约 100 MB）。
+
+### 稳定性
+
+- **配置文件有语法错误时不再让服务静默死掉**。BusyBox ash 遇到 source 的语法错误会让整个脚本退出（mksh 则继续），开机自启与看门狗都会无声失败。所有入口先 `sh -n` 检查，不通过就按默认值（仅本机）运行，并在日志、`doctor.sh`、管理器描述与 WebUI 中点名原因。
+- 网关与面板配置成同一个端口时拒绝启动并说明原因（以前会被看门狗每 30 秒重拉一次）。
+- 看门狗识别「拉起后很快退出」的崩溃循环，按失败退避，不再每轮重启 100 MB 的本体。
+- 修复局域网地址 A→B→A 变化时管理器描述停在 B 的问题。
+- 运行中的 `magpie.log` 也会轮转（copytruncate，5 MB），不再只在启动前轮转。
+- 启动失败时只在本次新写入的日志里找「端口被占用」，旧报错不再误导诊断。
+- 看门狗定期把被改掉的 `oom_score_adj` 改回 -1000（以前只在启动时设一次）。
+- `module.prop` 改用带 PID 的临时文件，并发刷新不会互相覆盖。
+- `[执行]` 菜单收到中断信号后立即退出，不再空转到 60 秒超时；切换网关时原子写入配置；离开管理器后按音量键不会误触发菜单动作；按键日志定期截断。
+- 卸载在停服失败时也清理指向模块的 `magpie` 命令链接（管理器不看退出码，照样删模块目录）；只删指向本模块的软链接。
+
+### 安全
+
+- 服务脚本 `umask 077`，开机时把 `/data/adb/magpie` 及 `run/ data/ scripts/` 收紧为 700、日志与锁为 600（以前继承 umask 0000，日志 666、目录 777）。
+- 仓库里删掉旧版留下的含明文密钥的 `webroot/status.json`（已被 .gitignore 忽略、从未打包，其中的密钥与当前设备不一致）。
+
+### 兼容性
+
+- 新增 `system/bin/magpie`：Magisk 下 `su -c magpie …` 以前找不到命令（su 的 PATH 不含 `/data/adb/magisk`）。
+- 修复磁贴自查在非小米机型上误报「疑似 HyperOS greezer」。
+- 补充 KernelSU Next、SukiSU Ultra 的管理器包名（用于 `[执行]` 收尾关窗）。
+- doctor：首次安装后、首次启动前不再误报数据目录不可写；兼容新版 BusyBox `nslookup` 的 `Address:` 格式；`gateway-key list` 加 15 秒超时。
+
+### 磁贴 App
+
+- 「授权 root」单独一条路径，每个 su 候选给 60 秒等用户点允许；以前 5 秒没点完就换候选，会连续弹多次授权框。
+- 业务命令正常的非零退出（如 `toggle-if` 返回 stale）不再清掉 su 缓存。
+- root 侧命令包一层 `timeout 18`，客户端超时后后台启停不会继续跑很久。
+- `resources.arsc` 不再压缩（targetSdk ≥ 30 在 AOSP 上会因此拒装）；d8 使用 `--release`；dex 自检按完整类描述符匹配。
+
+### 性能
+
+- `lan_ip` 只调用一次 `ip`，看门狗每轮只枚举一次进程。
+- 版本号按本体 inode/大小/mtime 缓存，面板刷新不再每 2.5 分钟执行一次本体 `--version`。
+- 磁贴版本查询改用 `pm list packages --show-versioncode`（约 30 ms，原 `pm dump` 约 1 秒）。
+- WebUI 页面不可见时不轮询，请求不叠加。
+
+### 构建与发布
+
+- `build.sh` 没有签名密钥时使用现成的 `magpie-tile.apk`（与 .gitignore 的说明一致）。
+- CI 固定 `ubuntu-24.04` 并加 30 分钟超时；发版等待 main CI 从 2 分钟延长到 15 分钟（plan/finalize job 超时相应放宽）。
+- `webroot/index.html` 打包权限改为 0644。
+
+### 测试
+
+- 当前套件：740 条断言（80 + 17 + 56 + 190 + 275 + 122），另有 446 条 JVM 用例（新增 `FetchTest` 12：本地 HTTPS + 一次性证书，覆盖拒绝不受信证书、拒绝明文与降级跳转、跳转上限、大小上限）及 106 个 Python unittest。
+- 真机（Android 14 / HyperOS / Magisk）实测：无 curl 时经 Java TLS 完整下载并校验 101 MB 本体；自签、过期、主机名不符的证书均被拒绝；坏配置在 mksh 与 BusyBox ash 下都不再中断控制器。
+
 ## v1.2.7 — 2026-11-26
 
 模块 versionCode **1109**；磁贴 App **1.2.8 / versionCode 13**。

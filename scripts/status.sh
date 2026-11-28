@@ -29,7 +29,13 @@ magpie_path=/data/adb/magpie
 MAGPIE_ADDR="127.0.0.1:3425"
 # 环境变量优先于配置文件，方便临时试：MAGPIE_ICON=0 sh status.sh -q
 _ENV_ICON="${MAGPIE_ICON-}"
-[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+# 语法错误的配置不 source：BusyBox ash 会因此整个退出（见 lib.sh magpie_conf_syntax_ok）
+if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
+  echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
+  MAGPIE_CONF_ERROR="配置文件有语法错误（$CONF），已按默认值运行"
+else
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+fi
 [ -n "$_ENV_ICON" ] && MAGPIE_ICON="$_ENV_ICON"
 
 # 局域网地址、进程识别、地址解析，和 magpie.service / action.sh / doctor.sh 共用。
@@ -60,6 +66,10 @@ WEB_PORT=$(addr_port "$WEB_ADDR" 2>/dev/null)
 [ -n "$WEB_PORT" ] || WEB_PORT=""
 
 CONFIG_ERROR=""
+if [ -n "${MAGPIE_CONF_ERROR:-}" ]; then
+  # 按默认值运行仍是可用状态，不清空地址；只把原因带到面板和描述里。
+  CONFIG_WARNING=$MAGPIE_CONF_ERROR
+fi
 if [ -z "$PORT" ]; then
   CONFIG_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用，应写成 主机:端口（1-65535，IPv6 用 [::1]:3425）"
 elif [ -z "$WEB_PORT" ]; then
@@ -97,6 +107,8 @@ desc_line() {
     fi
     return 0
   fi
+  _cw=""
+  [ -z "${CONFIG_WARNING:-}" ] || _cw=" | 配置语法错误，已用默认值"
   if [ "$RUNNING" = "1" ]; then
     if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then
       _where="配置：仅本机"
@@ -104,15 +116,15 @@ desc_line() {
       if [ -n "$LAN_IP" ]; then _where="配置候选：$LAN_IP:$PORT"; else _where="无局域网地址"; fi
     fi
     if [ "$ICON_ON" = "0" ]; then
-      echo "[运行中] ${_v:+$_v }| $_where"
+      echo "[运行中] ${_v:+$_v }| $_where$_cw"
     else
-      echo "🟢 运行中${_v:+ $_v} | $_where"
+      echo "🟢 运行中${_v:+ $_v} | $_where$_cw"
     fi
   else
     if [ "$ICON_ON" = "0" ]; then
-      echo "[已停止] 点 [执行] 启动"
+      echo "[已停止] 点 [执行] 启动$_cw"
     else
-      echo "🔴 已停止 | 点 [执行] 启动"
+      echo "🔴 已停止 | 点 [执行] 启动$_cw"
     fi
   fi
 }
@@ -126,8 +138,26 @@ fi
 
 # 版本取二进制自身（它自带更新，会跟着变）。
 # 必须给 HOME，否则 magpie 会往只读的 /.config 写配置。
-VERSION=$(HOME="$magpie_path/data" "$magpie_path/bin/magpie" --version 2>/dev/null \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+# 看门狗每 2.5 分钟刷一次面板；每次都跑一遍约 100 MB 的 Go 本体只为拿版本号太浪费。
+# 按本体的 inode/大小/mtime 缓存：magpie update 或重装会换掉文件，缓存随之失效。
+_ver_bin="$magpie_path/bin/magpie"
+_ver_cache="$magpie_path/run/.version"
+_ver_key=$(stat -c '%i:%s:%Y' "$_ver_bin" 2>/dev/null)
+VERSION=""
+if [ -n "$_ver_key" ] && [ -f "$_ver_cache" ] && [ ! -L "$_ver_cache" ]; then
+  IFS=' ' read -r _vk _vv < "$_ver_cache" 2>/dev/null
+  [ "$_vk" = "$_ver_key" ] && VERSION=$_vv
+fi
+if [ -z "$VERSION" ]; then
+  VERSION=$(HOME="$magpie_path/data" "$_ver_bin" --version 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  if [ -n "$VERSION" ] && [ -n "$_ver_key" ] && [ -d "$magpie_path/run" ] && [ ! -L "$_ver_cache" ]; then
+    if ! { printf '%s %s\n' "$_ver_key" "$VERSION" > "$_ver_cache.$$" &&
+           mv -f "$_ver_cache.$$" "$_ver_cache"; } 2>/dev/null; then
+      rm -f "$_ver_cache.$$" 2>/dev/null
+    fi
+  fi
+fi
 [ -n "$VERSION" ] || VERSION="未知"
 
 BIN_BYTES=$(stat -c %s "$magpie_path/bin/magpie" 2>/dev/null)
@@ -223,6 +253,7 @@ cat <<EOF | write_atomic "$MODDIR/webroot/status.json" 600
   "lanApiUrl": "$(json_str "$lan_api")",
   "lanWebUrl": "$(json_str "$lan_web")",
   "configError": "$(json_str "$CONFIG_ERROR")",
+  "configWarning": "$(json_str "${CONFIG_WARNING:-}")",
   "updated": "$(date +'%H:%M:%S')"
 }
 EOF
@@ -261,12 +292,13 @@ if [ -f "$MODDIR/module.prop" ]; then
   _cur=$(sed -n 's/^description=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)
   if [ "$_cur" != "$MG_DESC" ]; then
     if sed "s#^description=.*#description=$MG_DESC#" "$MODDIR/module.prop" \
-         > "$MODDIR/.module.prop.new" 2>/dev/null \
-       && [ -s "$MODDIR/.module.prop.new" ]; then
-      mv -f "$MODDIR/.module.prop.new" "$MODDIR/module.prop" 2>/dev/null
+         > "$MODDIR/.module.prop.new.$$" 2>/dev/null \
+       && [ -s "$MODDIR/.module.prop.new.$$" ]; then
+      chmod 644 "$MODDIR/.module.prop.new.$$" 2>/dev/null
+      mv -f "$MODDIR/.module.prop.new.$$" "$MODDIR/module.prop" 2>/dev/null
       chmod 644 "$MODDIR/module.prop" 2>/dev/null
     else
-      rm -f "$MODDIR/.module.prop.new" 2>/dev/null
+      rm -f "$MODDIR/.module.prop.new.$$" 2>/dev/null
     fi
   fi
 fi

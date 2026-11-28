@@ -84,11 +84,12 @@ to see the state and clean up after itself.
 | Volume-key menu | Tapping `[Action]` opens a menu: switch gateway, see addresses, start/stop/restart, open the panel — pick with the volume keys, no typing |
 | Live status | The module row shows state and the address to use ([example](#the-action-button)) without tapping anything |
 | Self-check | `scripts/doctor.sh` runs ten checks and tells you what to fix |
-| CLI | `magpie` lands on `PATH` with `HOME`, `SSL_CERT_FILE` and `MAGPIE_BUN` filled in, and says so when DNS is not set up |
+| CLI | `magpie` is mounted into `/system/bin` (so `su -c magpie …` works under every root solution) with `HOME`, `SSL_CERT_FILE` and `MAGPIE_BUN` filled in, and says so when DNS is not set up |
 | Upstream DNS | Ships `system/etc/resolv.conf`, rewritten from `MAGPIE_DNS`; no dnsmasq, no port 53 |
 | Quick Settings tile | Optional ~50 KB companion app that puts start/stop in the pull-down panel; everything works without it |
 | CA bundle | Merges system roots for the Go static PIE, rebuilds when system CAs change |
-| Log rotation | Rotates to `.1` past 5 MB, keeps one generation |
+| Log rotation | Rotates to `.1` past 5 MB, keeps one generation; also while the service runs |
+| Config safety | A config with a shell syntax error falls back to defaults (local only) and is reported in logs, doctor and the module row instead of silently killing the service |
 | Online update | The manager can pull new versions directly |
 | Installs the body | No body yet? Tapping `[Action]` downloads and installs it: sha256 checked, atomic replace, no debris left on failure |
 | Clean uninstall | Stops the service, kills the watchdog, removes `PATH` links and verifies; the data dir is **kept by default** so providers and keys are never wiped by accident |
@@ -240,7 +241,7 @@ su -c magpie update         # download, verify, restart into it
 > terminal, so `customize.sh` only detects and tells you how; the download happens when you confirm it.
 
 > [!NOTE]
-> The body installer requires curl with certificate verification and HTTPS redirect restrictions. When the manager's PATH lacks curl, set `MAGPIE_DL` to the absolute path of a **trusted Android-compatible curl**. A trusted PEM can be selected via `MAGPIE_TLS_CA_BUNDLE`. There is no fallback to BusyBox wget with weaker TLS checks. An already installed body and routine service control do not require this downloader.
+> The body installer only uses downloaders that verify certificates and keep redirects on HTTPS: `curl` on `PATH` (or the absolute path in `MAGPIE_DL`) first; without curl (stock Android has none) it uses the system Java TLS stack — `app_process` runs a downloader class straight from the bundled tile APK, **no app install needed**, certificates checked against system CAs. `MAGPIE_TLS_CA_BUNDLE` applies to curl only. There is no fallback to BusyBox wget: Magisk's build does not verify certificates. An already installed body and routine service control do not require this downloader.
 
 > [!TIP]
 > To use another source (an internal mirror, a cache):
@@ -555,7 +556,7 @@ These are usually set inline for a single run:
 | `MAGPIE_CONF` | empty | Explicit config file, for diagnostics and tests |
 | `MAGPIE_MANIFEST_URL` | `https://usemagpie.ai/api/latest` | Binary update manifest; point it at your mirror |
 | `MAGPIE_ASSET_KEY` | `magpie-cli-android-arm64` | Which asset to take from the manifest |
-| `MAGPIE_DL` | `curl` found on `PATH` | Absolute path to a trusted curl |
+| `MAGPIE_DL` | `curl` on `PATH`, else system Java TLS | Absolute path to a trusted curl |
 | `MAGPIE_TLS_CA_BUNDLE` | empty | Extra PEM bundle to trust for downloads |
 | `MAGPIE_CONFIRM_WINDOW` | `600` | Confirmation window between the two `[Action]` taps, in seconds |
 
@@ -637,6 +638,8 @@ the script then names the likely freezer (NoActive / CZero / system
 | Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/10]` in doctor |
 | Process returns after being killed | The watchdog revives unexpected exits. Stop through the menu, tile or `magpie.service stop` instead; `.user_stopped` prevents watchdog restarts during this boot |
 | Edited `magpie.config` but nothing changed | Make sure you edited `/data/adb/magpie/scripts/magpie.config`, then `restart` |
+| Doctor says the config has a syntax error | Usually an unbalanced quote. `sh -n /data/adb/magpie/scripts/magpie.config` points at the line; until fixed the service runs on defaults (local only) |
+| Installer says there is no certificate-verifying HTTPS downloader | The module zip is incomplete (no `magpie-tile.apk`) or `app_process` is missing. Reflash the full zip, or install curl and set `MAGPIE_DL` |
 | No start on boot | Confirm the module is enabled; read startup errors in `run/watchdog.log` and run `doctor.sh`. A boot-ID marker from the previous boot does not block startup. An unversioned legacy marker is conservative and can be cleared by explicit `start`. |
 
 More detail in [CHANGELOG.md](CHANGELOG.md).
@@ -711,6 +714,7 @@ magpie-magisk/
 ├── service.sh                        boot start + watchdog
 ├── action.sh                         the manager's [Action] button
 ├── uninstall.sh                      cleanup on removal
+├── system/bin/magpie                 command entry, mounted into /system/bin (hands off to scripts/magpie-cli.sh)
 ├── system/etc/resolv.conf            DNS overlay: upstream for the Go static PIE (from MAGPIE_DNS)
 ├── update.json                       manifest for online updates
 ├── build.sh                          build the flashable zip
@@ -867,15 +871,15 @@ in temp directories. To run a single suite:
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
 (cd /tmp/fx && python3 -m http.server 8899) &   # serve them
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 77 assertions
-sh tests/test-watchdog.sh                                 # watchdog, 15 assertions
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 80 assertions
+sh tests/test-watchdog.sh                                 # watchdog, 17 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 56 assertions
-sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 182 assertions
+sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 190 assertions
 sh tests/test-lib.sh                                      # pure helpers and process identity: 275 assertions
 sh tests/test-tile-check.sh                               # self-check data, unknown results and large dumps: 122 assertions
 ```
 
-727 assertions total (77 + 15 + 56 + 182 + 275 + 122), plus 434 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions). Tests use temp
+740 assertions total (80 + 17 + 56 + 190 + 275 + 122), plus 446 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions, 12 HTTPS downloader). Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the

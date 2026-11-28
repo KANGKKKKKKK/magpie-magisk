@@ -23,7 +23,7 @@ command -v magpie_resolve_conf >/dev/null 2>&1 || magpie_resolve_conf() { return
 
 magpie_path=/data/adb/magpie
 _CONF=$(magpie_resolve_conf "$_SD/.." 2>/dev/null)
-[ -n "$_CONF" ] && . "$_CONF" 2>/dev/null
+[ -n "$_CONF" ] && sh -n "$_CONF" >/dev/null 2>&1 && . "$_CONF" 2>/dev/null
 [ -n "${magpie_path:-}" ] || magpie_path=/data/adb/magpie
 
 MAGPIE_DATA="$magpie_path/data"
@@ -71,7 +71,7 @@ done
 if [ -z "${_CONF:-}" ]; then
   _mp_conf="/data/adb/magpie/scripts/magpie.config"
   # shellcheck disable=SC1090
-  [ -f "$_mp_conf" ] && . "$_mp_conf" 2>/dev/null
+  [ -f "$_mp_conf" ] && sh -n "$_mp_conf" >/dev/null 2>&1 && . "$_mp_conf" 2>/dev/null
 fi
 export RES_OPTIONS="${RES_OPTIONS:-timeout:2 attempts:2}"
 if [ ! -r /etc/resolv.conf ]; then

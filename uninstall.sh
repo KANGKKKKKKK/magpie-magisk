@@ -8,7 +8,7 @@ MODDIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || exit 1
 command -v magpie_resolve_conf >/dev/null 2>&1 || magpie_resolve_conf() { return 1; }
 magpie_path=/data/adb/magpie
 _CONF=$(magpie_resolve_conf "$MODDIR" 2>/dev/null)
-[ -n "$_CONF" ] && . "$_CONF" 2>/dev/null
+[ -n "$_CONF" ] && sh -n "$_CONF" >/dev/null 2>&1 && . "$_CONF" 2>/dev/null
 DATA=${magpie_path:-/data/adb/magpie}
 
 if ! command -v magpie_path_in_module_tree >/dev/null 2>&1; then
@@ -21,6 +21,19 @@ if [ -d "$DATA" ] && magpie_path_in_module_tree "$DATA" "$MODDIR"; then
   echo "! 用户数据位于可被管理器删除的模块目录：$DATA"
   echo "! 不能保证数据保留；请在移除模块前备份并迁移至 /data/adb/magpie。"
 fi
+
+# 管理器不看本脚本的退出码，失败后照样删掉模块目录。所以无论成败都要清掉
+# 指向模块的 PATH 链接（否则留下一个指向已删除脚本的 magpie 命令）。
+# 只删指向本模块的软链接，不碰同名的其它文件。
+remove_cli_links() {
+  for _p in /data/adb/ksu/bin /data/adb/magisk /data/adb/ap/bin; do
+    [ -L "$_p/magpie" ] || continue
+    case "$(readlink "$_p/magpie" 2>/dev/null)" in
+      "$MODDIR"/*|*/modules/magpie/*) rm -f "$_p/magpie" 2>/dev/null && echo "- 已移除 $_p/magpie" ;;
+    esac
+  done
+}
+trap remove_cli_links EXIT
 
 # 先立标记，service.sh 看门狗和 magpie.service 的新 start 都会拒绝恢复。
 : > "$MODDIR/.uninstalling" 2>/dev/null || { echo "! 无法创建卸载维护标记，停止卸载"; exit 1; }
@@ -106,10 +119,7 @@ fi
 
 echo "- Magpie 服务已停止"
 
-# 5) 清掉装进 PATH 的 magpie 命令
-for _p in /data/adb/ksu/bin /data/adb/magisk /data/adb/ap/bin; do
-  [ -L "$_p/magpie" ] && rm -f "$_p/magpie" 2>/dev/null && echo "- 已移除 $_p/magpie"
-done
+# 5) PATH 里的 magpie 命令由 EXIT trap（remove_cli_links）清理
 
 # 6) 用户数据默认保留。包括上游本体、配置、供应商、网关 key、用量记录、证书和日志。
 if [ -d "$DATA" ]; then

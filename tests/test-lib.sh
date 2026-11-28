@@ -243,7 +243,7 @@ echo "== 13 磁贴 App 的版本比较"
 _ta=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/ta-$$")
 mkdir -p "$_ta/bin"
 cp "$HERE/../scripts/tile-app.sh" "$_ta/"
-printf '#!/bin/sh\ncase "$1" in\n  dump) [ -n "${FAKE_CODE:-}" ] && echo "    versionCode=${FAKE_CODE}" ;;\n  install) echo Success ;;\n  uninstall) echo Success ;;\nesac\n' > "$_ta/bin/pm"
+printf '#!/bin/sh\ncase "$1" in\n  list) [ -n "${FAKE_CODE:-}" ] && echo "package:com.ruin.magpie.tile versionCode:${FAKE_CODE}" ;;\n  install) echo Success ;;\n  uninstall) echo Success ;;\nesac\n' > "$_ta/bin/pm"
 chmod 755 "$_ta/bin/pm"
 echo 2 > "$_ta/tile-version"
 : > "$_ta/magpie-tile.apk"
