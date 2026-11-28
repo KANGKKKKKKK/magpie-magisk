@@ -51,43 +51,50 @@ magpie_flock() {
 # 取主机部分，不校验；IPv6 会去掉方括号（返回 ::1 而不是 [::1]）
 addr_host() {
   case "$1" in
-    \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;;
-    \[*\])   _h=${1#\[}; echo "${_h%\]}" ;;
-    *:*)     echo "${1%:*}" ;;
-    *)       echo "$1" ;;
+    \[*\]:*) _h=${1#\[}; _h=${_h%%\]:*} ;;
+    \[*\])   _h=${1#\[}; _h=${_h%\]} ;;
+    *:*:*)   _h=$1 ;;    # 裸 IPv6 保留原文，不把末段当成端口
+    *:*)     _h=${1%:*} ;;
+    *)       _h=$1 ;;
   esac
+  printf '%s\n' "$_h"
 }
 
-# 取端口；不是 1..65535 的纯数字时返回 1，不打印任何东西。
+# 取端口；地址结构不对或端口不是 1..65535 的纯数字时返回 1，不打印任何东西。
 # 调用方必须按失败处理：静默退回默认端口会把配置错误藏起来，
 # 拼出 "http://127.0.0.1:0.0.0.0/v1" 这种链接、写出非法 JSON。
-addr_port() {
+addr_port() (
   case "$1" in
-    \[*\]:*) _p=${1##*\]:} ;;
-    \[*\])   return 1 ;;
-    *:*)     _p=${1##*:} ;;
-    *)       return 1 ;;
+    \[*\]:*)
+      _ph=${1#\[}; _ph=${_ph%%\]:*}; _p=${1#*\]:}
+      # 监听地址可带 %wlan0 等 zone；只把地址本体交给 DNS 共用的 IPv6 校验器。
+      case "$_ph" in *%*) case "${_ph#*%}" in ''|*[!a-zA-Z0-9_.-]*) return 1 ;; esac ;; esac
+      is_ipv6_addr "${_ph%%\%*}" || return 1 ;;
+    *:*:*|*\[*|*\]*|*[[:space:]]*) return 1 ;;
+    *:*) _p=${1#*:} ;;   # 未加括号时只有一个冒号；保留 hostname 及空主机
+    *)   return 1 ;;
   esac
   case "$_p" in ''|*[!0-9]*) return 1 ;; esac
   case "$_p" in 0*) return 1 ;; esac          # 端口 0、前导零都当非法
   [ "${#_p}" -le 5 ] || return 1
   [ "$_p" -le 65535 ] || return 1
   echo "$_p"
-}
+)
 
 # 回环地址？认 127/8、localhost、::1（含方括号与完整写法）。
 # 空主机（":3425"）表示监听全部网卡，不算回环。
-is_loopback_host() {
-  # IPv6 的十六进制位大小写不敏感：::FFFF:127.0.0.1 与 ::ffff:127.0.0.1 是同一个地址。
-  # 以前只匹配小写，大写写法会被判成「已开放局域网」—— 安全边界说反了。
-  _h=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+is_loopback_host() (
+  _h=$1
+  case "$_h" in \[*:*\]) _h=${_h#\[}; _h=${_h%\]} ;; esac
   case "$_h" in
-    127.*|localhost|::1|\[::1\]|0:0:0:0:0:0:0:1) return 0 ;;
-    # IPv4-mapped：::ffff:127.x 仍然是回环
-    ::ffff:127.*|\[::ffff:127.*\]) return 0 ;;
+    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    ::[fF][fF][fF][fF]:127.*) _h=${_h#::????:} ;;
+    127.*) ;;
+    *) return 1 ;;
   esac
-  return 1
-}
+  # 127.example 也可能是主机名；点分写法（含 IPv4-mapped）必须完整落在 127/8。
+  is_ipv4_addr "$_h"
+)
 
 # ---------- 路径 ----------
 
@@ -470,7 +477,7 @@ magpie_listener_report() (
 is_ipv4_addr() {
   _ip=$1
   _n=0
-  while [ -n "$_ip" ]; do
+  while :; do
     _oct=${_ip%%.*}
     case "$_oct" in
       ''|*[!0-9]*) return 1 ;;
@@ -481,8 +488,8 @@ is_ipv4_addr() {
     _n=$((_n + 1))
     [ "$_n" -le 4 ] || return 1
     case "$_ip" in
-      *.*) _ip=${_ip#*.} ;;
-      *)   _ip="" ;;
+      *.*) _ip=${_ip#*.} ;;  # 末尾的点也会产生待校验的空段
+      *)   break ;;
     esac
   done
   [ "$_n" -eq 4 ]
@@ -498,47 +505,30 @@ _is_hex4() {
 # 不认 zone id（fe80::1%wlan0）——resolv.conf 里写这个没有意义。
 is_ipv6_addr() {
   _v=$1
+  [ "${#_v}" -le 45 ] || return 1   # 六组 ffff 加点分 IPv4 是最长写法
   case "$_v" in
-    ''|*%*|*:::*|*[!0-9a-fA-F:.]*) return 1 ;;
+    :|*:::*|:[!:]*|*[!:]:|*[!0-9a-fA-F:.]*) return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
   esac
-  case "$_v" in *:*) ;; *) return 1 ;; esac
   case "$_v" in
     *::*) case "${_v#*::}" in *::*) return 1 ;; esac ;;
   esac
 
-  _c=0; _r=$_v
+  _g=0; _r=$_v
   while [ -n "$_r" ]; do
-    case "$_r" in :*) _c=$((_c + 1)) ;; esac
-    _r=${_r#?}
-  done
-
-  # "::" 至少吃掉一段，所以显式段数必须 ≤7；没有 "::" 时必须正好 8 段
-  _g=$((_c + 1))
-  case "$_v" in
-    *::*) _g=$((_g - 2)); [ "$_g" -le 7 ] || return 1 ;;
-    *)    [ "$_g" -eq 8 ] || return 1 ;;
-  esac
-  [ "$_g" -ge 0 ] || return 1
-
-  _r=$_v
-  while :; do
-    case "$_r" in
-      *:*) _t=${_r%%:*}; _r=${_r#*:}; _more=1 ;;
-      *)   _t=$_r; _more=0 ;;
+    _t=${_r%%:*}
+    case "$_t" in
+      '') ;;   # 空段只能来自上面检查过的 ::
+      *.*)
+        [ "$_r" = "$_t" ] && is_ipv4_addr "$_t" || return 1
+        _g=$((_g + 2)) ;;
+      *) _is_hex4 "$_t" || return 1; _g=$((_g + 1)) ;;
     esac
-    if [ -n "$_t" ]; then
-      if [ "$_more" = "0" ]; then
-        case "$_t" in
-          *.*) is_ipv4_addr "$_t" || return 1 ;;
-          *)   _is_hex4 "$_t" || return 1 ;;
-        esac
-      else
-        _is_hex4 "$_t" || return 1
-      fi
-    fi
-    [ "$_more" = "1" ] || break
+    case "$_r" in *:*) _r=${_r#*:} ;; *) break ;; esac
   done
-  return 0
+  # :: 至少替代一个 16 位段；没有 :: 时显式段必须恰好填满 128 位。
+  case "$_v" in *::*) [ "$_g" -lt 8 ] ;; *) [ "$_g" -eq 8 ] ;; esac
 }
 
 # 合法的 IPv4 / IPv6 字面量？
@@ -615,21 +605,46 @@ magpie_conf_syntax_ok() {
   [ -f "$1" ] && sh -n "$1" >/dev/null 2>&1
 }
 
-# 把数据目录收紧为仅 root 可访问。Magisk 拉起 service.sh 时 umask 可能是 0000，
-# 以前新建的 run/、日志与锁都是 777/666。bin/ 保持 755：本体需要可执行。
-magpie_harden_perms() {
-  _hp=${1:-/data/adb/magpie}
-  [ -d "$_hp" ] && [ ! -L "$_hp" ] || return 0
-  chmod 700 "$_hp" 2>/dev/null
-  for _hp_d in run data scripts; do
-    [ -d "$_hp/$_hp_d" ] && [ ! -L "$_hp/$_hp_d" ] && chmod 700 "$_hp/$_hp_d" 2>/dev/null
+# 逐级检查绝对路径；只看末段会漏掉 run 或更上层的链接。不要求目标已存在。
+# 先遇到 .. 不能跳过它再作安全判断；其余多余的斜杠或 . 仍逐段回溯。
+magpie_path_unlinked() (
+  _part=${1:-}
+  case "$_part" in /*) ;; *) exit 1 ;; esac
+  while [ -n "$_part" ]; do
+    case "${_part##*/}" in ..) exit 1 ;; esac
+    [ ! -L "$_part" ] || exit 1
+    _part=${_part%/*}
   done
-  [ -d "$_hp/bin" ] && [ ! -L "$_hp/bin" ] && chmod 755 "$_hp/bin" 2>/dev/null
-  for _hp_f in "$_hp"/run/*.log "$_hp"/run/*.log.1 "$_hp"/run/.*.flock "$_hp"/run/*.pid "$_hp"/run/lan.url; do
-    [ -f "$_hp_f" ] && [ ! -L "$_hp_f" ] && chmod 600 "$_hp_f" 2>/dev/null
-  done
-  return 0
+)
+
+# 父目录须由调用者另行核对。硬链接也不能改：chmod 会同时作用于目录外的同一 inode。
+magpie_single_regular_file() {
+  [ ! -L "$1" ] && [ -f "$1" ] && [ "$(stat -c %h "$1" 2>/dev/null)" = 1 ]
 }
+
+# 这是自动修整旧权限的授权，不是读取旧配置、手动停服或迁移数据的门槛。
+# 历史模块内布局和任意自定义位置都可能仍在使用，不能就地 chmod，也不回退或清理。
+magpie_harden_perms() (
+  _hp=${1:-}
+  [ -n "$_hp" ] && [ "$_hp" = "$(magpie_norm_path "$_hp")" ] &&
+    magpie_path_installable "$_hp" && magpie_path_unlinked "$_hp" || exit 0
+  cd -P "$_hp" 2>/dev/null && [ "$(pwd -P)" = "$_hp" ] && chmod 700 . 2>/dev/null || exit 0
+
+  for _d in data scripts bin; do
+    [ ! -L "$_d" ] || continue
+    [ -d "$_d" ] || continue
+    _mode=700; [ "$_d" != bin ] || _mode=755
+    ( cd -P "./$_d" && [ "$(pwd -P)" = "$_hp/$_d" ] && chmod "$_mode" . ) 2>/dev/null
+  done
+  # 不通过 run 链接枚举文件；先固定目录并收紧权限，再处理本模块的已知文件。
+  [ ! -L run ] && cd -P ./run 2>/dev/null && [ "$(pwd -P)" = "$_hp/run" ] &&
+    chmod 700 . 2>/dev/null || exit 0
+  for _f in watchdog.log watchdog.log.1 magpie.log magpie.log.1 magpie.pid lan.url \
+            .service.flock .stop-intent.flock .tile-install.flock dnsmasq.log dnsmasq.log.1 dnsmasq.pid dnsmasq.keep.pid; do
+    magpie_single_regular_file "$_f" && chmod 600 "$_f" 2>/dev/null
+  done
+  exit 0
+)
 
 # ---------- CA 证书包 ----------
 #

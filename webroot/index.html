@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#f2f3f5">
 <title>Magpie</title>
 <style>
@@ -130,7 +131,6 @@
   /* 用 flex 居中, 不依赖 svg */
   .ic > span { display: block; }
   .ic:active { transform: scale(.9); }
-  .ic.ok { color: var(--ok); }
 
   /* 文字按钮 (最可靠) */
   .ic.txt {
@@ -148,7 +148,7 @@
     display: inline-block !important;
   }
   .ic.txt:active { transform: scale(.96); opacity: .75; }
-  .ic.txt.ok { color: var(--ok) !important; border-color: var(--ok); }
+  .ic.txt:disabled { color: var(--muted) !important; cursor: default; opacity: .55; }
 
   /* 底部导航图标 */
   .ni {
@@ -184,7 +184,8 @@
   /* ---------- 主按钮 ---------- */
   .btn {
     display: flex; align-items: center; justify-content: center; gap: 6px;
-    margin: 10px 13px 12px;
+    margin: 10px 13px 12px; width: calc(100% - 26px);
+    border: 0; font-family: inherit; cursor: pointer;
     padding: 12px;
     background: var(--accent); color: #fff;
     border-radius: 10px;
@@ -192,7 +193,7 @@
     transition: opacity .15s, transform .08s;
   }
   .btn:active { transform: scale(.98); opacity: .82; }
-  .btn.disabled { background: var(--muted); pointer-events: none; opacity: .45; }
+  .btn:disabled { background: var(--muted); pointer-events: none; opacity: .45; }
 
   .tip { padding: 0 13px 12px; font-size: 11px; line-height: 1.55; color: var(--muted); }
 
@@ -260,7 +261,7 @@
       <div class="f">
         <div class="f-k">接口地址（配置候选）</div>
         <div class="f-v" id="vApiUrl">—</div>
-        <div class="f-act"><button class="ic txt" data-copy="vApiUrl" title="复制">复制</button>
+        <div class="f-act"><button class="ic txt" id="copyApiUrl" data-copy="vApiUrl" title="复制接口地址" disabled>复制</button>
         </div>
       </div>
 
@@ -272,7 +273,7 @@
       <div class="f" id="fLanApi" style="display:none">
         <div class="f-k">局域网地址（配置候选）</div>
         <div class="f-v" id="vLanApi">—</div>
-        <div class="f-act"><button class="ic txt" data-copy="vLanApi" title="复制">复制</button>
+        <div class="f-act"><button class="ic txt" id="copyLanApi" data-copy="vLanApi" title="复制局域网地址" disabled>复制</button>
         </div>
       </div>
 
@@ -285,7 +286,7 @@
       <div class="f">
         <div class="f-k">最近核验的回环地址</div>
         <div class="f-v" id="vWebUrl">—</div>
-        <div class="f-act"><button class="ic txt" id="copyWebUrl" data-copy="vWebUrl" title="复制" disabled>复制</button>
+        <div class="f-act"><button class="ic txt" id="copyWebUrl" data-copy="vWebUrl" title="复制无密码的回环地址" disabled>复制</button>
         </div>
       </div>
 
@@ -294,15 +295,15 @@
         <div class="f-v masked" id="vWebKey">访问密码不通过状态快照提供</div>
       </div>
 
-      <span class="btn disabled" id="btnOpen" aria-disabled="true">请在外部浏览器手动打开</span>
-      <div class="tip">此页不跳转、不提供密码；只在确认目标是本机面板后于普通浏览器访问。</div>
+      <button type="button" class="btn" id="btnOpen" disabled>当前宿主不支持直接进入</button>
+      <div class="tip">支持的宿主可重新核验并进入本体面板。若上方显示了无密码的回环地址，也可复制到外部浏览器手动打开。</div>
     </div>
   </div>
 
   <!-- ========== 页面 2: 日志 ========== -->
   <div class="page" id="page-log">
     <div class="card" style="margin-bottom:0">
-      <div class="card-h"><span class="dotmark c"></span>运行日志（最近 30 行）</div>
+      <div class="card-h"><span class="dotmark c"></span>日志快照（最近 30 行，非实时）</div>
       <pre id="log">加载中…</pre>
     </div>
   </div>
@@ -319,17 +320,11 @@
   </button>
 </div>
 
-<div id="toast"></div>
+<div id="toast" role="status"></div>
 <script>
-// 纯静态: 数据来自同目录 status.json (由 scripts/status.sh 生成)
-
+(function () {
+'use strict';
 function $(id) { return document.getElementById(id); }
-
-function setText(id, val) {
-  var el = $(id);
-  if (el) el.textContent = (val === undefined || val === null || val === '') ? '—' : val;
-}
-
 function toast(msg) {
   var el = $('toast');
   el.textContent = msg;
@@ -338,159 +333,231 @@ function toast(msg) {
   el._t = setTimeout(function () { el.classList.remove('show'); }, 1600);
 }
 
-/* ---------- 页面切换 ---------- */
+var page = 'page-home', away = false, copySerial = 0;
+function visible() { return !away && !document.hidden; }
+
+/* ---------- P2：只展示无凭据的快照，不据此决定能否进入 P1 ---------- */
+function panelAddress(s) {
+  // 对齐控制器 / 磁贴：规范十进制 127/8 或 [::1]，端口 1..65535，路径仅 /。
+  var m = typeof s === 'string' && /^http:\/\/(127(?:\.(?:0|[1-9][0-9]{0,2})){3}|\[::1\]):([1-9][0-9]{0,4})\/$/.exec(s);
+  return m && +m[2] <= 65535 && (m[1] === '[::1]' ||
+    m[1].split('.').every(function (n) { return +n <= 255; })) ? s : '';
+}
+function apiAddress(s) {
+  // 与 magpie_config_url 一致，只显示配置候选；不接受用户信息、查询串或片段。
+  var m = typeof s === 'string' && /^http:\/\/(?:[A-Za-z0-9.-]+|\[[A-Fa-f0-9:.]+\]):([1-9][0-9]{0,4})\/v1$/.exec(s);
+  return m && +m[1] <= 65535 ? s : '';
+}
+function address(id, button, value) {
+  $(id).textContent = value || '—';
+  $(button).disabled = !value;
+}
+function addresses(api, lan, web) {
+  address('vApiUrl', 'copyApiUrl', api);
+  address('vLanApi', 'copyLanApi', lan);
+  address('vWebUrl', 'copyWebUrl', web);
+  $('fLanApi').style.display = lan ? '' : 'none';
+}
+function unknownStatus(label, detail) {
+  copySerial++;
+  $('statusDot').className = 'dot';
+  $('statusText').textContent = label;
+  $('barSub').textContent = detail || '';
+  $('tipApi').textContent = '';
+  addresses('', '', '');
+}
+function render(d) {
+  if (!d || typeof d.running !== 'boolean') throw new Error('invalid snapshot');
+  // 默认看门狗约 150 秒写一次。5 分钟是展示新鲜度上限，不是判定服务停止的超时。
+  // 旧版只有 HH:MM:SS，不能分辨是哪一天；读取成功也不能续期。
+  var ts = d.updatedEpoch, age = Math.floor(Date.now() / 1000) - ts;
+  if (!Number.isSafeInteger(ts) || ts <= 0 || age < 0) {
+    unknownStatus('快照时间未知', '无法判断当前状态，请等待新快照或运行自检。');
+    return;
+  }
+  var stamp = '采样 ' + new Date(ts * 1000).toLocaleString();
+  if (age > 300) {
+    unknownStatus('快照已过期', stamp + ' · 超过 5 分钟，当前状态未知');
+    return;
+  }
+  if (d.configError) {
+    unknownStatus('快照：配置有误', stamp + ' · ' + d.configError);
+    $('statusDot').className = 'dot off';
+    return;
+  }
+  $('statusDot').className = d.running ? 'dot on' : 'dot off';
+  $('statusText').textContent = d.running ? '快照：运行中' : '快照：已停止';
+  var pid = d.running && /^[1-9][0-9]*$/.test(d.pid) ? 'PID ' + d.pid + ' · ' : '';
+  $('barSub').textContent = pid + stamp + (d.configWarning ? ' · ' + d.configWarning : '');
+  addresses(apiAddress(d.apiUrl), d.lanOpen === true && apiAddress(d.lanApiUrl),
+    d.running && panelAddress(d.webUrl));
+  $('tipApi').textContent = d.lanOpen === true
+    ? 'API 配置含非回环目标，不表示已对外开放；运行态见自检。'
+    : 'API 地址是配置候选；运行态见自检，Key 请在本体管理界面管理。';
+}
+
+/* 仅对可见标签轮询。XHR 的 timeout/abort 覆盖整个响应体，无须宿主提供 AbortController。
+ * 取消时先撤销请求身份；离开标签/宿主后到达的成功、失败和 abort 都不得改写新界面。 */
+var request = null, pollTimer = 0;
+function stopPoll() {
+  clearTimeout(pollTimer);
+  var old = request;
+  request = null;
+  if (old) old.abort();
+}
+function poll() {
+  if (!visible() || request) return;
+  var home = page === 'page-home';
+  var xhr = null;
+  function finish(ok) {
+    if (request !== xhr) return;
+    request = null;
+    if (!visible()) return;
+    if (ok) {
+      try {
+        if (home) render(JSON.parse(xhr.responseText));
+        else $('log').textContent = xhr.responseText.trim() || '（暂无日志）';
+      } catch (e) { ok = false; }
+    }
+    if (!ok) {
+      if (home) unknownStatus('状态快照读取失败', '当前状态未知，将自动重试。');
+      else $('log').textContent = '（无法读取日志快照，将自动重试）';
+    }
+    pollTimer = setTimeout(poll, 5000);
+  }
+  try {
+    xhr = new XMLHttpRequest();
+    request = xhr;
+    xhr.onload = function () {
+      // 部分静态 file: 宿主成功时没有 HTTP 状态码。只在 load 且读到了正文时接受。
+      finish((xhr.status >= 200 && xhr.status < 300) ||
+        (location.protocol === 'file:' && xhr.status === 0 && !!xhr.responseText));
+    };
+    xhr.onerror = xhr.ontimeout = xhr.onabort = function () { finish(false); };
+    xhr.open('GET', (home ? 'status.json' : 'lastlog.txt') + '?t=' + Date.now(), true);
+    if (/^https?:$/.test(location.protocol)) xhr.setRequestHeader('Cache-Control', 'no-store');
+    xhr.timeout = 8000;
+    xhr.send();
+  } catch (e) { finish(false); }
+}
+function refreshView() {
+  stopPoll();
+  if (page === 'page-home') unknownStatus('等待读取快照');
+  else $('log').textContent = '等待读取日志快照…';
+  if (visible()) poll();
+}
+
+/* ---------- 复制：仅用户点按的、当前仍展示的无凭据地址 ---------- */
+function copy(btn) {
+  var el = $(btn.getAttribute('data-copy')), text = el.textContent, serial = ++copySerial;
+  function current() {
+    return serial === copySerial && visible() && page === 'page-home' && !btn.disabled && el.textContent === text;
+  }
+  if (!current()) return;
+  function fallback() {
+    if (!current()) return;
+    var ta = document.createElement('textarea'), ok = false;
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(ta);
+    try { ta.select(); ok = document.execCommand('copy'); } catch (e) { /* 不伪报成功 */ }
+    document.body.removeChild(ta);
+    toast(ok ? '已复制' : '复制失败，请长按选择');
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { if (current()) toast('已复制'); }, fallback);
+      return;
+    }
+  } catch (e) { /* 一些宿主会同步拒绝访问剪贴板 */ }
+  fallback();
+}
+var copyBtns = document.querySelectorAll('[data-copy]');
+for (var i = 0; i < copyBtns.length; i++) {
+  copyBtns[i].addEventListener('click', function () { copy(this); });
+}
+
+/* ---------- P1：每次进入都向控制器现取；带密码的结果仅用于这一次同窗口跳转 ---------- */
+var P1_CMD = 'sh /data/adb/modules/magpie/scripts/magpie.service webui-url';
+var attempt = null, serial = 0, autoTried = false;
+function hasBridge() { return typeof ksu !== 'undefined' && ksu && typeof ksu.exec === 'function'; }
+function updateOpenButton() {
+  var b = $('btnOpen'), supported = hasBridge();
+  b.disabled = !supported || !!attempt;
+  b.textContent = attempt ? '正在核验本体面板…' : supported ? '核验并进入本体面板' : '当前宿主不支持直接进入';
+}
+function cancelP1() {
+  if (!attempt) return;
+  clearTimeout(attempt.timer);
+  delete window[attempt.name];
+  attempt = null;
+  updateOpenButton();
+}
+function openP1(auto) {
+  if (attempt || !visible() || page !== 'page-home') return;
+  if (!hasBridge()) { updateOpenButton(); return; }
+  var a = {name: 'magpieP1_' + Date.now() + '_' + (++serial), auto: auto};
+  attempt = a;
+  updateOpenButton();
+  function fail() {
+    if (attempt !== a) return;
+    cancelP1();
+    if (!auto && visible()) toast('未能核验或打开本体面板，可重试');
+  }
+  window[a.name] = function (code, out) {
+    if (attempt !== a) return;
+    if (!visible() || (auto && location.hash === '#status')) { cancelP1(); return; }
+    var u = typeof out === 'string' ? out.replace(/\r?\n$/, '') : '';
+    var parts = u.split('?k=');
+    if (code === 0 && parts.length === 2 && panelAddress(parts[0]) && /^[A-Za-z0-9_-]+$/.test(parts[1])) {
+      try { location.replace(u); cancelP1(); return; } catch (e) { /* 无法跳转，仍留在 P2 */ }
+    }
+    fail();
+  };
+  a.timer = setTimeout(fail, 10000);
+  try {
+    var result = ksu.exec(P1_CMD, '{}', a.name);
+    // 原生契约以命名回调为准；若宿主还返回 Promise，接住拒绝，但不从它取登录链接。
+    if (result && typeof result.then === 'function') result.then(null, fail);
+  } catch (e) { fail(); }
+}
+$('btnOpen').addEventListener('click', function () { openP1(false); });
+
 var navBtns = document.querySelectorAll('.nav-i');
-for (var i = 0; i < navBtns.length; i++) {
-  navBtns[i].addEventListener('click', function () {
-    var target = this.getAttribute('data-page');
-    var pages = document.querySelectorAll('.page');
-    for (var j = 0; j < pages.length; j++) pages[j].classList.remove('active');
-    for (var k = 0; k < navBtns.length; k++) navBtns[k].classList.remove('on');
-    $(target).classList.add('active');
-    this.classList.add('on');
+for (var j = 0; j < navBtns.length; j++) {
+  navBtns[j].addEventListener('click', function () {
+    var next = this.getAttribute('data-page');
+    if (page === next) return;
+    cancelP1();
+    $(page).classList.remove('active');
+    page = next;
+    $(page).classList.add('active');
+    for (var k = 0; k < navBtns.length; k++) navBtns[k].classList.toggle('on', navBtns[k] === this);
+    refreshView();
     window.scrollTo(0, 0);
   });
 }
-
-/* ---------- 复制 ---------- */
-function copyText(text) {
-  if (!text || text === '—') { toast('没有可复制内容'); return; }
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text)
-      .then(function () { toast('已复制'); })
-      .catch(function () { fallbackCopy(text); });
-  } else {
-    fallbackCopy(text);
+var wasVisible = null;
+function activation() {
+  var on = visible();
+  if (on === wasVisible) return; // pageshow 与 visibilitychange 可能指向同一次恢复
+  wasVisible = on;
+  if (!on) cancelP1();
+  updateOpenButton();
+  if (on && !autoTried) {
+    autoTried = true;
+    if (location.hash !== '#status') openP1(true);
   }
+  refreshView();
 }
-
-function fallbackCopy(text) {
-  var ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
-  document.body.appendChild(ta);
-  ta.select();
-  try { document.execCommand('copy'); toast('已复制'); }
-  catch (e) { toast('复制失败，请长按选择'); }
-  document.body.removeChild(ta);
-}
-
-document.addEventListener('click', function (e) {
-  var t = e.target;
-  while (t && t !== document.body) {
-    if (t.classList && t.classList.contains('ic') && t.hasAttribute('data-copy')) break;
-    t = t.parentNode;
-  }
-  if (!t || t === document.body) return;
-
-  var el = $(t.getAttribute('data-copy'));
-  copyText(el ? (el.textContent || '') : '');
-  t.classList.add('ok');
-  setTimeout(function () { t.classList.remove('ok'); }, 1200);
+document.addEventListener('visibilitychange', activation);
+window.addEventListener('pagehide', function () { away = true; activation(); });
+window.addEventListener('pageshow', function () { if (away) { away = false; activation(); } });
+window.addEventListener('hashchange', function () {
+  if (location.hash === '#status' && attempt && attempt.auto) cancelP1();
 });
-
-/* ---------- 数据加载 ---------- */
-var loading = false;
-function loadStatus() {
-  // 页面不可见时不轮询；上一轮还没回来时不叠加请求。
-  if (loading || document.hidden) return;
-  loading = true;
-  fetch('status.json?t=' + Date.now())
-    .then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
-    .then(render)
-    .catch(function (e) {
-      $('statusText').textContent = '读取失败';
-      $('statusDot').className = 'dot';
-      setText('vWebUrl', '');
-      $('copyWebUrl').disabled = true;
-      $('btnOpen').textContent = '无法核验面板地址';
-      $('log').textContent = '无法读取 status.json：' + e.message;
-    })
-    .then(function () { loading = false; });
-}
-
-function render(d) {
-  var running = !!d.running;
-
-  $('statusDot').className = 'dot ' + (running ? 'on' : 'off');
-  $('statusText').textContent = running ? '运行中' : '已停止';
-  // 数据是事件驱动写出来的快照，不是实时监控：把写入时刻直接标出来，
-  // 免得看到数字不动以为卡住了
-  var sub = running ? ('PID ' + d.pid) : '';
-  if (d.updated) sub += (sub ? ' · ' : '') + '数据 ' + d.updated;
-  $('barSub').textContent = sub;
-  // 监听地址配错时 status.sh 会给出 configError，此时地址字段是空的
-  if (d.configError) {
-    $('statusText').textContent = '配置有误';
-    $('statusDot').className = 'dot off';
-    $('barSub').textContent = d.configError;
-  } else if (d.configWarning) {
-    $('barSub').textContent = sub + ' · ' + d.configWarning;
-  }
-
-  // 首页
-  setText('vApiUrl', d.apiUrl);
-  setText('vLanApi', d.lanApiUrl);
-
-  $('fLanApi').style.display = (d.lanOpen && d.lanApiUrl) ? '' : 'none';
-  $('tipApi').textContent = d.lanOpen
-    ? 'API 配置含非回环目标，不表示已对外开放；运行态见自检。'
-    : 'API 配置目标为仅本机，运行态见自检；Key 请在本体管理界面管理。';
-
-  var webAddress = running && !d.configError ? d.webUrl : '';
-  setText('vWebUrl', webAddress);
-  $('copyWebUrl').disabled = !webAddress;
-  // This WebView may expose a privileged native bridge. Never navigate it to
-  // the gateway panel or attach its long-lived password to a URL. The address
-  // above is for the user to open manually in a separate, ordinary browser.
-  var b1 = $('btnOpen');
-  b1.textContent = webAddress
-    ? '可复制上方地址，在外部浏览器手动打开'
-    : '未核验本机面板监听，地址不可用';
-
-  loadLog();
-}
-
-function loadLog() {
-  fetch('lastlog.txt?t=' + Date.now())
-    .then(function (r) { return r.ok ? r.text() : Promise.reject('HTTP ' + r.status); })
-    .then(function (t) { $('log').textContent = t.trim() || '（暂无日志）'; })
-    .catch(function () { $('log').textContent = '（无法读取日志）'; });
-}
-
-/* ---------- KernelSU WebUI：进入本体面板（P1） ----------
- * 宿主提供 ksu.exec 时，向控制器要一次「已核验回环地址 + 访问密码」的登录链接，
- * 在同一 WebView 里打开 P1。密码只经 root 命令的 stdout 返回，不写入 status.json、
- * lastlog.txt 或日志。拿不到（服务未运行、监听未核验、宿主不支持）就留在本页（P2）。
- * 地址带 #status 时强制停留在状态页。 */
-var P1_CMD = 'sh /data/adb/modules/magpie/scripts/magpie.service webui-url';
-function openP1(silent) {
-  if (typeof ksu === 'undefined' || !ksu || typeof ksu.exec !== 'function') return false;
-  var cb = 'magpieP1_' + Date.now();
-  window[cb] = function (code, out) {
-    delete window[cb];
-    var u = String(out || '').trim();
-    if (code === 0 && /^http:\/\/(127\.0\.0\.1|\[::1\]):[0-9]+\/\?k=[A-Za-z0-9_-]+$/.test(u)) {
-      location.replace(u);
-    } else if (!silent) {
-      toast('未能核验本体面板，留在状态页');
-    }
-  };
-  try { ksu.exec(P1_CMD, '{}', cb); return true; } catch (e) { delete window[cb]; return false; }
-}
-if (location.hash !== '#status') openP1(true);
-if (typeof ksu !== 'undefined' && ksu && typeof ksu.exec === 'function') {
-  var bo = $('btnOpen');
-  bo.className = 'btn'; bo.removeAttribute('aria-disabled'); bo.textContent = '进入本体面板';
-  bo.addEventListener('click', function () { openP1(false); });
-}
-
-loadStatus();
-setInterval(loadStatus, 5000);
-document.addEventListener('visibilitychange', function () { if (!document.hidden) loadStatus(); });
+activation();
+})();
 </script>
 </body>
 </html>

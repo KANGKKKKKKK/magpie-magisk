@@ -48,7 +48,7 @@ keytool -genkeypair -storetype PKCS12 -keystore "$W/fetch.p12" -alias local -key
 for name in ClassifyTest TileStateTest SelfCheckTest ShellTest SerialExecutorTest FetchTest; do
   echo "== jvm/$name"
   # 落文件后再读：管道不能掩盖 Java 非零退出/timeout，也不能按部分 PASS 报成功。
-  if timeout -k 5 30 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 \
+  if timeout -k 5 30 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Djava.io.tmpdir="$W" \
       -Dmagpie.ks="$W/fetch.p12" -Dmagpie.kspass="$FETCH_PASS" \
       -cp "$W/classes" "com.ruin.magpie.tile.$name" > "$W/$name.log" 2>&1; then
     cat "$W/$name.log"

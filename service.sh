@@ -1,10 +1,17 @@
 #!/system/bin/sh
 # Magpie for Android - 开机自启 + 看门狗
 
-MODDIR=${0%/*}
+MODDIR=$(CDPATH='' cd -P "$(dirname "$0")" && pwd -P) || exit 1
+# 持有此安装目录的引用；卸载后同路径重装，旧任务不能接管新的模块。
+cd -P "$MODDIR" || exit 1
+BOOT_DIR_ID=$(stat -c '%d:%i' .) || exit 1
+boot_module_active() {
+  [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/.uninstalling" ] &&
+    [ "$(stat -c '%d:%i' "$MODDIR" 2>/dev/null)" = "$BOOT_DIR_ID" ]
+}
 # Magisk 拉起 service.sh 时 umask 可能是 0000：不收紧的话日志、锁、run/ 都会是 666/777。
 umask 077
-[ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/.uninstalling" ] || exit 0
+boot_module_active || exit 0
 
 LOG_MAX_BYTES=5242880
 # 配置查找顺序与 magpie.service / status.sh / action.sh / doctor.sh 保持一致
@@ -18,28 +25,35 @@ else
 fi
 MP=${magpie_path:-/data/adb/magpie}
 
-# run 目录必须先建出来：下面所有 `>>"$WATCH_LOG"` 都指向它。
-# 目录不存在时重定向直接失败、命令根本不会被执行 —— 首次开机（本体刚装好、
-# 还没手动启动过）就会永远起不来。建不出来时把日志丢弃，但服务照常尝试启动。
+# 先校验，再创建 run 或打开日志。库不全时不做无人值守的写操作，也不改配置。
+_NETLIB="$MODDIR/scripts/lib.sh"
+[ -f "$_NETLIB" ] || { echo '! 缺少 scripts/lib.sh，已跳过开机自动操作' >&2; exit 1; }
+. "$_NETLIB"
+case "$(magpie_norm_path "$MP")" in
+  ''|/|/data|/data/adb|/data/adb/modules|/data/adb/modules_update)
+    echo "! magpie_path 不是独立的数据目录，已跳过开机自动操作：$MP" >&2; exit 1 ;;
+esac
+
+# 普通旧布局仍按原路径运行，不以安装白名单代替配置。日志重定向和轮转也不能
+# 跟随链接；清理工具可能在开机等待或两轮巡检之间换掉 run，使用前再查。
+boot_log_paths_safe() {
+  magpie_path_unlinked "$MP/run" || return 1
+  [ ! -e "$MP/run" ] || [ -d "$MP/run" ] || return 1
+  for _log in "$MP/run/watchdog.log" "$MP/run/watchdog.log.1" "$MP/run/magpie.log" "$MP/run/magpie.log.1"; do
+    [ ! -L "$_log" ] || return 1
+    [ ! -e "$_log" ] || magpie_single_regular_file "$_log" || return 1
+  done
+}
+# 修的只是已存在的可信组件；首次创建的 run 由 umask 077 保护。
+magpie_harden_perms "$MP"
+boot_log_paths_safe || { echo "! run 或日志不是无链接的普通路径，已跳过开机自动操作：$MP/run" >&2; exit 1; }
+
+# 首次开机时必须先建 run，否则重定向失败、命令根本不会执行。
 mkdir -p "$MP/run" 2>/dev/null
 if [ -d "$MP/run" ]; then
   WATCH_LOG="$MP/run/watchdog.log"
 else
   WATCH_LOG=/dev/null
-fi
-
-# 公共实现提前 source：下面 rotate_log 和看门狗的进程识别都要用。
-# 放在顶层而不是子 shell 里 —— 子 shell 里的函数定义不会回到父 shell。
-_NETLIB="$MODDIR/scripts/lib.sh"
-if [ -f "$_NETLIB" ]; then
-  . "$_NETLIB"
-  magpie_harden_perms "$MP"
-else
-  lan_ip() { return 1; }
-  magpie_running() { pidof magpie >/dev/null 2>&1; }
-  magpie_bin_usable() { [ -x "$1" ]; }
-  # lib.sh 不可用时，有停止标记就不尝试恢复。
-  magpie_stop_intent_current() { [ -e "$1" ]; }
 fi
 
 # 超过 5MB 归档为 .1，必须在进程打开日志 fd 之前调用。
@@ -67,31 +81,68 @@ BOOT_WAIT_MAX=${MAGPIE_BOOT_WAIT_SECS:-600}
 wait_boot_completed() {
   _deadline=$(($(date +%s) + BOOT_WAIT_MAX))
   until [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; do
+    boot_module_active || return 1
     [ "$(date +%s)" -lt "$_deadline" ] || return 1
     sleep 3
   done
   return 0
 }
 
-# 刷机时没装成的磁贴 App，在这里补装。
-# 刷机脚本跑在独立的 mount namespace 里，pm 不一定能通；开机后系统完全起来了，
-# 这条路径可靠得多。只在有标记时才做，不打扰没选装的用户。
-install_pending_tile_app() {
-  _flag="$MP/run/.tile_pending"
-  [ -f "$_flag" ] || return 0
-  if [ ! -f "$MODDIR/scripts/tile-app.sh" ]; then
-    rm -f "$_flag" 2>/dev/null
-    return 0
+# 只消费刷机时用户选装留下的标记。不在看门狗里轮询：一个独立任务负责整批
+# 尝试（立即、再等 30 秒、再等 120 秒），无须网关本体，不阻塞服务启动或巡检。
+install_pending_tile_app() (
+  _tile_run="$MP/run"
+  _tile_mod=$(CDPATH='' cd -P "$MODDIR" && pwd -P) || exit 0
+  # fd 锁与清标记都相对于固定的 run；等待期间目录被换掉也不会操作新目标。
+  magpie_path_unlinked "$_tile_run" && cd -P "$_tile_run" 2>/dev/null || exit 0
+  _tile_dir_id=$(stat -c '%d:%i' .) || exit 0
+  magpie_path_unlinked "$_tile_run" || exit 0
+  _pending=./.tile_pending
+  _lock=./.tile-install.flock
+  _helper="$_tile_mod/scripts/tile-app.sh"
+  tile_log() { echo "$(date +'%Y-%m-%d %H:%M:%S') $1"; }
+  boot_module_active || exit 0
+  if [ ! -f "$_helper" ]; then
+    if magpie_single_regular_file "$_pending"; then tile_log '缺少 scripts/tile-app.sh，保留补装标记'; fi
+    exit 0
   fi
-  command -v tile_install >/dev/null 2>&1 || . "$MODDIR/scripts/tile-app.sh"
-  if tile_install "$MODDIR" >>"$WATCH_LOG" 2>&1; then
-    rm -f "$_flag" 2>/dev/null
-    echo "$(date +'%Y-%m-%d %H:%M:%S') 磁贴 App 已补装" >>"$WATCH_LOG" 2>/dev/null
-  else
-    # 装不上就留着标记，下一轮再试（比如用户刚开机还没解锁）
-    echo "$(date +'%Y-%m-%d %H:%M:%S') 磁贴 App 补装失败，稍后重试" >>"$WATCH_LOG" 2>/dev/null
+  . "$_helper"
+  if ! magpie_single_regular_file "$_pending"; then
+    # 未选装也可能已有 App 且选择过隐藏；只对账桌面图标，绝不安装。
+    tile_reconcile_launcher .
+    exit 0
   fi
-}
+
+  # 整批重试共用一个持久锁 inode；重复启动的 service.sh 不另开一批，不删锁文件。
+  if ! magpie_pick_flock || [ -L "$_lock" ] || { [ -e "$_lock" ] && ! magpie_single_regular_file "$_lock"; }; then
+    tile_log '磁贴补装锁不可用，保留标记，下次开机再试'; exit 1
+  fi
+  exec 8<>"$_lock" || exit 1
+  magpie_flock -n 8 || exit 0
+  # 已用完预算的 boot ID 记在锁内（固定 36 字节 + 换行），不改选装标记。
+  # 无法取得 ID 时仍限本任务三次，不会永久抑制下次开机。
+  _tile_boot=$(magpie_boot_id) || _tile_boot=''
+  if [ -n "$_tile_boot" ] && [ "$(head -c 37 "$_lock")" = "$_tile_boot" ]; then exit 0; fi
+  for _delay in 0 30 120; do
+    if [ "$_delay" != 0 ]; then sleep "$_delay" 8>&- || exit 1; fi
+    # 在锁内、每次实际安装前重查：安装意图可撤销，模块也可能在等待中被禁用或卸载。
+    boot_module_active && magpie_path_unlinked "$_tile_run" &&
+      [ "$(stat -c '%d:%i' "$_tile_run" 2>/dev/null)" = "$_tile_dir_id" ] &&
+      magpie_single_regular_file "$_pending" || exit 0
+    if tile_install "$_tile_mod" 8>&-; then
+      if rm -f "$_pending"; then tile_log '磁贴 App 已补装'; else tile_log '磁贴 App 已补装，但未能清除补装标记'; fi
+      # 覆盖安装可能把隐藏状态复位；延迟成功后也要重新落实一次。
+      tile_reconcile_launcher . 8>&-
+      exit 0
+    fi
+    if [ "$_delay" = 0 ]; then
+      tile_log '磁贴 App 补装失败，将在本次开机再试至多两次'
+      tile_reconcile_launcher . 8>&-
+    fi
+  done
+  [ -z "$_tile_boot" ] || printf '%s\n' "$_tile_boot" >&8
+  tile_log '磁贴 App 本次补装仍未成功，保留标记，下次开机再试'
+)
 
 # 把模块自带的那份配置复制到数据目录，供用户改。
 #
@@ -102,19 +153,21 @@ install_pending_tile_app() {
 # 先写临时文件再 mv，避免复制到一半被读到半份配置。
 seed_user_config() {
   _dst="$MP/scripts/magpie.config"
-  [ -f "$_dst" ] && return 0
+  [ ! -e "$_dst" ] && [ ! -L "$_dst" ] && magpie_path_unlinked "$MP/scripts" || return 0
   _src="$MODDIR/scripts/magpie.config"
   [ -f "$_src" ] || return 0
   mkdir -p "$MP/scripts" 2>/dev/null || return 0
-  _tmp="$_dst.tmp.$$"
-  if cp -f "$_src" "$_tmp" 2>/dev/null; then
-    chmod 600 "$_tmp" 2>/dev/null
-    if mv -f "$_tmp" "$_dst" 2>/dev/null; then
+  _tmp=$(mktemp "$_dst.tmp.XXXXXX") || return 1
+  # 不覆盖等待期间出现的旧配置；mktemp 的新文件本身就是 0600。
+  if cat "$_src" > "$_tmp" && mv -nT "$_tmp" "$_dst" 2>/dev/null; then
+    if [ ! -e "$_tmp" ]; then
       echo "$(date +'%Y-%m-%d %H:%M:%S') 已生成用户配置 $_dst" >>"$WATCH_LOG" 2>/dev/null
-      return 0
+    else
+      rm -f "$_tmp"
     fi
-    rm -f "$_tmp" 2>/dev/null
+    return 0
   fi
+  rm -f "$_tmp"
   return 1
 }
 
@@ -122,15 +175,10 @@ seed_user_config() {
 (
   wait_boot_completed
   # 等待期间模块可能被禁用（开机那几分钟足够点一下）
-  [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/.uninstalling" ] || exit 0
+  boot_module_active || exit 0
+  boot_log_paths_safe || { echo "! run 或日志已变更，取消开机自动操作：$MP/run" >&2; exit 1; }
   seed_user_config
-  install_pending_tile_app
-  # 用户隐藏过桌面图标的话，在这里重新落实（组件状态会被系统重置）
-  if [ -f "$MODDIR/scripts/tile-app.sh" ]; then
-    # shellcheck disable=SC1091
-    command -v tile_reconcile_launcher >/dev/null 2>&1 || . "$MODDIR/scripts/tile-app.sh"
-    tile_reconcile_launcher "$MP/run" >>"$WATCH_LOG" 2>&1
-  fi
+  install_pending_tile_app >>"$WATCH_LOG" 2>&1 &
   rotate_log "$MP/run/magpie.log"
   # 启动日志留在看门狗日志里，否则开机时 stdout 直接丢弃
   sh "$MODDIR/scripts/magpie.service" auto-start >>"$WATCH_LOG" 2>&1
@@ -151,11 +199,9 @@ WATCH_INTERVAL=${MAGPIE_WATCH_INTERVAL:-30}
   _fail=0           # 连续拉起失败次数
   _tick=0           # 面板状态刷新计数
 
-  # 万一 run 目录被清理工具删掉，先补回来，免得下面重定向失败
-  mkdir -p "$MP/run" 2>/dev/null
-
   # 与上面的首次拉起用同一段等待：不让看门狗在开机过程中抢先 start
   wait_boot_completed
+  boot_module_active || exit 0
 
   while :; do
     sleep "$_wait"
@@ -164,13 +210,10 @@ WATCH_INTERVAL=${MAGPIE_WATCH_INTERVAL:-30}
     #    真睡下去会把测试拖成全量几分钟。）
     _wait=$WATCH_INTERVAL
 
-    # run 目录不在时重定向会失败、命令不会执行，每轮顺手补一次
+    boot_module_active || exit 0
+    # 补回消失的目录，但不跟随被替换的目录/日志链接写入、轮转或启动。
+    boot_log_paths_safe || { echo "! run 或日志已变更，守护退出：$MP/run" >&2; exit 1; }
     [ -d "$MP/run" ] || mkdir -p "$MP/run" 2>/dev/null
-
-    # 模块被禁用、正在卸载或已被删除，守护都该退出
-    [ -f "$MODDIR/disable" ] && { wlog "模块已禁用, 守护退出"; exit 0; }
-    [ -f "$MODDIR/.uninstalling" ] && { wlog "模块卸载中, 守护退出"; exit 0; }
-    [ -d "$MODDIR" ] || exit 0
 
     # 本体不在或不可执行：跳过这一轮，别每轮都撞墙刷日志
     if ! magpie_bin_usable "$MP/bin/magpie"; then

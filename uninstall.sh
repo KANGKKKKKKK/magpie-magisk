@@ -29,7 +29,7 @@ remove_cli_links() {
   for _p in /data/adb/ksu/bin /data/adb/magisk /data/adb/ap/bin; do
     [ -L "$_p/magpie" ] || continue
     case "$(readlink "$_p/magpie" 2>/dev/null)" in
-      "$MODDIR"/*|*/modules/magpie/*) rm -f "$_p/magpie" 2>/dev/null && echo "- 已移除 $_p/magpie" ;;
+      "$MODDIR/scripts/magpie-cli.sh"|/data/adb/modules/magpie/scripts/magpie-cli.sh) rm -f "$_p/magpie" 2>/dev/null && echo "- 已移除 $_p/magpie" ;;
     esac
   done
 }
@@ -66,20 +66,8 @@ if [ "$_DATA_IN_MODULE" = 1 ]; then
   exit 1
 fi
 
-# 2) 收掉看门狗子 shell：它是 sh 跑 service.sh 的常驻循环，杀 magpie 杀不到它
-for _d in /proc/[0-9]*; do
-  _p=${_d#/proc/}
-  [ "$_p" = "$$" ] && continue
-  [ -r "$_d/cmdline" ] || continue
-  _cl=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null)
-  # 只认带完整模块路径的，避免误杀命令行里恰好提到该名字的其它 shell
-  case "$_cl" in
-    *"$MODDIR/service.sh"*|*"/modules/magpie/service.sh"*) kill -9 "$_p" 2>/dev/null ;;
-  esac
-done
-
-# 服务控制器已验证 serve/MCP 均退出，不再按名称或模糊命令行兜底发信号。
-# 卸载不能为了清理残留而扩大进程匹配范围。
+# 看门狗按模块目录身份和 .uninstalling 自行退出。无需枚举 /proc，更不能
+# 仅凭命令行里提过 service.sh 路径就发信号（编辑器、日志工具也可能提到它）。
 
 # 3.5) 顺手卸掉磁贴 App（它只是本模块的配件，留着没有意义）。
 #
@@ -92,31 +80,7 @@ if command -v pm >/dev/null 2>&1; then
   fi
 fi
 
-# 4) 只收旧版监听 ::1:53 的 dnsmasq，不要动系统热点的 dnsmasq
-if [ -f "$DATA/run/dnsmasq.pid" ]; then
-  _dp=$(cat "$DATA/run/dnsmasq.pid" 2>/dev/null)
-  case "$_dp" in
-    ''|*[!0-9]*) : ;;
-    *) grep -aq 'listen-address=::1' "/proc/$_dp/cmdline" 2>/dev/null && kill -15 "$_dp" 2>/dev/null ;;
-  esac
-fi
-if [ -f "$DATA/run/dnsmasq.keep.pid" ]; then
-  _kp=$(cat "$DATA/run/dnsmasq.keep.pid" 2>/dev/null)
-  case "$_kp" in
-    ''|*[!0-9]*) : ;;
-    *)
-      _kc=$(tr '\0' ' ' < "/proc/$_kp/cmdline" 2>/dev/null)
-      case "$_kc" in
-        "sleep 2147483647 "*)
-          for _fd in /proc/"$_kp"/fd/*; do
-            case "$(readlink "$_fd" 2>/dev/null)" in
-              *dnsmasq.fifo*) kill -15 "$_kp" 2>/dev/null; break ;;
-            esac
-          done ;;
-      esac ;;
-  esac
-fi
-
+# 旧 DNS 辅助进程已由持锁的控制器核验；不要在卸载器中另用一套宽松判据。
 echo "- Magpie 服务已停止"
 
 # 5) PATH 里的 magpie 命令由 EXIT trap（remove_cli_links）清理
@@ -128,7 +92,7 @@ fi
 [ "$DATA" = "/data/adb/magpie" ] || [ ! -d "/data/adb/magpie" ] || \
   echo "- 卸载脚本未删除旧默认数据：/data/adb/magpie"
 
-# 7) 面板文件里有网关 key，模块目录若残留也一并清掉
+# 7) 移除模块生成的快照和日志尾（旧版快照可能包含凭据）
 rm -f "$MODDIR/webroot/status.json" "$MODDIR/webroot/lastlog.txt" 2>/dev/null
 
 # 8) 复查

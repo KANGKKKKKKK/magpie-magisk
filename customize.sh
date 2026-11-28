@@ -31,12 +31,10 @@ magpie_path=${magpie_path:-/data/adb/magpie}
 # DNS：magpie 是不链接 libc 的 Go 静态 PIE，只认 /etc/resolv.conf。
 # 这里按 MAGPIE_DNS 生成模块覆盖，开机后由 Magisk 挂成 /etc/resolv.conf；
 # 老版本注入的 DNS_LOCAL_HOSTNAMES 是无效的（Go 与 magpie 都不读）。
+# DNS 校验和下方的补装标记路径核验共用此库；没有改 DNS 也需要后者。
+[ -f "$MODPATH/scripts/lib.sh" ] && . "$MODPATH/scripts/lib.sh" 2>/dev/null
 _RESOLV="$MODPATH/system/etc/resolv.conf"
 if [ -n "${MAGPIE_DNS:-}" ]; then
-  # 校验只用 lib.sh 那一份：刷入时 lib.sh 一定在包里。
-  # 不在这里另写一套弱校验——看起来校验过、实际漏判，比明说没校验更坑。
-  # shellcheck disable=SC1090
-  [ -f "$MODPATH/scripts/lib.sh" ] && . "$MODPATH/scripts/lib.sh" 2>/dev/null
   command -v is_ip_addr >/dev/null 2>&1 || is_ip_addr() { [ -n "$1" ]; }
 
   mkdir -p "$MODPATH/system/etc"
@@ -86,9 +84,68 @@ ui_print "- 开机后自动启动；管理器里点 [执行] 可启停"
 
 # ---------- 磁贴 App（可选）----------
 #
-# 用音量键选择装不装。刷机流程里没有可靠 stdin，只能读按键设备。
-# 读不到按键设备（getevent 不可用）时按「不装」处理：
-# 用户没主动选过的东西，默认不该装。
+# 整次询问共用一个 15 秒窗口。只接受真实 EV_KEY 的首次 DOWN，忽略同步、
+# 抬键、长按重复及其他输入。音量上下也可能不在同一个 event 设备上。
+# 私有 FIFO 不记录输入；读端选中即退出，再回收本次启动的 getevent，不用
+# 等下一条事件触发 SIGPIPE，也不向刷机 shell 发信号。
+tile_read_choice() (
+  umask 077
+  _keys=$(mktemp -d "${TMPDIR:-$MODPATH}/.tile-keys.XXXXXX") || exit 1
+  _reader=
+  trap '
+    if [ -n "$_reader" ]; then
+      kill "$_reader" 2>/dev/null || :
+      wait "$_reader" 2>/dev/null || :
+    fi
+    rm -f "$_keys/events"
+    rmdir "$_keys"
+  ' EXIT
+  trap 'exit 1' HUP INT TERM
+  mkfifo "$_keys/events" || exit 1
+  getevent -ql >"$_keys/events" 2>/dev/null &
+  _reader=$!
+  # 键值只由受 timeout 管理的子 shell 读取和展开。
+  # shellcheck disable=SC2016
+  timeout 15 sh -c '
+    while read -r type key state tail; do
+      case "$type" in
+        *:) type=$key; key=$state; state=$tail ;;  # 可选的设备名前缀
+        *) [ -z "$tail" ] || continue ;;
+      esac
+      case "$type:$key:$state" in
+        EV_KEY:KEY_VOLUMEUP:DOWN) echo install; exit 0 ;;
+        EV_KEY:KEY_VOLUMEDOWN:DOWN) echo skip; exit 0 ;;
+      esac
+    done < "$1"
+    exit 1' sh "$_keys/events"
+)
+
+# service.sh 只消费 run 下的单链接普通文件。保留用户的自定义目录，但不在
+# 公共根、链接指向的目录、或特殊文件上写入。clear 不为未选装的人建目录。
+tile_pending() (
+  _mp=$(magpie_norm_path "$magpie_path") || exit 1
+  case "$_mp" in ''|/|/data|/data/adb|/data/adb/modules|/data/adb/modules_update) exit 1 ;; esac
+  _run="$magpie_path/run"
+  magpie_path_unlinked "$_run" || exit 1
+  umask 077
+  case "$1" in
+    clear) [ -e "$_run" ] || exit 0 ;;
+    record) mkdir -p "$_run" || exit 1 ;;
+    *) exit 1 ;;
+  esac
+  cd -P "$_run" && [ "$(pwd -P)" = "$_mp/run" ] || exit 1
+  if [ -e .tile_pending ] || [ -L .tile_pending ]; then
+    magpie_single_regular_file .tile_pending || exit 1
+  fi
+  if [ "$1" = clear ]; then
+    rm -f .tile_pending
+  else
+    # mktemp 创建 0600 的普通文件；同目录原子替换，不截断或 chmod 旧目标。
+    _tmp=$(mktemp ./.tile_pending.XXXXXX) || exit 1
+    mv -fT "$_tmp" .tile_pending || { rm -f "$_tmp"; exit 1; }
+  fi
+)
+
 install_tile_app() {
   _apk="$MODPATH/magpie-tile.apk"
   if [ ! -f "$_apk" ]; then
@@ -104,55 +161,42 @@ install_tile_app() {
   ui_print "  通过 root 调用本模块的启停脚本。不装也不影响网关运行。"
   ui_print ""
 
-  # 找按键设备：有 KEY_VOLUMEUP/KEY_VOLUMEDOWN 的 input 设备
-  _ev=""
-  for _d in /dev/input/event*; do
-    [ -e "$_d" ] || continue
-    if getevent -lp "$_d" 2>/dev/null | grep -q 'KEY_VOLUMEUP'; then
-      _ev="$_d"
-      break
-    fi
-  done
-
-  if [ -z "$_ev" ]; then
-    ui_print "! 读不到音量键，跳过（默认不装）"
-    ui_print "  想装的话：刷完后打开模块目录里的 magpie-tile.apk 手动安装"
-    return 0
-  fi
-
-  ui_print "  音量键上 = 安装，音量键下 = 跳过（15 秒不按则跳过）"
-  _choice=""
-  # 超时用 timeout 包住 getevent。
-  # 不能写「后台 sleep 到点 kill $$」——子 shell 里的 $$ 是父 shell 的 pid，
-  # 那样会把整个刷机脚本杀掉。
-  _line=""
-  if command -v timeout >/dev/null 2>&1; then
-    _line=$(timeout 15 getevent -qlc 1 "$_ev" 2>/dev/null | head -1)
+  _choice=
+  if command -v getevent >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    ui_print "  音量键上 = 安装，音量键下 = 跳过（15 秒不按则本次跳过）"
+    _choice=$(tile_read_choice 2>/dev/null) || _choice=
   else
-    # 没有 timeout 就不读键：宁可默认跳过，也不要在刷机流程里无限等待
-    ui_print "! 没有 timeout 命令，跳过按键选择"
+    ui_print "! 无法限时读取音量键"
   fi
-  case "$_line" in
-    *KEY_VOLUMEUP*DOWN*)   _choice=install ;;
-    *KEY_VOLUMEDOWN*DOWN*) _choice=skip ;;
+  case "$_choice" in
+    skip)
+      if tile_pending clear 2>/dev/null; then
+        ui_print "- 已跳过，未保留开机补装请求。之后想装可手动打开 magpie-tile.apk。"
+      else
+        ui_print "! 本次已跳过，但未能清除旧补装标记；请检查 $magpie_path/run/.tile_pending"
+      fi
+      return 0 ;;
+    install) ;;
+    *)
+      # 没有新选择：不调用 pm，不创建标记，也不替用户撤销先前的明确选装。
+      ui_print "- 本次未选装：不立即安装，不新增补装；先前明确留下的请求不变。"
+      ui_print "  之后想装：打开模块目录里的 magpie-tile.apk"
+      return 0 ;;
   esac
 
-  if [ "$_choice" != "install" ]; then
-    ui_print "- 已跳过。之后想装：打开模块目录里的 magpie-tile.apk"
-    return 0
-  fi
-
-  # 刷机时的 mount namespace 里 pm 不一定能用，失败就交给开机后的 service.sh
-  . "$MODPATH/scripts/tile-app.sh" 2>/dev/null
-  if command -v tile_install >/dev/null 2>&1 && tile_install "$MODPATH" >/dev/null 2>&1; then
+  # 刷机时的 mount namespace 里 pm 不一定能用；不要把「已记录」说成「会装好」。
+  # 在子 shell 里加载可选 helper：损坏的包也不能因 dot 的致命错误中止整个刷机。
+  if ( [ -f "$MODPATH/scripts/tile-app.sh" ] && . "$MODPATH/scripts/tile-app.sh" &&
+       tile_install "$MODPATH" ) >/dev/null 2>&1; then
     ui_print "- 磁贴 App 已安装"
+    tile_pending clear 2>/dev/null || ui_print "! 未能清除旧补装标记；请检查 $magpie_path/run/.tile_pending"
     ui_print "  打开它授权一次 root，然后到「控制中心 → 编辑」把 Magpie 拖出来"
+  elif tile_pending record 2>/dev/null; then
+    ui_print "- 现在装不上，已记为「开机后再装」。"
+    ui_print "  若开机后仍未装好，可手动打开模块目录里的 magpie-tile.apk。"
   else
-    ui_print "- 现在装不上，已记为「开机后再装」"
-    ui_print "  重启后会自动装好；也可以手动打开模块目录里的 magpie-tile.apk"
-    mkdir -p "$magpie_path/run" 2>/dev/null
-    : > "$magpie_path/run/.tile_pending" 2>/dev/null
-    chmod 600 "$magpie_path/run/.tile_pending" 2>/dev/null
+    ui_print "! 现在装不上，也未能记录开机补装请求。"
+    ui_print "  请手动打开模块目录里的 magpie-tile.apk 安装。"
   fi
 }
 

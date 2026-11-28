@@ -438,13 +438,12 @@ wait "$_stop"
 lock_available && ok "启停锁最终释放且锁文件保留" || bad "启停锁未释放"
 
 
-echo "== 12 卸载 dnsmasq.keep.pid 必须校验进程身份"
-_kp=$$
-mkdir -p "$B/run"; echo "$_kp" > "$B/run/dnsmasq.keep.pid"
-DATA="$B"; export DATA
-# 抽出的卸载片段只能看到沙箱 PID；没有 fifo 身份时绝不能杀。
-eval "$(sed -n '/^if \[ -f "\$DATA\/run\/dnsmasq.keep.pid" \]/,/^fi$/p' "$SRCDIR/uninstall.sh")"
-if kill -0 "$_kp" 2>/dev/null; then ok "keep.pid 指向普通 sleep 时不误杀"; else bad "普通 sleep 被 keep.pid 误杀"; fi
+echo "== 12 卸载不重复做宽泛进程清理（精确身份另见 test-runtime-boundaries.py）"
+if grep -qE '(/proc/|kill -[0-9])' "$SRCDIR/uninstall.sh"; then
+  bad "卸载器绕过持锁的服务控制器清理进程"
+else
+  ok "卸载仅由控制器停止已核验的实例，旧看门狗自行退出"
+fi
 if grep -q '^kill_if_magpie()' "$SRCDIR/uninstall.sh"; then
   bad "卸载器不应保留模糊兜底进程终止函数"
 else
@@ -495,7 +494,7 @@ wait "$_a"; _ar=$?; wait "$_b"; _br=$?
 
 echo "== 14 restart 收到 TERM 返回 143，绝不继续 start"
 build
-stub_lib "pidof() { : > \"$B/stop-entered\"; sleep 0.4; return 1; }"
+stub_lib "magpie_main_pid() { : > \"$B/stop-entered\"; sleep 0.4; return 1; }"
 printf '#!/bin/sh\n: > "%s/start-sentinel"\nexit 0\n' "$B" > "$B/bin/magpie"
 chmod 755 "$B/bin/magpie"
 sh "$B/scripts/magpie.service" restart >"$B/restart.log" 2>&1 & _rp=$!
@@ -528,8 +527,9 @@ done
 
 echo "== 16 并发 start/stop：后来的 stop 不越过持锁 start"
 build
-stub_lib "pidof() {
-  [ \"\$1\" = dnsmasq ] || return 1
+# 使用所有控制器都需要的身份查询作屏障，不依赖旧版 DNS 清理是否扫描 pidof。
+stub_lib "magpie_main_pid() {
+  [ ! -e \"$B/entered.\$\$\" ] || return 1
   mkdir \"$B/critical\" 2>/dev/null || : > \"$B/overlap\"
   echo \$\$ >> \"$B/entries\"
   : > \"$B/entered.\$\$\"

@@ -27,6 +27,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: 校验工作流与 Issue 表单的 YAML 语法
+        run: ruby -rpsych -e 'ARGV.each { |f| Psych.parse_file(f) || abort(f) }' .github/workflows/*.yml .github/ISSUE_TEMPLATE/*.yml
+
       - name: 磁贴运行时变更必须递增 versionCode
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -88,3 +91,13 @@ jobs:
           sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$W/cert-details" > "$W/test-cert.txt"
           EXPECTED_CERT_FILE="$W/test-cert.txt" sh scripts/ci/verify-release-zip.sh "$ZIP" "$V"
           zipalign -c 4 "$W/tile.apk"
+
+          # 本地没有密钥时会走「复用 APK」分支。同一测试证书必须能复用；
+          # 用仓库正式指纹检查测试证书则必须拒绝，已有 ZIP 不能被覆写。
+          unset MAGPIE_KEYSTORE MAGPIE_KS_PASS
+          cp "$W/tile.apk" magpie-tile.apk
+          EXPECTED_CERT_FILE="$W/test-cert.txt" sh build.sh "$W/repacked"
+          cmp "$ZIP" "$W/repacked/magpie-$V.zip"
+          printf 'previous output\n' > "$W/repacked/magpie-$V.zip"
+          if sh build.sh "$W/repacked"; then echo 'unexpected signer accepted' >&2; exit 1; fi
+          grep -qx 'previous output' "$W/repacked/magpie-$V.zip"

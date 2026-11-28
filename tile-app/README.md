@@ -3,7 +3,7 @@
 把 Magpie 的启动/停止放进下拉控制中心。
 
 它不是 magpie 本体，也不代理任何流量——只做一件事：通过 root 调用
-`/data/adb/modules/magpie/scripts/magpie.service toggle`。
+`/data/adb/modules/magpie/scripts/magpie.service toggle-if <running|stopped>`。
 
 ## 为什么需要一个 App
 
@@ -41,7 +41,7 @@ APK 里还有一个与磁贴无关的 `Fetch` 类：设备上没有 curl 时，�
   音量键上 = 安装，音量键下 = 跳过（15 秒不按则跳过）
 ```
 
-选了安装但刷机环境下 `pm` 装不上时，会落一个标记，开机后由 `service.sh` 补装。
+明确跳过会撤销旧补装标记，超时则不新增请求。选了安装但 `pm` 当场失败时才记录意图；开机后独立尝试，失败再分别等待 30 秒、120 秒重试，不阻塞网关。不会主动降级现有 App。
 
 **手动**：模块目录下就有 `magpie-tile.apk`，直接用文件管理器打开安装。
 
@@ -94,8 +94,7 @@ adb shell am start -W --user 0 -n com.ruin.magpie.tile/.MainActivity
 `/data/adb/magpie/run/` 下的任何东西 —— 「读状态」也只能走 `su`。
 为了不让每次展开控制中心都 fork 一个 su，结果会缓存 5 秒。
 
-（`run/` 目录自身的 mode 随模块创建时的 umask 而定，本机实测是 `0777`。
-但这一级之上是 `0700`，所以对普通 App 来说仍然不可达。）
+受管数据目录的 `run/` 使用 `0700`；开机时只修整已核验的模块路径。历史版本留下的权限不代表此版的默认值。
 
 ## 自查
 
@@ -167,10 +166,7 @@ sh tile-app/build.sh
 **每个版本必须用同一把 key 签名**，否则用户更新时会因为签名不一致装不上，
 只能先卸载（卸载会丢数据）。
 
-密钥不进仓库。需要放在两个地方互为备份：
-
-1. 本机 `/workspace/magpie-keys/magpie-tile.jks`（口令另存）
-2. GitHub 私有仓库
+请离线备份密钥和口令；发布时只允许受保护的签名作业访问。不要把密钥、口令或它们的编码副本提交到 Git。具体见[发布策略](../docs/release-policy.md)。
 
 丢了这把 key，后续版本的 APK 就没法和已装的兼容。
 

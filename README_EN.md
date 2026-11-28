@@ -332,6 +332,8 @@ providers, quota and keys live here.
 
 ### CLI
 
+The wrapper exports the configured `MAGPIE_ADDR`, including custom ports. An existing command or symlink in a root manager’s bin directory is preserved. If names conflict, invoke `/data/adb/modules/magpie/scripts/magpie-cli.sh` directly.
+
 ```sh
 su -c magpie --version
 # example: magpie 0.1.3620   ← version tracks the binary, do not treat it as fixed
@@ -532,6 +534,8 @@ current exposure plainly.
 
 ## Configuration
 
+`magpie.config` is sourced by root shell scripts. Treat its contents as trusted code, keep mode `0600` and do not replace it with a file from an untrusted source.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `magpie_path` | `/data/adb/magpie` | Data directory: binary, logs, magpie's own data |
@@ -633,7 +637,7 @@ the script then names the likely freezer (NoActive / CZero / system
 | Install: runs, then fails the self-check | Preflight failure leaves the candidate at `bin/magpie.rejected` when possible; failure at the final path restores the exact previous state |
 | Want the previous body back | `install.sh rollback` |
 | Start fails, log says port in use | Identify the listener with `doctor.sh` or `ss -ltnp`; use `restart` if it is this service. Do not kill all `pidof magpie` results: MCP children may share that name |
-| Panel data never changes | Check "数据 HH:MM:SS": normal polling refreshes about every 2.5 min by default; custom intervals or failed-start backoff can delay it. If stale for a long time, check the watchdog process and startup/error entries in `run/watchdog.log`; it does not log every round |
+| Panel data never changes | Check the sample timestamp ("采样"): normal polling refreshes about every 2.5 min by default; custom intervals or failed-start backoff can delay it. If stale for a long time, check the watchdog process and startup/error entries in `run/watchdog.log`; it does not log every round |
 | HTTPS fails with certificate errors | Delete `/data/adb/magpie/data/certs/ca-bundle.crt*` and restart; it rebuilds |
 | Native channels throw `lookup ... on [::1]:53: connection refused` | Go has no upstream. `cat /etc/resolv.conf`; if it is missing, reboot once so the overlay applies, then check `[8/10]` in doctor |
 | Process returns after being killed | The watchdog revives unexpected exits. Stop through the menu, tile or `magpie.service stop` instead; `.user_stopped` prevents watchdog restarts during this boot |
@@ -805,6 +809,8 @@ Use your own path if you changed `magpie_path`.
 
 ## Quick Settings tile (optional)
 
+Volume up opts in. Volume down skips and cancels an earlier pending install. A timeout makes no new request and leaves earlier explicit choices intact. If `pm` cannot install during flashing, a boot worker tries once and retries after waits of 30 and 120 seconds; it does not block startup. After three failures the request remains for a later boot.
+
 While flashing, the volume keys let you install a small companion app that puts Magpie's
 start/stop into the pull-down Quick Settings panel:
 
@@ -840,16 +846,12 @@ Implementation, fallback commands and build notes: [tile-app/README.md](tile-app
   for routine upgrades.
 - Digests come from usemagpie.ai's manifest; no GPG verification is done. See
   [Installing the body](#installing-the-body).
-- The webroot panel is **not live monitoring**. It re-reads `status.json` every 5 s, but that file is
-  rewritten on events (start/stop, gateway switch, LAN address change) plus once every 5 watchdog
-  rounds (~2.5 min). Uptime and memory can lag by a couple of minutes; the "数据 HH:MM:SS" in the
-  status bar is when the file was last written. For the current instantaneous view use `doctor.sh`.
+- P2 is **not a live monitor**. It reads only the visible status or log tab, five seconds after the previous request finishes. The watchdog normally produces a status snapshot about every 2½ minutes. A snapshot over five minutes old, an unknown timestamp, or a failed read is not shown as current and stale endpoints cannot be copied. A long custom watchdog interval may cause this even when the gateway is healthy.
 - magpie itself is not bundled; its own updates are its business.
 - KernelSU / APatch paths are covered in the scripts (`ksud`, `/data/adb/ap/bin`, `/data/adb/ksud`)
   but **only Magisk 31.1 has been tested here**.
 - Tested on arm64 + Android 14 (HyperOS 2.0); theoretically any arm64 device on Android 10+.
-- Legacy dnsmasq cleanup targets only old processes with `listen-address=::1`; the system's
-  tethering dnsmasq is never touched.
+- Only legacy DNS helpers identified by the module’s saved PID and its own pidfile/FIFO are stopped. Unidentifiable remnants are left alone rather than signalling unrelated processes; a device reboot clears them.
 - **The DNS overlay needs one reboot**: `system/etc/resolv.conf` is mounted by Magisk at boot, so
   installing or updating the module needs a reboot. Afterwards a service restart rewrites the
   overlay; if doctor still shows the old upstream, reboot once more.
@@ -865,28 +867,29 @@ One command covers everything, and it is what CI and the release workflow run:
 sh tests/run-all.sh   # syntax checks + shellcheck + count check + JVM tests + all suites
 ```
 
-It needs `python3` (fixture server), `javac`/`java` (JVM tests) and `shellcheck`, and runs entirely
-in temp directories. To run a single suite:
+It needs Python 3, a JDK with `keytool`, ShellCheck, Node.js 18+, `curl` and `openssl`; no npm install is needed. Each counted suite runs once per invocation, using an isolated directory and an OS-assigned loopback port. To run a single suite:
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # fixtures: fake binary + manifest variants
-(cd /tmp/fx && python3 -m http.server 8899) &   # serve them
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 80 assertions
-sh tests/test-watchdog.sh                                 # watchdog, 17 assertions
+(cd /tmp/fx && python3 -m http.server 8899 --bind 127.0.0.1) &   # serve them
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # installer, 90 assertions
+sh tests/test-watchdog.sh                                 # watchdog, 23 assertions
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [Action] menu, 59 assertions
 sh tests/test-service.sh                                  # lifecycle, process identity, stop results: 194 assertions
-sh tests/test-lib.sh                                      # pure helpers and process identity: 275 assertions
+sh tests/test-lib.sh                                      # pure helpers and process identity: 313 assertions
 sh tests/test-tile-check.sh                               # self-check data, unknown results and large dumps: 122 assertions
 ```
 
-747 assertions total (80 + 17 + 59 + 194 + 275 + 122), plus 446 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions, 12 HTTPS downloader). Tests use temp
+801 assertions total (90 + 23 + 59 + 194 + 313 + 122), plus 453 JVM cases in `tests/jvm/` (21 classification, 28 request ordering, 361 self-check, 16 Shell process and URL checks, 8 serial-executor assertions, 19 HTTPS downloader). Tests use temp
 directories and stubbed process checks — a running service is never touched. These counts describe
 the suites; they do not mean every test has been run on a real device. When using a different port, generate the fixtures with the same base
 (`make-fixtures.py /tmp/fx --base http://127.0.0.1:18999`), otherwise the manifest points at the
 wrong port and you get a pile of fake failures. Details and known gaps in
 [tests/README.md](tests/README.md).
 
-`run-all.sh` also runs 106 Python unittests: 34 release/build, 9 tile-version gate, 18 tile lifecycle, 3 launcher, 25 doctor-tile, 11 release policy and 6 installer TLS. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
+`run-all.sh` also runs 155 Python tests and 13 WebUI tests covering builds, releases, installation, lifecycle, diagnostics and asynchronous UI behavior. Lifecycle cases use SDK 29/35 in-memory stubs; they are not real Android-device tests.
+
+For a local build, set `MAGPIE_KEYSTORE` and `MAGPIE_KS_PASS`, then run `sh build.sh dist`. Without a keystore a pre-signed root-level `magpie-tile.apk` can be reused, but `aapt` and `apksigner` must confirm the package, version code, SDK and expected signer before replacing existing output.
 
 Before releasing, configure the [release policy](docs/release-policy.md): protected environments, a policy commit SHA, immutable releases and tag rules. Bump the module and tile independently where appropriate, wait for CI on that exact `main` commit, then push the matching annotated tag. Building without release secrets, signing, public release and proposing the manager update are separate jobs. The update becomes visible only when its PR is merged into `main`. A dispatch on `main` verifies an existing draft or release; it does not create a new tag attestation.
 

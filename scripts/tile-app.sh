@@ -8,18 +8,32 @@
 TILE_PKG=com.ruin.magpie.tile
 TILE_APK_NAME=magpie-tile.apk
 
-# 已装版本号；没装则输出空
-# pm list 只查一个包，约 30 ms；pm dump 要吐整份包信息，实测约 1 秒。
+# pm list 的包名参数是子串过滤。只认成功查询里完整的 package: 与 versionCode:
+# 字段，不把近似包名、数字前缀或命令失败前的部分输出当成「已是最新」。
 tile_installed_code() {
-  pm list packages --show-versioncode "$TILE_PKG" 2>/dev/null \
-    | sed -n "s/^package:$TILE_PKG versionCode:\([0-9][0-9]*\).*/\1/p" \
-    | head -1
+  _tile_list=$(pm list packages --show-versioncode "$TILE_PKG" 2>/dev/null) || return 1
+  printf '%s\n' "$_tile_list" | awk -v pkg="package:$TILE_PKG" '
+    { sub(/\r$/, "") }
+    $1 == pkg {
+      for (i = 2; i <= NF; i++) if ($i ~ /^versionCode:[0-9]+$/) {
+        sub(/^versionCode:/, "", $i); print $i; exit
+      }
+    }'
 }
 
-# 模块里那份 APK 的版本号（读 module.prop 旁边的小文件，见 build.sh）
+# Release 的 tile-version 应恰好一行正整数，不能从「1.2」拼出 12。
 tile_bundled_code() {
-  _f="$1/tile-version"
-  [ -f "$_f" ] && sed -n '1p' "$_f" | tr -dc '0-9'
+  [ -f "$1/tile-version" ] || return 1
+  awk 'NR == 1 { sub(/\r$/, ""); code = $0 }
+       END { if (NR != 1 || code !~ /^[1-9][0-9]*$/ || length(code) > 10 || code + 0 > 2147483647) exit 1
+             print code }' "$1/tile-version"
+}
+
+# AOSP pm 的结果是 stdout 最后一条非空行；诊断里也可能有 Success 字样。
+# 必须先等 pm 完成拿到它的退出码，不能只看管道末端 grep 的返回值。
+tile_pm_success() {
+  _tile_reply=$(pm "$@" 2>/dev/null) || return 1
+  printf '%s\n' "$_tile_reply" | awk '{ sub(/\r$/, "") } NF { ok = (NF == 1 && $1 == "Success") } END { exit !ok }'
 }
 
 # 安装/更新。$1 = 模块目录。返回 0 表示装好（或本来就够新）。
@@ -28,15 +42,16 @@ tile_install() {
   _apk="$_mod/$TILE_APK_NAME"
   [ -f "$_apk" ] || { echo "找不到 $_apk"; return 1; }
 
-  _want=$(tile_bundled_code "$_mod")
-  _have=$(tile_installed_code)
+  _want=$(tile_bundled_code "$_mod") || _want=
+  _have=$(tile_installed_code) || _have=
   if [ -n "$_have" ] && [ -n "$_want" ] && [ "$_have" -ge "$_want" ] 2>/dev/null; then
     echo "已是最新（versionCode $_have）"
     return 0
   fi
 
-  # -r 覆盖安装；-d 允许降级（用户从新版模块退回旧版时不该失败）
-  if pm install -r -d "$_apk" 2>&1 | grep -q 'Success'; then
+  # 查询不通不等于未安装。用户既已选装，仍可尝试 -r，但不要用 -d
+  # 放行未知降级；也不代用户授予任何权限。
+  if tile_pm_success install -r "$_apk"; then
     echo "已安装 versionCode ${_want:-?}"
     return 0
   fi
@@ -45,7 +60,7 @@ tile_install() {
 
 # 卸载
 tile_uninstall() {
-  pm uninstall "$TILE_PKG" 2>&1 | grep -q 'Success'
+  tile_pm_success uninstall "$TILE_PKG"
 }
 
 # 「桌面图标已隐藏」的意图记在这里，而不是 App 自己的 SharedPreferences。

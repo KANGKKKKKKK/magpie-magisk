@@ -84,6 +84,8 @@ if [ -z "$API_PORT" ]; then
   ADDR_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用（应为 主机:端口，1-65535；IPv6 用 [::1]:3425）"
 elif [ -z "$WEB_PORT" ]; then
   ADDR_ERROR="MAGPIE_WEB_ADDR=$WEB_ADDR 的端口不可用（应为 主机:端口，1-65535）"
+elif [ "$API_PORT" = "$WEB_PORT" ]; then
+  ADDR_ERROR="网关与面板不能使用同一个端口 $API_PORT"
 fi
 
 # 只认 serve 主进程：MCP 子进程也叫 magpie，用 pidof 会误判
@@ -205,16 +207,18 @@ write_conf_host() {
   _h="$1"
   _f="$CONF"
   [ -f "$_f" ] || { echo "找不到配置文件：$_f"; return 1; }
-  _tmp="$_f.tmp.$$"
-  # 局域网模式只开放 API；管理面板始终绑定回环地址。
-  sed -e "s|^MAGPIE_ADDR=.*|MAGPIE_ADDR=\"$_h:$API_PORT\"|" \
-      -e "s|^MAGPIE_WEB_ADDR=.*|MAGPIE_WEB_ADDR=\"127.0.0.1:$WEB_PORT\"|" "$_f" > "$_tmp" 2>/dev/null
-  [ -s "$_tmp" ] || { rm -f "$_tmp"; echo "写配置失败：sed 没有产出内容"; return 1; }
-  grep -q '^MAGPIE_ADDR=' "$_tmp"     || printf 'MAGPIE_ADDR="%s:%s"\n' "$_h" "$API_PORT" >> "$_tmp"
-  grep -q '^MAGPIE_WEB_ADDR=' "$_tmp" || printf 'MAGPIE_WEB_ADDR="127.0.0.1:%s"\n' "$WEB_PORT" >> "$_tmp"
-  # 原子替换：中途断电或被杀也不会留下半份配置。配置由 root 拥有、权限 600，
-  # 先给临时文件同样权限再 mv，不丢权限。
-  chmod 600 "$_tmp" 2>/dev/null
+  _tmp=$(mktemp "$_f.tmp.XXXXXX") || { echo "无法创建私有配置临时文件"; return 1; }
+  # sed 在读写中途也可能失败并留下非空输出；非空和 sh -n 都不能代替退出码。
+  if ! sed -e "s|^MAGPIE_ADDR=.*|MAGPIE_ADDR=\"$_h:$API_PORT\"|" \
+           -e "s|^MAGPIE_WEB_ADDR=.*|MAGPIE_WEB_ADDR=\"127.0.0.1:$WEB_PORT\"|" "$_f" > "$_tmp" ||
+     [ ! -s "$_tmp" ]; then
+    rm -f "$_tmp"; echo "生成配置失败，原文件未改"; return 1
+  fi
+  if ! { grep -q '^MAGPIE_ADDR=' "$_tmp" || printf '\nMAGPIE_ADDR="%s:%s"\n' "$_h" "$API_PORT" >> "$_tmp"; } ||
+     ! { grep -q '^MAGPIE_WEB_ADDR=' "$_tmp" || printf '\nMAGPIE_WEB_ADDR="127.0.0.1:%s"\n' "$WEB_PORT" >> "$_tmp"; } ||
+     ! chmod 600 "$_tmp"; then
+    rm -f "$_tmp"; echo "保存配置或权限失败，原文件未改"; return 1
+  fi
   sh -n "$_tmp" 2>/dev/null || { rm -f "$_tmp"; echo "写配置失败：生成的配置语法不对，原文件未改"; return 1; }
   mv -f "$_tmp" "$_f" || { rm -f "$_tmp"; echo "写配置失败：无法写入 $_f"; return 1; }
   MAGPIE_ADDR="$_h:$API_PORT"

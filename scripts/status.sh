@@ -4,9 +4,10 @@
 #       sh status.sh -q           只打印状态文字
 #       sh status.sh --webonly    只刷 webroot 下的两个文件，不碰管理器描述
 #
-# --webonly 是给看门狗用的：面板每 5 秒轮询 status.json，要有东西定期重写它
-# 数字才会动；但改模块描述、调 ksud 这些一分钟两次没必要，也太吵。
+# --webonly 供看门狗定期重写快照（默认约 2.5 分钟一次）；不用改模块描述或调用 ksud。
 
+# 直接从管理器或命令行调用时同样不能让未完成的快照/日志临时文件可被旁读。
+umask 077
 WEB_ONLY=0
 _QUIET=0
 for _arg in "$@"; do
@@ -34,7 +35,7 @@ if [ -f "$CONF" ] && ! sh -n "$CONF" >/dev/null 2>&1; then
   echo "! 配置文件有语法错误，已改用默认值：$CONF" >&2
   MAGPIE_CONF_ERROR="配置文件有语法错误（$CONF），已按默认值运行"
 else
-  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+  [ -f "$CONF" ] && . "$CONF" >/dev/null 2>&1
 fi
 [ -n "$_ENV_ICON" ] && MAGPIE_ICON="$_ENV_ICON"
 
@@ -46,7 +47,6 @@ if [ -f "$_NETLIB" ]; then
 else
   lan_ip() { return 1; }
   magpie_main_pid() { pidof magpie 2>/dev/null | tr ' ' '\n' | head -1; }
-  magpie_all_pids() { pidof magpie 2>/dev/null | tr ' ' '\n' | grep -v '^$'; }
   magpie_rss_mb() { return 1; }
   # 没有 lib.sh 时的退路：宽进（只要能切出数字就用），不在这里重复整套校验。
   addr_host() { case "$1" in \[*\]:*) _h=${1#\[}; echo "${_h%%\]*}" ;; *:*) echo "${1%:*}" ;; *) echo "$1" ;; esac; }
@@ -71,13 +71,22 @@ if [ -n "${MAGPIE_CONF_ERROR:-}" ]; then
   CONFIG_WARNING=$MAGPIE_CONF_ERROR
 fi
 if [ -z "$PORT" ]; then
-  CONFIG_ERROR="MAGPIE_ADDR=$MAGPIE_ADDR 的端口不可用，应写成 主机:端口（1-65535，IPv6 用 [::1]:3425）"
+  # 不回显原值：误粘贴的登录链接不应跟着诊断写入状态快照。
+  CONFIG_ERROR="MAGPIE_ADDR 的端口不可用，应写成 主机:端口（1-65535，IPv6 用 [::1]:3425）"
 elif [ -z "$WEB_PORT" ]; then
-  CONFIG_ERROR="面板监听地址 $WEB_ADDR 的端口不可用，MAGPIE_WEB_ADDR 应写成 主机:端口"
+  CONFIG_ERROR="MAGPIE_WEB_ADDR 的端口不可用，应写成 主机:端口"
+elif [ "$PORT" = "$WEB_PORT" ]; then
+  CONFIG_ERROR="网关与面板不能使用同一个端口，请检查 MAGPIE_ADDR 和 MAGPIE_WEB_ADDR"
 fi
-# 配置有错时仍然输出合法 JSON，但端口类字段留空，不编一个假地址出来
+# 配置有错时仍然输出合法 JSON；错误的端口记为 0，不编一个假地址出来。
 [ -n "$PORT" ] || PORT=0
 [ -n "$WEB_PORT" ] || WEB_PORT=0
+
+# 记录采样时刻，不把 HTTP 读取时刻或慢操作结束时刻冒充采样时刻。
+# 保留旧版 updated 字段；完整时间缺失时输出 0（未知），仍是合法 JSON。
+_st=$(date '+%s %H:%M:%S' 2>/dev/null) || _st='0 '
+UPDATED_EPOCH=${_st%% *}; UPDATED=${_st#* }
+case "$UPDATED_EPOCH" in ''|0*|*[!0-9]*) UPDATED_EPOCH=0 ;; esac
 
 # 只认 serve 主进程：MCP 子进程也叫 magpie，不能拿它们的 PID 当服务状态
 PID=$(magpie_main_pid 2>/dev/null)
@@ -101,9 +110,9 @@ desc_line() {
   # 配置本身有问题时先说这个：此时显示任何地址都是错的
   if [ -n "$CONFIG_ERROR" ]; then
     if [ "$ICON_ON" = "0" ]; then
-      echo "[配置有误] 监听地址要写成 主机:端口"
+      echo "[配置有误] $CONFIG_ERROR"
     else
-      echo "🟠 配置有误 | 监听地址要写成 主机:端口"
+      echo "🟠 配置有误 | $CONFIG_ERROR"
     fi
     return 0
   fi
@@ -197,12 +206,20 @@ fi
 if is_loopback_host "$(addr_host "$MAGPIE_ADDR")"; then LAN_OPEN=0; else LAN_OPEN=1; fi
 if is_loopback_host "$(addr_host "$WEB_ADDR")"; then WEB_LAN_OPEN=0; else WEB_LAN_OPEN=1; fi
 
-# API 地址是配置候选；Web 地址只发布控制器确认归属的本机回环监听。
+# API / LAN 地址是配置候选。webUrl 的归属只由控制器核验；入快照前另核对公开格式，
+# 即使混用版本或配置向 stdout 打了多余的内容，也不把整段输出或密码链接写入文件。
 api_url=''; api_root=''; web_url=''
 if [ -z "$CONFIG_ERROR" ]; then
   if api_root=$(magpie_config_url "$MAGPIE_ADDR" 2>/dev/null); then api_url="$api_root/v1"; fi
   if [ "$RUNNING" = 1 ]; then
-    web_url=$(MAGPIE_CONF="$CONF" sh "$MODDIR/scripts/magpie.service" panel-url 2>/dev/null) || web_url=''
+    _panel=$(MAGPIE_CONF="$CONF" sh "$MODDIR/scripts/magpie.service" panel-url 2>/dev/null) || _panel=''
+    case "$_panel" in
+      "http://[::1]:$WEB_PORT/") web_url=$_panel ;;
+      http://127.*:"$WEB_PORT"/)
+        _host=${_panel#http://}
+        if is_ipv4_addr "${_host%:"$WEB_PORT"/}" 2>/dev/null; then web_url=$_panel; fi ;;
+    esac
+    unset _panel _host
   fi
 fi
 lan_api=''; lan_web=''
@@ -216,25 +233,22 @@ if [ -n "$LAN_IP" ] && [ -z "$CONFIG_ERROR" ]; then
 fi
 
 # 原子写：同目录临时文件 → 设权限 → mv 替换。
-# 面板每 5 秒来 fetch 一次，直接 > 覆盖的话它可能读到半份 JSON。
-# 权限必须在 mv 之前设好，否则替换后到 chmod 之间有一小段 644 的窗口。
-# 临时名带 $$：并发刷新时不会互相踩，也不用 $RANDOM（dash 里它是空的）。
+# 面板反复读取同一文件，直接 > 覆盖的话它可能读到半份 JSON。
+# 在权限设置成功后才替换上一份完整文件。
+# 同目录 mktemp：并发刷新各写各的，也不复用上次意外退出的临时文件。
 write_atomic() {
   _dst=$1
-  _tmp="$_dst.tmp.$$"
-  if ! cat > "$_tmp" 2>/dev/null; then
-    rm -f "$_tmp" 2>/dev/null
-    return 1
-  fi
-  chmod "${2:-600}" "$_tmp" 2>/dev/null
-  if mv -f "$_tmp" "$_dst" 2>/dev/null; then
+  _tmp=$(mktemp "$_dst.tmp.XXXXXX") || return 1
+  if cat > "$_tmp" 2>/dev/null && chmod "${2:-600}" "$_tmp" 2>/dev/null &&
+     mv -f "$_tmp" "$_dst" 2>/dev/null; then
     return 0
   fi
   rm -f "$_tmp" 2>/dev/null
   return 1
 }
 
-cat <<EOF | write_atomic "$MODDIR/webroot/status.json" 600
+_write_rc=0
+cat <<EOF | write_atomic "$MODDIR/webroot/status.json" 600 || _write_rc=1
 {
   "running": $([ "$RUNNING" = "1" ] && echo true || echo false),
   "version": "$(json_str "$VERSION")",
@@ -254,11 +268,12 @@ cat <<EOF | write_atomic "$MODDIR/webroot/status.json" 600
   "lanWebUrl": "$(json_str "$lan_web")",
   "configError": "$(json_str "$CONFIG_ERROR")",
   "configWarning": "$(json_str "${CONFIG_WARNING:-}")",
-  "updated": "$(date +'%H:%M:%S')"
+  "updatedEpoch": $UPDATED_EPOCH,
+  "updated": "$(json_str "$UPDATED")"
 }
 EOF
 
-# 日志尾供面板直接 fetch，同样原子写
+# 日志尾供日志标签直接读取，同样原子写
 LOG_SRC="$magpie_path/run/magpie.log"
 LOG_OUT="$MODDIR/webroot/lastlog.txt"
 if [ -f "$LOG_SRC" ]; then
@@ -268,13 +283,13 @@ if [ -f "$LOG_SRC" ]; then
     -e 's/((secret|password|token|api[_-]?key)=)[^&[:space:]]+/\1<redacted>/g' \
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1<redacted>/g' \
     -e 's/sk-[A-Za-z0-9_-]{8,}/<redacted>/g' \
-    | write_atomic "$LOG_OUT" 600
+    | write_atomic "$LOG_OUT" 600 || _write_rc=1
 else
-  echo "(暂无日志, 服务可能还没启动过)" | write_atomic "$LOG_OUT" 600
+  echo "(暂无日志, 服务可能还没启动过)" | write_atomic "$LOG_OUT" 600 || _write_rc=1
 fi
 
 # 以下改的是管理器里那一行与 module.prop。--webonly 时跳过：
-# 这些内容只在启停、配置变化时才需要动，没必要每 30 秒重写一次。
+# 管理器描述只在启停、配置变化时才需要动，定期刷新快照时跳过。
 if [ "$WEB_ONLY" != "1" ]; then
 
 # KernelSU / APatch 用 ksud 覆盖描述
@@ -304,3 +319,4 @@ if [ -f "$MODDIR/module.prop" ]; then
 fi
 
 fi  # WEB_ONLY
+exit "$_write_rc"

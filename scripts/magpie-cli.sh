@@ -5,6 +5,8 @@
 #   MAGPIE_BUN    Android 版 Bun（自带的 glibc 版跑不起来）
 # 用法: magpie [参数...]
 
+umask 077
+
 # 数据目录跟着配置走：自定义 magpie_path 时，命令不能还指着默认目录。
 # 查找顺序与 magpie.service / status.sh 一致（MAGPIE_CONF > 数据目录那份 > 模块自带默认）。
 _self="$0"
@@ -19,11 +21,18 @@ done
 _SD=$(cd "$(dirname "$_self")" 2>/dev/null && pwd)
 [ -n "$_SD" ] || _SD=/data/adb/magpie/scripts
 [ -f "$_SD/lib.sh" ] && . "$_SD/lib.sh" 2>/dev/null
-command -v magpie_resolve_conf >/dev/null 2>&1 || magpie_resolve_conf() { return 1; }
+
 
 magpie_path=/data/adb/magpie
-_CONF=$(magpie_resolve_conf "$_SD/.." 2>/dev/null)
-[ -n "$_CONF" ] && sh -n "$_CONF" >/dev/null 2>&1 && . "$_CONF" 2>/dev/null
+if command -v magpie_resolve_conf >/dev/null 2>&1; then
+  _CONF=$(magpie_resolve_conf "$_SD/..") || _CONF=''
+else
+  _CONF=${MAGPIE_CONF:-/data/adb/magpie/scripts/magpie.config}
+fi
+if [ -f "$_CONF" ]; then
+  if sh -n "$_CONF" >/dev/null 2>&1; then . "$_CONF"
+  else echo "! 配置文件有语法错误，改用默认值：$_CONF" >&2; fi
+fi
 [ -n "${magpie_path:-}" ] || magpie_path=/data/adb/magpie
 
 MAGPIE_DATA="$magpie_path/data"
@@ -59,20 +68,8 @@ for _b in "$MAGPIE_DATA"/.cache/magpie/bun/*/magpie-bun; do
 done
 
 # 网关地址
-[ -n "$MAGPIE_ADDR" ] || export MAGPIE_ADDR="127.0.0.1:3425"
-
-# 上游 DNS：magpie 本体是不链接 libc 的 Go 静态 PIE，只能读 /etc/resolv.conf。
-# 模块用 Magisk 覆盖提供 /etc/resolv.conf，内容由 magpie.service 按 MAGPIE_DNS 重写，
-# 所以改完这里重启服务即可（首次装上新版要重启一次手机才会出现覆盖文件）。
-#
-# 只有上面 magpie_resolve_conf 什么都没找到时才退回默认路径再读一次：
-# lib.sh 缺失时它会返回 1，那次 source 是空的，这里是唯一能读到配置的机会。
-# 反过来，无条件再读一遍会把自定义的 MAGPIE_CONF / magpie_path 覆盖回默认值。
-if [ -z "${_CONF:-}" ]; then
-  _mp_conf="/data/adb/magpie/scripts/magpie.config"
-  # shellcheck disable=SC1090
-  [ -f "$_mp_conf" ] && sh -n "$_mp_conf" >/dev/null 2>&1 && . "$_mp_conf" 2>/dev/null
-fi
+# 配置中通常只是赋值而不是 export；实际运行的上游 CLI 也必须收到自定义端口。
+export MAGPIE_ADDR="${MAGPIE_ADDR:-127.0.0.1:3425}"
 export RES_OPTIONS="${RES_OPTIONS:-timeout:2 attempts:2}"
 if [ ! -r /etc/resolv.conf ]; then
   echo "提示：/etc/resolv.conf 不存在，Go 解析器没有上游 DNS（原生通道会全部失败）。" >&2

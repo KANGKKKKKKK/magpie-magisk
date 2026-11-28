@@ -306,6 +306,8 @@ Magisk 的文本框不支持光标控制，所以那里只画一次菜单、每�
 
 ### 命令行
 
+CLI 会把配置中的 `MAGPIE_ADDR`（包括自定义端口）传给本体。创建兼容入口时不会覆盖其他工具占用的同名文件或链接；有冲突可直接调用 `/data/adb/modules/magpie/scripts/magpie-cli.sh`。
+
 ```sh
 su -c magpie --version
 # 示例输出：magpie 0.1.3620   ← 版本随本体更新而变，别把这里当固定值
@@ -507,6 +509,8 @@ curl --fail-with-body -sS --connect-timeout 5 --max-time 120 \
 
 ## 配置
 
+`magpie.config` 是 Root 脚本会加载的 Shell 配置，不是普通键值数据。只使用自己信任的内容，保留 `0600` 权限，不要从不明来源整份替换。
+
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `magpie_path` | `/data/adb/magpie` | 数据目录，二进制 / 日志 / magpie 自身数据都在里面 |
@@ -642,7 +646,7 @@ flowchart TD
 
 - **`service.sh`**：开机后等 `sys.boot_completed=1`，归档日志、启动服务、刷新状态；另外常驻一个 30 秒巡检的看门狗，发现进程没了就重新拉起。模块被禁用、正在卸载或目录被删时，看门狗自行退出。
 - **`action.sh`**：`[执行]` 菜单。用音量键选动作（切网关 / 看地址 / 启停 / 重启 / 开面板 / 退出），也支持 `status`、`gateway`、`lan`、`local`、`start`、`stop`、`restart`、`panel` 子命令。读不到音量键时退回老式一键启停；每次动作后刷新模块描述。
-- **`scripts/magpie.service`**：真正的服务控制。启动前清理 v0.2 遗留的 dnsmasq、注入环境变量、拉起 `magpie serve --web=<addr>`、写 PID 与面板链接。
+- **`scripts/magpie.service`**：真正的服务控制。启动前核验旧 DNS 辅助进程、注入环境变量、拉起 `magpie serve --web=<addr>` 并写 PID。面板地址按请求现场核验，不写含密码的链接缓存。
 
 </details>
 
@@ -763,6 +767,9 @@ su -c rm -rf /data/adb/magpie        # 不可恢复：本体、供应商、密�
 
 ## 控制中心磁贴（可选）
 
+音量上明确选装，音量下跳过并撤销上次未完成的补装；不按键只表示本次未选择，不会新增安装请求。已选装但刷入环境的 `pm` 不可用时，开机后独立尝试一次，再分别等待 30 秒、120 秒，最多再试两次；仍失败则保留请求到下次开机，不阻塞网关启动。
+
+
 刷模块时可以用音量键选装一个配套 App，把 Magpie 的启动/停止放进下拉控制中心。
 
 ```
@@ -792,14 +799,11 @@ su -c rm -rf /data/adb/magpie        # 不可恢复：本体、供应商、密�
 - 安装器**只支持 arm64**：发布页里没有 arm32 / x86_64 的 Android 构建，非 arm64 设备会直接拒绝，而不是装错架构。
 - 安装器默认用于首次安装；已有可用本体时，不带 `--yes` 不会覆盖。显式 `install --yes` 会按当前清单重新部署，常规升级仍建议用 `magpie update`。
 - 摘要来自 usemagpie.ai 的清单，未做 GPG 签名验证；见[安装本体](#安装本体让模块来做)。
-- webroot 面板**不是实时监控**。面板每 5 秒重读一次 `status.json`，而这份文件由
-  事件（启停、切网关、局域网地址变化）触发重写，另外看门狗每 5 轮（默认约 2.5 分钟）
-  刷一次。所以运行时长、内存最多滞后两三分钟；状态栏上的「数据 HH:MM:SS」就是上次
-  写入的时刻。要看当前这一刻的真实情况用 `doctor.sh`。
+- 模块面板 **不是实时监控**。P2 只读取当前标签（状态或日志），可见时在上次读取结束 5 秒后再刷新；看门狗默认约 2.5 分钟生成一次新快照。状态快照超过 5 分钟、时间来源不明或读取失败时，不显示成当前状态，也不保留可复制的旧地址。手动调长巡检间隔也可能看到“过期”，不代表网关已停止。
 - 不含 magpie 本体；本体更新由 magpie 自己负责，模块只管调度。
 - KernelSU / APatch 的路径都已经在脚本里覆盖（`ksud`、`/data/adb/ap/bin`、`/data/adb/ksud`），但**只在 Magisk 31.1 上实测过**，KernelSU / APatch 未实测。
 - 只在 arm64 + Android 14（HyperOS 2.0）实测；理论上 Android 10+ 的 arm64 设备都适用。
-- 旧版 dnsmasq 清理只针对 `listen-address=::1` 的老进程，不碰系统热点的 dnsmasq。
+- 只按本模块旧 PID 记录和专属 pidfile/FIFO 识别旧 DNS 辅助进程；不再按全机进程名清理。没有归属证据的极旧残留不会被强杀，重启手机即可清掉。
 - **DNS 覆盖要重启一次手机才生效**：`system/etc/resolv.conf` 由 Magisk 在开机时挂载，装或更新模块后得重启；之后改 `MAGPIE_DNS` 重启服务即可重写覆盖文件，若 doctor 里上游还是旧的，再重启一次手机。
 - **磁贴 Shell 超时不代表 root 后代任务已取消**：保留不自动重放 toggle；超时显示未知，不把部分输出当作成功。跨 Magisk/KernelSU/APatch 的 root 控制任务取消尚待独立环境验证，不能把客户端 Process 清理等同于整棵 root 任务终止。
 - **停止意图跨版本的保守处理**：看门狗和开机都通过 `auto-start`，同一 boot 的停止意图会在锁内重新检查。旧版无 boot ID 的空标记、或 boot ID 无法读取时，保守地保留停止意图，显式启动一次即可解除。磁贴须与控制器一起更新：新版磁贴不向旧控制器回退到无条件 `toggle`，画面失配或结果不明时只刷新。
@@ -813,29 +817,29 @@ su -c rm -rf /data/adb/magpie        # 不可恢复：本体、供应商、密�
 sh tests/run-all.sh   # 语法检查 + shellcheck + 断言计数 + JVM 单测 + 全部套件
 ```
 
-依赖 `python3`（夹具静态服务）、`javac`/`java`（JVM 单测）和 `shellcheck`；全程在临时目录运行，不碰真实服务。想单独跑某一套：
+需要 Python 3、JDK（含 `keytool`）、ShellCheck、Node.js 18+、`curl` 和 `openssl`；不用安装 npm 包。公共入口使用随机回环端口，仅运行一次 Shell/JVM 套件，并用同一份结果核对文档；全程在临时目录运行，不碰真实服务。想单独跑某一套：
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx          # 造夹具（假本体 + 清单变体）
-(cd /tmp/fx && python3 -m http.server 8899) &   # 起静态服务
-TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 80 条
-sh tests/test-watchdog.sh                                 # 看门狗 17 条
+(cd /tmp/fx && python3 -m http.server 8899 --bind 127.0.0.1) &   # 起静态服务
+TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh   # 安装器 90 条
+sh tests/test-watchdog.sh                                 # 看门狗 23 条
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh    # [执行] 菜单 59 条
 sh tests/test-service.sh                                  # 生命周期、进程身份与停止结果 194 条
-sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 275 条
+sh tests/test-lib.sh                                      # 地址/路径/IP/JSON/tag/CA/进程/磁贴入口 313 条
 sh tests/test-tile-check.sh                               # 自查取数、未知值与大输出 122 条
 ```
 
-六个套件共 747 条断言（80 + 17 + 59 + 194 + 275 + 122），另有 446 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8、HTTPS 下载器 12）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
+六个套件共 801 条断言（90 + 23 + 59 + 194 + 313 + 122），另有 453 条 JVM 用例（磁贴状态判定 21、请求顺序 28、自查结论 361、Shell 进程与 URL 回归 16、串行队列 8、HTTPS 下载器 19）。测试使用临时目录与桩进程判定，**不碰正在运行的服务**；这些计数描述套件，不代表所有测试都已在真机上运行。
 
-`run-all.sh` 还运行 106 个 Python unittest（发布 ZIP/构建 34、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 TLS 6）。生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
+`run-all.sh` 另跑 155 个 Python 用例和 13 个 WebUI 用例，覆盖发布、安装、开机生命周期、只读诊断以及异步页面交互；生命周期用例分别使用 SDK 29/35 内存替身，不等于两个 Android 版本的真机测试。启停和安装互斥需要可用的内核 `flock`；脚本自动寻找 PATH 或 Magisk/KernelSU/APatch 自带 BusyBox，不可用时明确拒绝操作。持久的 `.flock` 文件不是遗留垃圾，运行期间不要删除。
 换了端口跑测试时，夹具必须用同一地址生成，否则清单里的下载地址对不上，
 会出现一堆「下载失败」的假失败：
 
 ```sh
 TEST_SRV=http://127.0.0.1:18999
 python3 tests/make-fixtures.py /tmp/fx --base "$TEST_SRV"
-(cd /tmp/fx && python3 -m http.server 18999) &
+(cd /tmp/fx && python3 -m http.server 18999 --bind 127.0.0.1) &
 TEST_SRV="$TEST_SRV" sh tests/test-install.sh
 ```
 
@@ -848,7 +852,9 @@ TEST_SRV="$TEST_SRV" sh tests/test-install.sh
 sh tests/check-counts.sh      # 实测各套件并核对文档，不一致则非零退出
 ```
 
-CI 里也有这一步。
+CI 已在运行套件的同一步核对，无需单独再跑一轮。
+
+本地构建：设置 `MAGPIE_KEYSTORE` 与 `MAGPIE_KS_PASS` 后执行 `sh build.sh dist`。也可复用仓库根目录已签名的 `magpie-tile.apk`；此时会在替换输出前用 `aapt`、`apksigner` 核对包名、版本码、SDK 和预期签名，不接受旧 APK 冒充新磁贴。
 细节与已知缺口见 [tests/README.md](tests/README.md)。
 
 发版先按[发布策略](docs/release-policy.md)配置受保护的 Environment、策略 SHA、不可变 Release 和 tag 规则。模块版本与磁贴版本分别递增；目标 `main` 提交的 CI 通过后推同名 annotated tag。构建机不接触正式密钥；独立签名、发布和更新索引 PR 各自审批。从 `main` 手动触发只核对已有草稿/正式包，不生成新的 tag 证明。

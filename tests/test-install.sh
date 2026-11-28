@@ -108,6 +108,37 @@ step "6 status 报 ready"
 out=$(run status)
 case "$out" in state=ready*"9.9.9"*) ok "ready 且版本正确" ;; *) bad "状态不对：$out" ;; esac
 
+step "6a ready 的状态、版本与结论共享同一份探测结果"
+printf '#!%s\n' "$(command -v sh)" > "$BASE/bin/magpie"
+cat >> "$BASE/bin/magpie" <<'ONCE'
+[ "$1" = --version ] || exit 8
+printf 'probe\n' >> "$0.calls"
+[ "$(wc -l < "$0.calls")" -eq 1 ] || exit 7
+printf 'magpie 9.9.9\n'
+ONCE
+for _cmd in status check install; do
+  rm -f "$BASE/bin/magpie.calls"
+  _out=$(run "$_cmd"); _rc=$?
+  case "$_cmd:$_out" in
+    status:"state=ready version=9.9.9 path=$BASE/bin/magpie"|check:*"已装：  9.9.9"*"已是最新"*|install:*"可用本体（9.9.9），不覆盖"*)
+      if [ "$_rc" -eq 0 ] && [ "$(wc -l < "$BASE/bin/magpie.calls")" -eq 1 ]; then
+        ok "$_cmd 只运行一次 --version 并显示本次版本"
+      else
+        bad "$_cmd 重复探测或失败（rc=$_rc）：$_out"
+      fi ;;
+    *) bad "$_cmd 的就绪状态与版本不一致：$_out" ;;
+  esac
+done
+rm -f "$BASE/bin/magpie.calls"
+_out=$(MAGPIE_DL_TIMEOUT=0 run install --yes); _rc=$?
+case "$_rc:$_out" in
+  1:*MAGPIE_DL_TIMEOUT*整数秒*)
+    [ ! -e "$BASE/bin/magpie.calls" ] && ok "显式重装拒绝禁用总时限；不为覆盖提示额外执行旧本体" || bad "显式重装仍多探测一次" ;;
+  *) bad "未明确拒绝禁用总时限：$_out" ;;
+esac
+_out=$(MAGPIE_DL_STALL=2147484 run plan); _rc=$?
+case "$_rc:$_out" in 1:*MAGPIE_DL_STALL*整数秒*) ok "停滞秒数超出毫秒可表示范围时提前报错" ;; *) bad "未拒绝溢出停滞时限：$_out" ;; esac
+
 step "7 sha256 不匹配时拒绝部署"
 fresh
 out=$(MAGPIE_MANIFEST_URL="$SRV/manifest-bad.json" run install --yes)
@@ -190,6 +221,10 @@ out=$(MAGPIE_MANIFEST_URL="$SRV/nope.json" run install --yes)
 case "$out" in *"取不到更新清单"*) ok "install 提示清晰" ;; *) bad "提示不清：$out" ;; esac
 out=$(MAGPIE_MANIFEST_URL="$SRV/nope.json" run plan)
 case "$out" in *"取不到更新清单"*) ok "plan 同样清晰" ;; *) bad "plan 提示不清：$out" ;; esac
+case "$out" in *"HTTP 响应或重定向失败（curl 退出码 22）"*) ok "保留可诊断的 HTTP 错误分类与退出码" ;; *) bad "HTTP 失败信息丢失：$out" ;; esac
+
+_out=$(MAGPIE_TLS_CA_BUNDLE="$BASE/missing-ca.pem" run plan); _rc=$?
+case "$_rc:$_out" in 1:*无法读取*MAGPIE_TLS_CA_BUNDLE*) ok "curl 的 CA 路径不存在时报配置错误" ;; *) bad "CA 配置错误被当成网络失败：$_out" ;; esac
 
 step "14 并发安装被真实内核锁拦住"
 fresh
@@ -240,7 +275,8 @@ printf '%s\n' "\$CLASSPATH" "\$@" > "$BASE/app-args"
 exit 1
 APP
 chmod 755 "$BASE/nodl/app_process"
-out=$(env PATH="$BASE/nodl" sh "$BASE/scripts/install.sh" plan 2>&1); _rc=$?
+# Java 使用系统 CA；curl 专用的 CA 路径即使不存在也不应阻止它启动。
+out=$(env PATH="$BASE/nodl" MAGPIE_TLS_CA_BUNDLE="$BASE/missing-ca.pem" sh "$BASE/scripts/install.sh" plan 2>&1); _rc=$?
 _args=$(tr '\n' ' ' < "$BASE/app-args" 2>/dev/null)
 case "$_args" in
   "$BASE/magpie-tile.apk / com.ruin.magpie.tile.Fetch $SRV/"*" 1048576 60 1800 ")
@@ -268,6 +304,63 @@ lock_available && ok "信号退出后锁可立即重取" || bad "信号退出后
 if [ -n "$_download" ] && ! kill -0 "$_download" 2>/dev/null; then ok "curl 下载进程被终止并回收"; else bad "下载进程仍存活"; fi
 [ -f "$BASE/bin/magpie" ] && bad "终止后仍部署本体" || ok "终止后没有部署"
 [ -z "$_download" ] || kill -KILL "$_download" 2>/dev/null || :
+
+step "17a 大文件下载中断：进度与计时器不占锁，不等下一次进度才退出"
+fresh
+mkdir -p "$BASE/timer-bin"
+_shell=$(command -v sh); _sleep=$(command -v sleep)
+printf '#!%s\n' "$_shell" > "$BASE/timer-bin/sleep"
+cat >> "$BASE/timer-bin/sleep" <<'TIMER'
+if [ "$1" = 10 ]; then
+  printf '%s %s\n' "$PPID" "$$" > "$TEST_TRANSFER/timer.pids"
+  : > "$TEST_TRANSFER/timer.ready"
+fi
+exec "$TEST_SLEEP" "$@"
+TIMER
+printf '#!%s\n' "$_shell" > "$BASE/partial-fetch"
+cat >> "$BASE/partial-fetch" <<'PARTIAL'
+# 只解释 curl 的 -o FILE -- URL；模拟正常下载到一半，不访问远端。
+while [ "$#" -gt 0 ] && [ "$1" != -o ]; do shift; done
+[ "$#" -eq 4 ] || exit 2
+case "$4" in
+  */manifest.json) cat "$TEST_TRANSFER/large.json" > "$2" ;;
+  */large-body)
+    printf 'part' > "$2" || exit 1
+    printf '%s\n' "$$" > "$TEST_TRANSFER/body.pid"
+    : > "$TEST_TRANSFER/body.ready"
+    exec "$TEST_SLEEP" 15 ;;
+  *) exit 3 ;;
+esac
+PARTIAL
+chmod 755 "$BASE/timer-bin/sleep" "$BASE/partial-fetch"
+printf '{"version":"9.9.9","assets":{"magpie-cli-android-arm64":{"size":5000000,"url":"%s/large-body","sha256":"%064d"}}}\n' \
+  "$SRV" 0 > "$BASE/large.json"
+TEST_TRANSFER="$BASE" TEST_SLEEP="$_sleep" PATH="$BASE/timer-bin:$PATH" MAGPIE_DL="$BASE/partial-fetch" \
+  sh "$BASE/scripts/install.sh" install --yes >"$BASE/partial.log" 2>&1 & INS=$!
+if wait_file "$BASE/timer.ready" && wait_file "$BASE/body.ready"; then
+  read -r _progress _timer < "$BASE/timer.pids"; _body=$(cat "$BASE/body.pid")
+  if [ ! -e "/proc/$_progress/fd/8" ] && [ ! -e "/proc/$_timer/fd/8" ] && ! lock_available; then
+    ok "只有安装器持锁，进度进程和 sleep 都不持 FD 8"
+  else
+    bad "进度进程/计时器继承锁，或安装器未持锁"
+  fi
+else
+  _progress=''; _timer=''; _body=''
+  bad "进度或正文夹具未就绪：$(cat "$BASE/partial.log")"
+fi
+_t0=$(date +%s); kill -TERM "$INS" 2>/dev/null; wait "$INS" 2>/dev/null; _rc=$?
+_elapsed=$(($(date +%s) - _t0))
+if [ "$_rc" -eq 143 ] && [ "$_elapsed" -lt 8 ] && [ -n "$_timer" ] &&
+   ! kill -0 "$_timer" 2>/dev/null && ! kill -0 "$_progress" 2>/dev/null && ! kill -0 "$_body" 2>/dev/null; then
+  ok "取消立即回收下载、进度进程和 sleep，不等完十秒"
+else
+  bad "取消缓慢或留下子进程（rc=$_rc，${_elapsed}s）"
+fi
+if [ -z "$(find "$BASE/bin" -name '.magpie.new.*' -print)" ] && [ ! -e "$BASE/bin/magpie" ] && lock_available; then
+  ok "已丢弃本次半截下载，不部署；内核锁可重取"
+else
+  bad "中断后有临时或正式文件残留，或仍占锁"
+fi
 
 rm -rf "$BASE"
 echo

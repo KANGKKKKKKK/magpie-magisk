@@ -1,7 +1,7 @@
 # 测试
 
 六套脚本都在临时目录运行，并用桩替代服务进程；不会操作真实运行的 magpie。
-当前文档计数为 747 条断言（80 + 17 + 59 + 194 + 275 + 122），另有 446 条 JVM 用例（`ClassifyTest` 21、`TileStateTest` 28、`SelfCheckTest` 361、`ShellTest` 16、`SerialExecutorTest` 8、`FetchTest` 12）。
+当前文档计数为 801 条断言（90 + 23 + 59 + 194 + 313 + 122），另有 453 条 JVM 用例（`ClassifyTest` 21、`TileStateTest` 28、`SelfCheckTest` 361、`ShellTest` 16、`SerialExecutorTest` 8、`FetchTest` 19）。
 
 - **桌面 Linux**：公共入口为 `sh tests/run-all.sh`；JVM 直接编译生产类，不再复制磁贴判定实现。计数描述当前套件，实际通过情况以对应运行记录为准。
 - **突变检验**：把安装器换回旧黑名单、把磁贴判据换回旧 `sed` 范围后，分别有 7 / 8 条断言失败；计数校验在「合计写错、分项仍对」时也会失败。这些用例不是只按新实现写的。
@@ -9,16 +9,18 @@
 
 | 套件 | 断言数 | 测什么 |
 | --- | --- | --- |
-| `test-install.sh` | 80 | 安装预检、下载、互斥及事务回退 |
-| `test-watchdog.sh` | 17 | 看门狗的决定逻辑（含循环体抽取自检、起来就崩的退避） |
+| `test-install.sh` | 90 | 安装预检、下载、互斥及事务回退 |
+| `test-watchdog.sh` | 23 | 看门狗的决定逻辑（含循环体抽取自检、起来就崩的退避） |
 | `test-action.sh` | 59 | `[执行]` 菜单：安装分支、退路一键启停、子命令、按键解析、两种界面模式、收尾关窗口、仅本机重试、控制器失败与外部浏览器交接 |
 | `test-service.sh` | 194 | 配置语法错误回退、同端口拒绝、卸载失败路径清理 CLI 链接、版本缓存、进程清理、开机目录、配置路径、DNS 生成、状态输出与配置来源、看门狗等开机、服务脱离调用者会话、卸载/禁用门槛、已核验的面板地址 |
-| `test-lib.sh` | 275 | `lib.sh` 纯函数：地址切分、端口边界、回环判定（含 IPv6 大小写）、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转、持久目录白名单、IPv4/IPv6 TCP 监听归属、磁贴入口对账、用户配置生成 |
+| `test-lib.sh` | 313 | `lib.sh` 纯函数：地址切分、端口边界、回环判定（含 IPv6 大小写）、IPv4/IPv6 格式、DNS 过滤、JSON 转义、发布 tag、CA 合并、日志轮转、持久目录白名单、IPv4/IPv6 TCP 监听归属、磁贴入口对账、用户配置生成 |
 | `test-tile-check.sh` | 122 | 自查完成标记、命令失败、安装/服务/绘制/进程/cgroup 未知值与只读取数 |
 
-公共入口另跑 106 个 Python unittest：发布 ZIP/构建 34，磁贴版本门槛 9，TileService 生命周期 18，桌面图标 3，doctor 磁贴段 25，发布策略 11，安装 HTTPS/TLS 6。TLS 用一次性 CA 和回环服务器校验可信连接、拒绝不可信证书/协议降级；磁贴用 SDK 29/35 内存替身，不等于 Android 真机覆盖。正式 CI 另用临时签名真实构建 APK/ZIP。
+公共入口另跑 155 个 Python unittest：发布 ZIP/构建 36、磁贴版本门槛 9、TileService 生命周期 18、桌面图标 3、doctor 磁贴段 25、发布策略 11、安装 HTTPS/TLS 6、计数入口 3、开机策略 18、磁贴选装 19、运行边界 7。另外用 `node --test tests/test-webui.js` 跑 13 个行为用例，直接执行打包 HTML 的 JavaScript，不需要浏览器、Android 或 npm 包。TLS 用一次性 CA 和回环服务器校验可信连接、拒绝不可信证书/协议降级；磁贴用 SDK 29/35 内存替身，不等于 Android 真机覆盖。正式 CI 另用临时签名真实构建 APK/ZIP。
 
-需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service、lib 不需要。
+公共入口使用 Python 绑定随机回环端口后才生成夹具，为各套件单独指定 `TEST_BASE`；按照同一次运行的返回码与 PASS/FAIL/SKIP 输出核对文档，不再为计数重复跑整套。
+
+手动分开运行时，需要夹具的套件（install、action）要先起一个静态文件服务；watchdog、service、lib 不需要。
 换端口跑时，夹具必须用同一地址生成，否则清单里的下载地址对不上，会看到一堆假失败：
 
 ```sh
@@ -69,7 +71,7 @@ sh tests/test-watchdog.sh
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx
-(cd /tmp/fx && python3 -m http.server 8899) &
+(cd /tmp/fx && python3 -m http.server 8899 --bind 127.0.0.1) &
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
 ```
 
@@ -91,7 +93,7 @@ TEST_SRV=http://127.0.0.1:8899 sh tests/test-action.sh
 
 ```sh
 python3 tests/make-fixtures.py /tmp/fx
-(cd /tmp/fx && python3 -m http.server 8899) &
+(cd /tmp/fx && python3 -m http.server 8899 --bind 127.0.0.1) &
 TEST_SRV=http://127.0.0.1:8899 sh tests/test-install.sh
 ```
 
@@ -143,7 +145,7 @@ sh tests/test-service.sh
 
 ## 在 Android 上跑
 
-Android 上还要验证管理器的精简 `PATH`。如果设备没有可执行的可信 `curl`，安装器明确提示失败，不回退到 BusyBox wget。不要在测试中更改正在使用的模块或数据目录。使用完整 checkout；控制器和测试必须来自同一份工作树，安装器/Action 夹具可在主机使用 `tests/run-all.sh` 验证。需要在 Android 上重复部分 Shell 回归时，单独指定新建的测试目录，保留 `/system/bin/sh` 的真实 PATH，并在隔离设备上进行；不要让测试清理任何配好的模块目录。
+Android 上还要验证管理器的精简 `PATH`。若没有可信的 `curl`，安装器可经 `app_process` 运行包内 `Fetch`；两路都不可用时明确失败，不回退到 BusyBox wget。不要在测试中更改正在使用的模块或数据目录。使用完整 checkout；控制器和测试必须来自同一份工作树，安装器/Action 夹具可在主机使用 `tests/run-all.sh` 验证。需要在 Android 上重复部分 Shell 回归时，单独指定新建的测试目录，保留 `/system/bin/sh` 的真实 PATH，并在隔离设备上进行；不要让测试清理任何配好的模块目录。
 
 ## 真机上的额外验证（不在 CI 里）
 

@@ -3,7 +3,7 @@
 
 The Android tools are deterministic fakes. These tests exercise fail-closed
 orchestration and parsing, not Android's cryptographic implementation. Counts
-are independent of check-counts.sh's original five shell suites.
+are independent of the counted Shell/JVM suites.
 """
 import json
 import os
@@ -290,6 +290,7 @@ class TileBuildTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="magpie-tile-build-")
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
+        self.out = self.base / "out"
         self.tile = self.base / "tile-app"
         self.tile.mkdir()
         shutil.copyfile(ROOT / "tile-app/build.sh", self.tile / "build.sh")
@@ -297,7 +298,8 @@ class TileBuildTest(unittest.TestCase):
         (self.tile / "res").mkdir()
         src = self.tile / "src/com/ruin/magpie/tile"
         src.mkdir(parents=True)
-        for name in ("MagpieTileService", "MainActivity", "LauncherIcon", "Shell"):
+        for name in ("MagpieTileService", "MainActivity", "LauncherIcon", "Shell",
+                     "SelfCheck", "TileState", "SerialExecutor", "Fetch"):
             (src / (name + ".java")).write_text("// fixture, not real Android source\n")
         self.bin = self.base / "bin"
         self.sdk = self.base / "sdk"
@@ -328,14 +330,22 @@ if name == "aapt":
 elif name == "javac":
     if os.environ.get("MOCK_JAVAC_RC"):
         sys.exit(int(os.environ["MOCK_JAVAC_RC"]))
-    for source in (p for p in args if p.endswith(".java")):
-        p = Path(arg("-d")) / "com/ruin/magpie/tile" / (Path(source).stem + ".class")
+    sources = [Path(a) for a in args[args.index("-d") + 2:]]
+    assert sources and all(s.is_file() and s.suffix == ".java" for s in sources), sources
+    for source in sources:
+        if source.stem == os.environ.get("MOCK_SKIP_CLASS"):
+            continue
+        p = Path(arg("-d")) / "com/ruin/magpie/tile" / (source.stem + ".class")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(b"fake class")
 elif name == "d8":
     if os.environ.get("MOCK_D8_RC"):
         sys.exit(int(os.environ["MOCK_D8_RC"]))
-    (Path(arg("--output")) / "classes.dex").write_bytes(b"".join(b"Lcom/ruin/magpie/tile/" + n + b";" for n in (b"MagpieTileService", b"MainActivity", b"LauncherIcon", b"Shell", b"SelfCheck", b"TileState", b"SerialExecutor", b"Fetch")))
+    classes = [Path(a) for a in args[args.index("--output") + 2:]]
+    assert classes and all(c.is_file() and c.suffix == ".class" for c in classes), classes
+    (Path(arg("--output")) / "classes.dex").write_bytes(b"".join(
+        b"Lcom/ruin/magpie/tile/" + c.stem.encode() + b";" for c in classes
+        if c.stem != os.environ.get("MOCK_SKIP_DEX")))
 elif name == "zipalign":
     shutil.copyfile(args[-2], args[-1])
 elif name == "apksigner":
@@ -359,15 +369,16 @@ elif name == "apksigner":
         self.fake_password = "test-only-password-never-in-argv"
         self.env.update({
             "PATH": str(self.bin) + os.pathsep + self.env["PATH"],
-            "ANDROID_SDK": str(self.sdk), "ANDROID_JAR": str(jar),
+            "ANDROID_SDK": str(self.sdk), "ANDROID_JAR": str(jar), "MAGPIE_BUILD_TOOLS": str(bt),
             "MAGPIE_KEYSTORE": str(fake_key), "MAGPIE_KS_PASS": self.fake_password,
             "MOCK_SIGN_CALLS": str(self.calls),
         })
-        for key in ("MOCK_NO_R", "MOCK_JAVAC_RC", "MOCK_D8_RC", "MOCK_SIGN_RC", "MOCK_BUILD_VERIFY_RC"):
+        for key in ("MOCK_NO_R", "MOCK_JAVAC_RC", "MOCK_D8_RC", "MOCK_SIGN_RC",
+                    "MOCK_BUILD_VERIFY_RC", "MOCK_SKIP_CLASS", "MOCK_SKIP_DEX"):
             self.env.pop(key, None)
 
     def run_build(self, success=True, message=None, mode=None):
-        result = subprocess.run(["sh", str(self.tile / "build.sh"), *([mode] if mode else []), str(self.base / "out")],
+        result = subprocess.run(["sh", str(self.tile / "build.sh"), *([mode] if mode else []), str(self.out)],
                                 cwd=self.base, env=self.env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
         self.assertEqual(result.returncode == 0, success, result.stdout)
@@ -383,6 +394,25 @@ elif name == "apksigner":
         self.assertFalse(self.calls.exists())
         self.assertTrue((self.base / "out/magpie-tile-unsigned.apk").is_file())
         self.assertFalse((self.base / "out/magpie-tile.apk").exists())
+
+    def test_source_and_output_paths_with_spaces(self):
+        self.tile = self.tile.rename(self.base / "source with spaces")
+        self.out = self.base / "output with spaces"
+        self.run_build(mode="--unsigned")
+        self.assertTrue((self.out / "magpie-tile-unsigned.apk").is_file())
+        self.assertFalse(self.calls.exists())
+
+    def test_missing_class_or_descriptor_preserves_previous_output(self):
+        self.out.mkdir()
+        previous = self.out / "magpie-tile-unsigned.apk"
+        previous.write_bytes(b"previous good build")
+        for flag, message in (("MOCK_SKIP_CLASS", "编译产物缺失"), ("MOCK_SKIP_DEX", "dex 里缺少 Shell")):
+            with self.subTest(flag=flag):
+                self.env[flag] = "Shell"
+                self.run_build(False, message, mode="--unsigned")
+                del self.env[flag]
+                self.assertEqual(previous.read_bytes(), b"previous good build")
+                self.assertFalse(list(self.out.glob(".tile-build.*")))
 
     def test_sign_uses_environment_references_not_password_arguments(self):
         self.run_build()
